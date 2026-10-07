@@ -2,7 +2,7 @@
 
 How tall the main character is as a share of screen height in classic 2D games, and the sprite height that keeps that share in a 16:9 game. Interactive version: https://claude.ai/artifact/Jv1VrzgNjgmiH4LgAQg1SR (private to Kevin).
 
-Heights are the standing body in game pixels (no sideways weapons, shadows or HUD). NES/SNES/Genesis/CPS1 use the 224 visible NTSC lines, GBA 160, Game Boy 144. Targets are the median of the classic games in each row; modern games are reference only. Only 320x180 and 640x360 scale by a whole number to 1080p, 1440p and 4K. Photo conversion stays recognizable from about 48 px tall (our own astronaut tests).
+Heights are the standing body in game pixels (no sideways weapons, shadows or HUD). NES/SNES/Genesis/CPS1 use the 224 visible NTSC lines, GBA 160, Game Boy 144. Targets are the median of the classic games in each row; modern games are reference only. Kevin's games render at 1080p (4K is exactly 2x), so any base that divides 1080 works: 320x180 (x6), 384x216 (x5), 480x270 (x4), 640x360 (x3). Sprite height = share x base height. Photo conversion stays recognizable from about 48 px tall (our own astronaut tests).
 
 | Genre | Classic range | Median | 320x180 | 640x360 |
 |---|---|---|---|---|

@@ -44,8 +44,9 @@ wants terse answers and fixes over polish.
   JS port in `web/index.html` must stay in sync.
 - **Sprite scale research** (`docs/SPRITE_SCALE.md`, interactive page artifact
   Jv1VrzgNjgmiH4LgAQg1SR): character height as a share of screen height for 41 classic
-  games by genre, and the matching sprite heights at 320x180 / 640x360. Kevin's new game
-  targets 4K; those are the only bases that scale by whole numbers to 1080p/1440p/4K.
+  games by genre, and the matching sprite heights. Kevin decided all his games render at
+  1080p (4K = exactly 2x), so valid pixel-art bases are 320x180 (x6), 384x216 (x5),
+  480x270 (x4) and 640x360 (x3).
 - **Prompt → sprite** has three routes. (1) Claude draws it: `drawing.py`
   (`sprite_from_rows`), MCP `draw_sprite`, and the web app's "Draw from a prompt" via the
   artifact `sample` capability, which is hidden in the APK. (2) Local GPU: `generate.py`
