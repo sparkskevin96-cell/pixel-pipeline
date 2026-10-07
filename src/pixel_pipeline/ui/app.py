@@ -11,22 +11,24 @@ import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QInputDialog, QLabel, QMainWindow, QMessageBox, QScrollArea, QSpinBox, QSplitter,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+    QFormLayout, QGroupBox, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
+from ..animate import IDLE_STYLES, idle_frames
 from ..aseprite import write_aseprite
-from ..export import write_animation
 from ..cutout import CutoutUnavailable, remove_background
+from ..export import write_animation
 from ..palettes import BUILTIN
 from ..pipeline import finish, load_image, prepare
 from ..pixelize import DOWNSCALE_MODES
 from ..quantize import DITHER_MODES
-from ..animate import IDLE_STYLES, idle_frames
 from ..settings import ANCHORS, FITS, OUTLINE_STYLES, SUBJECTS, Settings, settings_for
+from ..video import ALIGN_MODES, video_to_sprites
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.gif)"
+VIDEO_FILTER = "Videos (*.mp4 *.mov *.m4v *.avi *.webm *.mkv)"
 CUTOUT_MODELS = ["isnet-general-use", "u2net_human_seg", "birefnet-general", "birefnet-portrait", "u2net"]
 LOAD_FILE, LOSPEC = "Load file…", "Lospec…"
 ORIGINAL_MAX = 420
@@ -74,6 +76,10 @@ class MainWindow(QMainWindow):
         self.source_path: Path | None = None
         self.alpha_cache: dict[str, np.ndarray] = {}
         self.sprite = None
+        self.anim: dict | None = None  # {"frames", "ms", "palette", "tag", "path"} from a video
+        self._anim_i = 0
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._next_anim_frame)
         self._loading = False
         self._palette_prev = "auto"
 
@@ -182,8 +188,15 @@ class MainWindow(QMainWindow):
             ("Export &PNG…", "Ctrl+E", self.export_png),
             ("Export .&aseprite…", "Ctrl+Shift+E", self.export_aseprite),
             ("Export &idle animation…", "Ctrl+I", self.export_idle),
+            (None, None, None),
+            ("Open &video…", "Ctrl+Shift+O", self.open_video),
+            ("Export video a&nimation…", "Ctrl+Shift+A", self.export_video_animation),
+            (None, None, None),
             ("&Quit", QKeySequence.Quit, self.close),
         ):
+            if text is None:
+                menu.addSeparator()
+                continue
             action = QAction(text, self)
             action.setShortcut(shortcut)
             action.triggered.connect(slot)
@@ -293,6 +306,7 @@ class MainWindow(QMainWindow):
     def render(self):
         if self.source is None:
             return
+        self._stop_anim()
         s = self.current_settings()
         try:
             rgba = self._isolated(s)
@@ -320,11 +334,91 @@ class MainWindow(QMainWindow):
                                                 Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def show_sprite(self, *_):
-        if self.sprite is None:
-            return
+        if self.anim is not None:
+            self._show_rgba(self.anim["frames"][self._anim_i])
+        elif self.sprite is not None:
+            self._show_rgba(self.sprite.rgba)
+
+    def _show_rgba(self, rgba: np.ndarray):
         z = self.zoom.value()
-        big = np.repeat(np.repeat(self.sprite.rgba, z, 0), z, 1)
+        big = np.repeat(np.repeat(rgba, z, 0), z, 1)
         self.sprite_view.setPixmap(to_pixmap(checkerboard(big, cell=max(4, z))))
+
+    # ---- video -----------------------------------------------------------------
+    def _stop_anim(self):
+        self._anim_timer.stop()
+        self.anim = None
+
+    def _next_anim_frame(self):
+        if self.anim is None:
+            return
+        self._anim_i = (self._anim_i + 1) % len(self.anim["frames"])
+        self.show_sprite()
+
+    def open_video(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open video", "", VIDEO_FILTER)
+        if not path:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Video to animation")
+        form = QFormLayout(dlg)
+        frames, start, end = _spin(2, 64), _spin(0, 3600, 0.1, 2), _spin(0, 3600, 0.1, 2)
+        frames.setValue(8)
+        end.setSpecialValueText("end of clip")
+        align, tag = _combo(ALIGN_MODES), QLineEdit("walk")
+        form.addRow("Frames", frames)
+        form.addRow("Start (s)", start)
+        form.addRow("End (s)", end)
+        form.addRow("Align", align)
+        form.addRow("Animation name", tag)
+        form.addRow(QLabel("Uses the current settings on the left. 'track' animates in place."))
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.load_video(Path(path), frames.value(), start.value() or None, end.value() or None,
+                        align.currentText(), tag.text().strip() or "walk")
+
+    def load_video(self, path: Path, frames: int = 8, start=None, end=None, align="track",
+                   tag="walk"):
+        self.statusBar().showMessage(f"Converting {path.name}… (background removal runs per frame)")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            sprites, ms = video_to_sprites(path, self.current_settings(), frames, start, end,
+                                           align=align)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Video conversion failed", str(e))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.anim = {"frames": [s.rgba for s in sprites], "ms": ms, "palette": sprites[0].palette,
+                     "tag": tag, "path": path}
+        self._anim_i = 0
+        self._anim_timer.start(ms)
+        self.show_sprite()
+        w, h = sprites[0].size
+        self.statusBar().showMessage(
+            f"{path.name}: {len(sprites)} frames {w}×{h} @ {ms} ms · File → Export video animation")
+
+    def export_video_animation(self):
+        if self.anim is None:
+            QMessageBox.information(self, "No animation", "Open a video first (File → Open video).")
+            return
+        stem = self.anim["path"].stem
+        default = str(self.anim["path"].parent / f"{stem}.{self.anim['tag']}.png")
+        path, _ = QFileDialog.getSaveFileName(self, "Export animation", default, "Sprite sheet (*.png)")
+        if not path:
+            return
+        try:
+            written = write_animation(self.anim["frames"], Path(path), self.anim["ms"],
+                                      self.anim["tag"], aseprite=True, godot=True,
+                                      palette=self.anim["palette"])
+            self.statusBar().showMessage("Saved " + ", ".join(p.name for p in written))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Export failed", str(e))
 
     # ---- files -----------------------------------------------------------------
     def open_dialog(self):
