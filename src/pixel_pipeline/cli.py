@@ -1,4 +1,4 @@
-"""Command line: pixel-pipeline convert | video | idle | parallax | sheet | tileset | palettes"""
+"""Command line: pixel-pipeline convert | generate | video | idle | parallax | sheet | tileset | palettes"""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +10,7 @@ from .animate import IDLE_MS, IDLE_STYLES, idle_frames
 from .aseprite import write_aseprite
 from .cutout import CutoutUnavailable
 from .export import load_rgba, load_sprite, write_animation, write_tileset
+from .generate import ComfyClient, ComfyUIError
 from .godot import write_tileset as write_godot_tileset
 from .palettes import BUILTIN
 from .pipeline import convert_batch
@@ -115,6 +116,78 @@ def _cmd_convert(a) -> int:
         w, h = sprite.size
         print(f"{path.name} -> {', '.join(str(p) for p in written)} "
               f"({w}x{h}, {len(sprite.palette)} colours)")
+    return 0
+
+
+# ---- generate (local GPU via ComfyUI) --------------------------------------------------------
+
+def _add_generate(sub):
+    p = sub.add_parser("generate", help="text prompt -> sprite, made on your own GPU (ComfyUI)",
+                       description="Generate pixel art from a prompt with ComfyUI running on this PC "
+                                   "(see docs/LOCAL_AI.md), then snap it to your size, palette and "
+                                   "retro system like any photo.")
+    p.add_argument("prompt", nargs="?", help='what to make, e.g. "a knight with a red cape"')
+    p.add_argument("-o", "--out", type=Path, help="output .png (default: named after the prompt)")
+    p.add_argument("--check", action="store_true", help="check ComfyUI and the models, then exit")
+    p.add_argument("--count", type=int, default=1, help="how many variations (different seeds)")
+    p.add_argument("--seed", type=int, help="re-make one you liked")
+    p.add_argument("--fast", action="store_true", help="LCM-LoRA: ~3x faster, a little rougher")
+    p.add_argument("--init", type=Path, help="start from this sketch (img2img), e.g. a sprite Claude drew")
+    p.add_argument("--denoise", type=float, default=0.6, help="how much the GPU may change --init (0-1)")
+    p.add_argument("--template", type=Path, help="your own ComfyUI workflow (API format) with {{placeholders}}")
+    p.add_argument("--checkpoint", help="checkpoint file in ComfyUI/models/checkpoints")
+    p.add_argument("--lora", help='LoRA in ComfyUI/models/loras ("none" to turn off)')
+    p.add_argument("--vae", help="VAE in ComfyUI/models/vae")
+    p.add_argument("--negative", help="negative prompt (default: a built-in one)")
+    p.add_argument("--raw-prompt", action="store_true", help="send the prompt exactly as typed")
+    p.add_argument("--steps", type=int)
+    p.add_argument("--cfg", type=float)
+    p.add_argument("--comfyui", help="ComfyUI address (default $COMFYUI_URL or http://127.0.0.1:8188)")
+    p.add_argument("--scale", type=int, default=1, help="also upscale the PNG (nearest) by N")
+    p.add_argument("--aseprite", action="store_true", help="also write .aseprite")
+    _add_setting_args(p)
+    p.set_defaults(func=_cmd_generate)
+
+
+def _gen_options(a) -> dict:
+    opts = dict(fast=a.fast or None, checkpoint=a.checkpoint, lora=a.lora, vae=a.vae,
+                negative=a.negative, steps=a.steps, cfg=a.cfg,
+                template=str(a.template) if a.template else None,
+                shape_prompt=False if a.raw_prompt else None)
+    return {k: v for k, v in opts.items() if v is not None}
+
+
+def _cmd_generate(a) -> int:
+    from .generate import check_setup, generate_sprite
+    client = ComfyClient(a.comfyui) if a.comfyui else None
+    if a.check:
+        ok, report = check_setup(client, **_gen_options(a))
+        print(report)
+        return 0 if ok else 1
+    if not a.prompt:
+        raise SystemExit('error: give a prompt, e.g. pixel-pipeline generate "a red fox" -s animal')
+    if a.init and not a.init.exists():
+        raise SystemExit(f"error: {a.init} not found")
+    settings = _settings(a)
+    results = generate_sprite(a.prompt, settings, client=client, subject=a.subject,
+                              system=None if settings.system == "off" else settings.system,
+                              seed=a.seed, count=a.count, init_image=a.init, denoise=a.denoise,
+                              **_gen_options(a))
+    slug = "-".join("".join(c if c.isalnum() else " " for c in a.prompt.lower()).split())[:40]
+    out = a.out or Path(f"{slug or 'sprite'}.png")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for i, (sprite, raw, seed) in enumerate(results, 1):
+        path = out if len(results) == 1 else out.with_name(f"{out.stem}-{i}{out.suffix}")
+        sprite.save(path, a.scale)
+        raw_path = path.with_name(path.stem + ".raw.png")
+        raw.save(raw_path)
+        written = [path, raw_path]
+        if a.aseprite:
+            ase = path.with_suffix(".aseprite")
+            write_aseprite(ase, [sprite.rgba], sprite.palette)
+            written.append(ase)
+        w, h = sprite.size
+        print(f"seed {seed}: {', '.join(str(p) for p in written)} ({w}x{h}, {len(sprite.palette)} colours)")
     return 0
 
 
@@ -270,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
     _add_convert(sub)
+    _add_generate(sub)
     _add_video(sub)
     _add_idle(sub)
     _add_parallax(sub)
@@ -279,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (CutoutUnavailable, ValueError) as e:
+    except (CutoutUnavailable, ComfyUIError, ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 

@@ -198,6 +198,7 @@ class MainWindow(QMainWindow):
             ("Export &idle animation…", "Ctrl+I", self.export_idle),
             (None, None, None),
             ("Open &video…", "Ctrl+Shift+O", self.open_video),
+            ("&Generate from prompt (local GPU)…", "Ctrl+G", self.generate_dialog),
             ("Export video a&nimation…", "Ctrl+Shift+A", self.export_video_animation),
             (None, None, None),
             ("&Quit", QKeySequence.Quit, self.close),
@@ -439,10 +440,38 @@ class MainWindow(QMainWindow):
 
     def open_path(self, path: Path):
         try:
-            self.source = load_image(path)
+            rgba = load_image(path)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Couldn't open image", f"{path}\n\n{e}")
             return
+        self.set_source(rgba, path)
+
+    def generate_dialog(self):
+        """Prompt -> ComfyUI on this PC -> the raw image becomes the source, so every setting
+        on the left still applies live."""
+        prompt, ok = QInputDialog.getText(self, "Generate from prompt",
+                                          "What should your GPU make? (needs ComfyUI running, see docs/LOCAL_AI.md)")
+        if not ok or not prompt.strip():
+            return
+        from ..generate import ComfyUIError, generate_sprite
+        s = self.current_settings()
+        self.statusBar().showMessage(f"Generating “{prompt}” on your GPU…")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            (_, raw, seed), = generate_sprite(prompt, s, subject=s.subject,
+                                              system=None if s.system == "off" else s.system)
+        except (ComfyUIError, ValueError) as e:
+            QMessageBox.warning(self, "Generation failed", str(e))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        slug = "-".join("".join(c if c.isalnum() else " " for c in prompt.lower()).split())[:40]
+        self.set_source(load_image(raw), Path.cwd() / f"{slug or 'generated'}.png")
+        self.statusBar().showMessage(f"Generated “{prompt}” (seed {seed}). Tweak anything on the left.")
+
+    def set_source(self, rgba, path: Path):
+        self.source = rgba
         self.source_path = path
         self.alpha_cache = {}
         self.setWindowTitle(f"pixel-pipeline — {path.name}")

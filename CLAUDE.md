@@ -34,6 +34,17 @@ wants terse answers and fixes over polish.
   contract stable. The file is a fragment (no doctype/html/head) because the artifact
   host wraps it; the app wraps it in `tool/sync_web.dart`. Re-publish the artifact after
   editing it.
+- **Retro systems** (`systems.py`): `system` setting (nes, snes, gameboy, gbc, sms,
+  genesis, gba, pico8). It applies original hardware palettes or colour depths, colours
+  per sprite, sizes per subject and outline style over the subject preset; explicit
+  settings still win. The JS port in `web/index.html` must stay in sync.
+- **Prompt → sprite** has three routes. (1) Claude draws it: `drawing.py`
+  (`sprite_from_rows`), MCP `draw_sprite`, and the web app's "Draw from a prompt" via the
+  artifact `sample` capability, which is hidden in the APK. (2) Local GPU: `generate.py`
+  (ComfyUI HTTP client, SDXL + Pixel Art XL LoRA; setup in `docs/LOCAL_AI.md`), CLI
+  `generate`, MCP `generate_sprite`, desktop File → Generate. (3) The mix: Claude
+  sketches with `draw_sprite`, then `generate_sprite(init_image=...)`. Never verified on a
+  real GPU from the cloud container, so Kevin's first run is the real test.
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 
@@ -51,6 +62,7 @@ wants terse answers and fixes over polish.
   undoes upscaled exports), `aseprite.py`, `godot.py`
 - `cli.py` (convert, video, idle, sheet, tileset, palettes), `ui/app.py` (desktop),
   `mcp_server.py` (MCP tools for Claude; needs mcp>=2)
+- `systems.py` (retro looks), `drawing.py` (text-row sprites), `generate.py` (ComfyUI)
 - `depth.py` + `parallax.py`: depth-based parallax layers + Godot Parallax2D scene
 - `packaging/` (PyInstaller spec), `.github/workflows/ci.yml` (tests on win+linux, exe on
   main), `.github/workflows/android.yml` (APK + `android-latest` release)

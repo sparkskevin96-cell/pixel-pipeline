@@ -52,7 +52,8 @@ async def _session(tmp_path: Path) -> None:
     photo = _cut_out_photo(tmp_path / "blob.png")
     out = tmp_path / "out"
     params = StdioServerParameters(command=sys.executable, args=["-m", "pixel_pipeline.mcp_server"],
-                                   cwd=str(tmp_path), env={"PYTHONPATH": str(SRC)})
+                                   cwd=str(tmp_path), env={"PYTHONPATH": str(SRC),
+                                                             "COMFYUI_URL": "http://127.0.0.1:9"})
     async with Client(stdio_client(params), read_timeout_seconds=60) as client:
         assert client.server_info.name == "pixel-pipeline"
         names = {t.name for t in (await client.list_tools()).tools}
@@ -127,6 +128,9 @@ async def _session(tmp_path: Path) -> None:
             "system": "nes"})
         assert not drew.is_error, _text(drew)
         assert Image.open(tmp_path / "gem@1x.png").size == (6, 5) and "NES" in _text(drew)
+
+        gen = await client.call_tool("generate_sprite", {"prompt": "a fox", "out_png": str(tmp_path / "fox.png")})
+        assert gen.is_error and "run_nvidia_gpu" in _text(gen)   # no ComfyUI here: helpful error
 
 
 def test_mcp_server_over_stdio(tmp_path):

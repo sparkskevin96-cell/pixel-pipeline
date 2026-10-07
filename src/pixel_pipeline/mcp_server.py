@@ -32,6 +32,7 @@ from pydantic import Field
 from . import __version__
 from .aseprite import write_aseprite
 from .cutout import CutoutUnavailable
+from .generate import ComfyUIError
 from .animate import IDLE_MS, IDLE_STYLES, idle_frames
 from .export import load_rgba, load_sprite, write_animation, write_tileset
 from .godot import write_tileset as write_godot_tileset
@@ -94,6 +95,8 @@ def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
         except CutoutUnavailable as e:
             raise ToolError(f"{e}. Pass remove_background=false for photos that already have "
                             "a transparent background, or for scenes.") from e
+        except ComfyUIError as e:
+            raise ToolError(str(e)) from e
         except UnidentifiedImageError as e:
             raise ToolError(f"Not a readable image: {e}") from e
         except (ValueError, OSError) as e:
@@ -653,6 +656,70 @@ def parallax_layers(
     with Image.open(res["preview"]) as prev:
         preview, factor = _enlarge(prev)
     return [text + f"\nPreview: all layers stacked, enlarged x{factor}.", _png(preview)]
+
+
+@tool(title="Generate a sprite on the local GPU", open_world=True, extra_doc=_presets_doc())
+def generate_sprite(
+    prompt: Annotated[str, Field(description="What to make, e.g. 'a knight with a red cape'. Plain "
+                                             "words; it is wrapped into a sprite prompt for `subject`.")],
+    out_png: Annotated[str, Field(description="Output .png; the raw AI image is saved as <stem>.raw.png.")],
+    subject: Annotated[Subject, Field(description="Shapes the prompt and the conversion preset.")] = "object",
+    system: Annotated[RetroSystem, Field(description=SYSTEM_DOC)] = "off",
+    width: Annotated[int | None, Field(ge=1, le=1024, description="Sprite width. null = preset/system.")] = None,
+    height: Annotated[int | None, Field(ge=0, le=1024, description="Sprite height. null = preset/system.")] = None,
+    palette: Annotated[str, Field(description="Same values as convert_photos (ignored with a system).")] = "auto",
+    colors: Annotated[int | None, Field(ge=2, le=256, description="Palette size. null = preset/system.")] = None,
+    count: Annotated[int, Field(ge=1, le=8, description="Variations to make (different seeds).")] = 1,
+    seed: Annotated[int | None, Field(description="Re-make a specific result.")] = None,
+    fast: Annotated[bool, Field(description="LCM-LoRA: ~3x faster, a little rougher.")] = False,
+    init_image: Annotated[str | None, Field(
+        description="Sketch to start from (img2img), e.g. a draw_sprite @1x PNG: you draw the "
+                    "layout/colours, the GPU adds detail, the converter snaps it back.")] = None,
+    denoise: Annotated[float, Field(ge=0.05, le=1.0, description="How much the GPU may change init_image.")] = 0.6,
+    negative: Annotated[str | None, Field(description="Negative prompt (null = built-in).")] = None,
+    scale: Annotated[int, Field(ge=1, le=32, description="Enlargement for the viewing PNG.")] = 8,
+    aseprite: Annotated[bool, Field(description="Also write .aseprite files.")] = False,
+    extra_settings: Annotated[dict[str, str | int | float | bool] | None, Field(
+        description="Any other conversion setting, as in convert_photos.")] = None,
+) -> ToolOutput:
+    """Make pixel art from a text prompt on the user's own NVIDIA GPU (ComfyUI + SDXL + Pixel
+    Art XL LoRA running locally; setup in docs/LOCAL_AI.md), then convert it exactly like a
+    photo (cut-out, size, palette, retro system, outline). Each image takes ~5-15 s. Look at
+    the preview: re-run with another seed/count, a sharper prompt, or draw_sprite a sketch and
+    pass it as init_image. If ComfyUI isn't running the error says how to start it."""
+    from .generate import generate_sprite as _generate
+    explicit = {"width": width, "height": height, "palette": None if system != "off" else palette,
+                "colors": colors, "system": system}
+    settings = _build_settings(subject, explicit, extra_settings)
+    out = _output_png(out_png)
+    init = _input_files([init_image])[0] if init_image else None
+    opts = {k: v for k, v in {"fast": fast or None, "negative": negative}.items() if v is not None}
+    with _work_lock:
+        results = _generate(prompt, settings, subject=subject,
+                            system=None if system == "off" else system, seed=seed, count=count,
+                            init_image=init, denoise=denoise, **opts)
+    lines, labels = [], []
+    for i, (sprite, raw, used_seed) in enumerate(results, 1):
+        path = out if len(results) == 1 else out.with_name(f"{out.stem}-{i}{out.suffix}")
+        one_x = path.with_name(path.stem + "@1x.png")
+        raw_path = path.with_name(path.stem + ".raw.png")
+        sprite.save(path, scale)
+        sprite.save(one_x, 1)
+        raw.save(raw_path)
+        line = f"{i}. seed {used_seed}: {path} | 1x {one_x} | raw {raw_path}"
+        if aseprite:
+            ase = path.with_suffix(".aseprite")
+            write_aseprite(ase, [sprite.rgba], sprite.palette)
+            line += f" | {ase}"
+        lines.append(line)
+        labels.append(f"{i} seed {used_seed}")
+    w, h = results[0][0].size
+    text = f"Generated {len(results)} sprite(s) {w}x{h} for '{prompt}':\n" + "\n".join(lines)
+    if len(results) == 1:
+        preview, _ = _enlarge(Image.fromarray(results[0][0].rgba, "RGBA"))
+    else:
+        preview = _contact_sheet([r[0].rgba for r in results], labels)
+    return [text + "\nPreview: the converted sprite(s).", _png(preview)]
 
 
 @tool(title="Draw a sprite pixel by pixel")

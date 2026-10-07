@@ -43,6 +43,8 @@ iPhone `.heic` photos work out of the box.
 
 ## On your phone
 
+- **Draw from a prompt** (web version): Claude draws the sprite pixel by pixel at your
+  size, colours and retro system, using your Claude account.
 - **Web app**, works now: `web/index.html`, published privately at
   https://claude.ai/artifact/Goc5YHwKAowqd1bqDDCS9m. Take or choose a photo, pick a
   subject, palette, size, dither and outline, then save a PNG, a pack (PNGs + `.aseprite`
@@ -89,6 +91,14 @@ pixel-pipeline sheet frames/*.png -o hero_wave.png --tag wave --duration 120 --a
 pixel-pipeline convert forest.jpg -s background -W 256 -H 144 --tileable -o forest.png
 pixel-pipeline tileset forest.png --tile 16 -o forest_tiles.png --godot
 
+# Retro console look: original palette / colour depth, colours per sprite, sizes
+pixel-pipeline convert rex.jpg -s animal --system nes -o rex_nes.png      # also snes, gameboy, gbc, sms, genesis, gba, pico8
+
+# Text prompt -> sprite on your own GPU (ComfyUI; setup: docs/LOCAL_AI.md)
+pixel-pipeline generate --check
+pixel-pipeline generate "a knight with a red cape" -s person --system snes --count 4 -o knight.png
+pixel-pipeline generate "a blue wizard" -s person --init sketch.png --denoise 0.6 -o wizard.png
+
 # Scenery photo -> far/mid/near parallax layers + Godot 4 Parallax2D scene
 pixel-pipeline parallax lake.jpg -o bg/ -W 320 -H 180 --scale 3
 
@@ -111,6 +121,7 @@ pixel-pipeline <command> --help              # every option
 | Setting | CLI | What it does |
 |---|---|---|
 | Subject preset | `-s person\|animal\|object\|background` | Loads sensible defaults for that kind of photo |
+| Retro system | `--system nes\|snes\|gameboy\|gbc\|sms\|genesis\|gba\|pico8` | Original console colours (hardware palette or colour depth), colours per sprite (NES/GB 3, SNES/Genesis/GBA 15), typical sizes and outline style |
 | Size | `-W 32 -H 48` | Output size in sprite pixels. `-H 0` keeps the photo's aspect |
 | Fit / anchor | `--fit contain\|cover\|stretch`, `--anchor bottom\|center` | Pad or crop to the size; `bottom` keeps feet on the floor |
 | Background removal | `--bg-removal / --no-bg-removal`, `--model` | Cut the subject out (`u2net_human_seg` for people, `birefnet-general` for best edges) |
@@ -163,8 +174,13 @@ Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`), then restart it:
     "command": "C:\\path\\to\\pixel-pipeline\\.venv\\Scripts\\pixel-pipeline-mcp.exe" } } }
 ```
 
-Tools: `convert_photos`, `video_to_animation`, `idle_animation`, `parallax_layers`,
-`make_sprite_sheet`, `make_tileset`, `preview_image`, `list_palettes`. Every result includes a preview
+Tools: `convert_photos`, `generate_sprite` (local GPU), `draw_sprite` (Claude draws it
+pixel by pixel), `video_to_animation`, `idle_animation`, `parallax_layers`,
+`make_sprite_sheet`, `make_tileset`, `preview_image`, `list_palettes`.
+
+**Claude + your PC:** Claude can sketch a sprite with `draw_sprite`, pass it to
+`generate_sprite` as `init_image` so your GPU renders the detail, and then check the
+preview and adjust. Or Claude can write a detailed prompt and try a few seeds. Every result includes a preview
 image so Claude can check its work and adjust. Use absolute paths. Example:
 
 > Turn the photos in C:\Users\spark\Pictures\rex into 32x32 animal sprites with the
@@ -197,13 +213,13 @@ pytest                        # set GODOT_BIN=path\to\godot.exe to also load the
 
 ## Roadmap
 
-1. **Done:** converter, CLI, desktop app, video → animation, idle loops, sel-out
-   outlines, sheets, tilesets, `.aseprite`, Godot resources, MCP server, Windows exe,
-   phone web app, Android app.
-2. AI style pass (pluggable, optional): PixelLab (animation, 4/8-direction
-   rotations), Retro Diffusion API, local models via ComfyUI on the GPU. Whatever
-   the AI returns goes back through the converter, so it always lands on your exact
-   grid and palette.
+1. **Done:** converter, CLI, desktop app, video → animation, idle loops (breathe, bob,
+   sway, engine rumble), sel-out outlines, retro systems, sheets, tilesets, parallax,
+   `.aseprite`, Godot resources, MCP server, Windows exe, phone web app, Android app,
+   Claude-drawn sprites, local GPU generation (ComfyUI).
+2. Hosted AI (optional): PixelLab (animation, 4/8-direction rotations) or Retro
+   Diffusion. Whatever the AI returns goes back through the converter, so it always
+   lands on your exact grid and palette.
 3. Palette ramps and shading, batch/sheet tools in the app.
 
 ## Credits
