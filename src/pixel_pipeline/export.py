@@ -1,0 +1,132 @@
+"""Sprite sheets (Aseprite/TexturePacker JSON) and tilesets (Tiled .tmj)."""
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from . import __version__
+
+
+def load_rgba(path) -> np.ndarray:
+    return np.asarray(Image.open(path).convert("RGBA")).copy()
+
+
+def pack_sheet(frames: list[np.ndarray], columns: int | None = None, padding: int = 0):
+    """Grid-pack RGBA frames. Returns (sheet RGBA, [(x, y, w, h), ...])."""
+    if not frames:
+        raise ValueError("No frames to pack")
+    cols = columns or math.ceil(math.sqrt(len(frames)))
+    rows = math.ceil(len(frames) / cols)
+    cw = max(f.shape[1] for f in frames)
+    ch = max(f.shape[0] for f in frames)
+    sheet = np.zeros((rows * ch + (rows - 1) * padding, cols * cw + (cols - 1) * padding, 4), np.uint8)
+    rects = []
+    for i, f in enumerate(frames):
+        x, y = (i % cols) * (cw + padding), (i // cols) * (ch + padding)
+        sheet[y:y + f.shape[0], x:x + f.shape[1]] = f
+        rects.append((x, y, f.shape[1], f.shape[0]))
+    return sheet, rects
+
+
+def sheet_json(rects, image_name: str, durations: list[int], tag: str | None = None,
+               names: list[str] | None = None) -> dict:
+    """Aseprite 'json-array' format -- also read by Godot/Unity/Phaser atlas importers."""
+    names = names or [f"frame {i}" for i in range(len(rects))]
+    h = max(y + rh for _, y, _, rh in rects)
+    w = max(x + rw for x, _, rw, _ in rects)
+    return {
+        "frames": [{
+            "filename": name,
+            "frame": {"x": x, "y": y, "w": rw, "h": rh},
+            "rotated": False,
+            "trimmed": False,
+            "spriteSourceSize": {"x": 0, "y": 0, "w": rw, "h": rh},
+            "sourceSize": {"w": rw, "h": rh},
+            "duration": d,
+        } for (x, y, rw, rh), d, name in zip(rects, durations, names)],
+        "meta": {
+            "app": "pixel-pipeline",
+            "version": __version__,
+            "image": image_name,
+            "format": "RGBA8888",
+            "size": {"w": w, "h": h},
+            "scale": "1",
+            "frameTags": [{"name": tag, "from": 0, "to": len(rects) - 1, "direction": "forward"}]
+            if tag else [],
+        },
+    }
+
+
+def write_sheet(frames: list[np.ndarray], out_png, columns: int | None = None,
+                duration: int = 100, tag: str | None = None, names: list[str] | None = None) -> Path:
+    """Write sheet PNG + matching .json; returns the JSON path."""
+    out_png = Path(out_png)
+    sheet, rects = pack_sheet(frames, columns)
+    Image.fromarray(sheet, "RGBA").save(out_png)
+    meta = sheet_json(rects, out_png.name, [duration] * len(frames), tag, names)
+    out_json = out_png.with_suffix(".json")
+    out_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return out_json
+
+
+def slice_tiles(rgba: np.ndarray, tile: int):
+    """Cut an image into tile x tile pieces, dropping duplicates and empty tiles.
+
+    Returns (unique tiles, map) where map[row, col] is a tile index or -1 for empty.
+    """
+    rows, cols = rgba.shape[0] // tile, rgba.shape[1] // tile
+    if rows == 0 or cols == 0:
+        raise ValueError(f"Image {rgba.shape[1]}x{rgba.shape[0]} is smaller than one {tile}px tile")
+    tiles: list[np.ndarray] = []
+    seen: dict[bytes, int] = {}
+    tile_map = np.full((rows, cols), -1, np.int32)
+    for r in range(rows):
+        for c in range(cols):
+            t = rgba[r * tile:(r + 1) * tile, c * tile:(c + 1) * tile]
+            if not t[..., 3].any():
+                continue
+            key = t.tobytes()
+            if key not in seen:
+                seen[key] = len(tiles)
+                tiles.append(t)
+            tile_map[r, c] = seen[key]
+    return tiles, tile_map
+
+
+def tiled_map(tile_map: np.ndarray, tile: int, tileset_image: str, tileset_size: tuple[int, int],
+              tile_count: int, columns: int) -> dict:
+    """Minimal Tiled JSON map (.tmj); Godot, LDtk and most engines can import it."""
+    rows, cols = tile_map.shape
+    return {
+        "type": "map", "version": "1.10", "orientation": "orthogonal", "renderorder": "right-down",
+        "width": cols, "height": rows, "tilewidth": tile, "tileheight": tile, "infinite": False,
+        "nextlayerid": 2, "nextobjectid": 1,
+        "layers": [{
+            "id": 1, "name": "Tiles", "type": "tilelayer", "visible": True, "opacity": 1,
+            "x": 0, "y": 0, "width": cols, "height": rows,
+            "data": (tile_map.reshape(-1) + 1).tolist(),  # Tiled gids: 0 = empty, firstgid = 1
+        }],
+        "tilesets": [{
+            "firstgid": 1, "name": Path(tileset_image).stem, "image": tileset_image,
+            "imagewidth": tileset_size[0], "imageheight": tileset_size[1],
+            "tilewidth": tile, "tileheight": tile, "tilecount": tile_count,
+            "columns": columns, "margin": 0, "spacing": 0,
+        }],
+    }
+
+
+def write_tileset(rgba: np.ndarray, tile: int, out_png, columns: int = 8) -> Path:
+    """Write tileset PNG + Tiled map (.tmj) rebuilding the original image; returns the .tmj path."""
+    out_png = Path(out_png)
+    tiles, tile_map = slice_tiles(rgba, tile)
+    cols = max(1, min(columns, len(tiles)))
+    sheet, _ = pack_sheet(tiles, cols)
+    Image.fromarray(sheet, "RGBA").save(out_png)
+    tmj = tiled_map(tile_map, tile, out_png.name, (sheet.shape[1], sheet.shape[0]), len(tiles), cols)
+    out_tmj = out_png.with_suffix(".tmj")
+    out_tmj.write_text(json.dumps(tmj, indent=2), encoding="utf-8")
+    return out_tmj

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixel-pipeline"
+version = "0.1.0"
+description = "Turn photos into game-ready pixel-art sprites, sprite sheets, tilesets and .aseprite files."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python-headless>=4.8",
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+# Background removal (people/animals/objects). CPU is fine for single images.
+cutout = ["rembg[cpu]>=2.0.57"]
+# Same, on an NVIDIA GPU (needs CUDA + cuDNN installed).
+cutout-gpu = ["rembg[gpu]>=2.0.57"]
+ui = ["PySide6>=6.6"]
+dev = ["pytest>=8", "scikit-image>=0.22"]
+
+[project.scripts]
+pixel-pipeline = "pixel_pipeline.cli:main"
+
+[project.gui-scripts]
+pixel-pipeline-ui = "pixel_pipeline.ui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

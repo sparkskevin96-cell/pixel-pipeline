@@ -1,0 +1,385 @@
+"""Desktop app: drop in a photo, tweak settings, watch the sprite update live.
+
+Run with:  pixel-pipeline-ui [photo]
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QInputDialog, QLabel, QMainWindow, QMessageBox, QScrollArea, QSpinBox, QSplitter,
+    QVBoxLayout, QWidget,
+)
+
+from ..aseprite import write_aseprite
+from ..cutout import CutoutUnavailable, remove_background
+from ..palettes import BUILTIN
+from ..pipeline import finish, load_image, prepare
+from ..pixelize import DOWNSCALE_MODES
+from ..quantize import DITHER_MODES
+from ..settings import ANCHORS, FITS, SUBJECTS, Settings, settings_for
+
+IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.gif)"
+CUTOUT_MODELS = ["isnet-general-use", "u2net_human_seg", "birefnet-general", "birefnet-portrait", "u2net"]
+LOAD_FILE, LOSPEC = "Load file…", "Lospec…"
+ORIGINAL_MAX = 420
+
+
+def checkerboard(rgba: np.ndarray, cell: int = 8) -> np.ndarray:
+    """Composite RGBA over a grey checkerboard so transparency is visible."""
+    h, w = rgba.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w]
+    bg = np.where(((yy // cell + xx // cell) % 2 == 0)[..., None], 205.0, 165.0)
+    a = rgba[..., 3:4].astype(np.float32) / 255
+    rgb = rgba[..., :3].astype(np.float32) * a + bg * (1 - a)
+    return np.concatenate([np.rint(rgb).astype(np.uint8), np.full((h, w, 1), 255, np.uint8)], -1)
+
+
+def to_pixmap(rgba: np.ndarray) -> QPixmap:
+    rgba = np.ascontiguousarray(rgba)
+    h, w = rgba.shape[:2]
+    return QPixmap.fromImage(QImage(rgba.data, w, h, w * 4, QImage.Format_RGBA8888).copy())
+
+
+def _spin(lo, hi, step=1, decimals=None):
+    box = QDoubleSpinBox() if decimals is not None else QSpinBox()
+    box.setRange(lo, hi)
+    box.setSingleStep(step)
+    if decimals is not None:
+        box.setDecimals(decimals)
+    return box
+
+
+def _combo(items, editable=False):
+    box = QComboBox()
+    box.addItems(list(items))
+    box.setEditable(editable)
+    return box
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("pixel-pipeline")
+        self.resize(1240, 780)
+        self.setAcceptDrops(True)
+        self.source: np.ndarray | None = None
+        self.source_path: Path | None = None
+        self.alpha_cache: dict[str, np.ndarray] = {}
+        self.sprite = None
+        self._loading = False
+        self._palette_prev = "auto"
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(150)
+        self._timer.timeout.connect(self.render)
+
+        self._build_controls()
+        self._build_views()
+        self._build_menu()
+        self.apply_preset("object")
+        self.statusBar().showMessage("Drop a photo onto the window, or File → Open (Ctrl+O)")
+
+    # ---- layout ---------------------------------------------------------------
+    def _build_controls(self):
+        self.subject = _combo(SUBJECTS)
+        self.width_ = _spin(1, 1024)
+        self.height_ = _spin(0, 1024)
+        self.height_.setSpecialValueText("auto")
+        self.fit = _combo(FITS)
+        self.anchor = _combo(ANCHORS)
+        self.remove_bg = QCheckBox("Remove background")
+        self.model = _combo(CUTOUT_MODELS, editable=True)
+        self.crop = QCheckBox("Crop to subject")
+        self.patch = _spin(2, 32)
+        self.detail = _spin(0, 6)
+        self.downscale = _combo(DOWNSCALE_MODES)
+        self.brightness = _spin(-1, 1, 0.05, 2)
+        self.contrast = _spin(0, 3, 0.05, 2)
+        self.saturation = _spin(0, 3, 0.05, 2)
+        self.tileable = QCheckBox("Tileable (seamless)")
+        self.palette = _combo(["auto", *BUILTIN, LOAD_FILE, LOSPEC])
+        self.colors = _spin(2, 64)
+        self.dither = _combo(DITHER_MODES)
+        self.dither_strength = _spin(0, 2, 0.1, 2)
+        self.outline = QCheckBox("1px outline")
+        self.outline_color = _combo(["auto", "#000000"], editable=True)
+        self.zoom = _spin(1, 32)
+        self.zoom.setValue(8)
+        self.export_scale = _spin(1, 32)
+
+        groups = [
+            ("Subject", [("Type", self.subject), ("", self.remove_bg), ("Model", self.model),
+                         ("", self.crop)]),
+            ("Size", [("Width", self.width_), ("Height", self.height_), ("Fit", self.fit),
+                      ("Anchor", self.anchor)]),
+            ("Pixels", [("Sample patch", self.patch), ("Detail", self.detail),
+                        ("Downscale", self.downscale), ("Brightness", self.brightness),
+                        ("Contrast", self.contrast), ("Saturation", self.saturation),
+                        ("", self.tileable)]),
+            ("Colour", [("Palette", self.palette), ("Colours (auto)", self.colors),
+                        ("Dither", self.dither), ("Dither strength", self.dither_strength)]),
+            ("Finish", [("", self.outline), ("Outline colour", self.outline_color)]),
+            ("View / export", [("Preview zoom", self.zoom), ("PNG export scale", self.export_scale)]),
+        ]
+        panel = QWidget()
+        column = QVBoxLayout(panel)
+        for title, rows in groups:
+            box = QGroupBox(title)
+            form = QFormLayout(box)
+            for label, widget in rows:
+                form.addRow(label, widget)
+            column.addWidget(box)
+        column.addStretch(1)
+        self.controls = QScrollArea()
+        self.controls.setWidget(panel)
+        self.controls.setWidgetResizable(True)
+        self.controls.setMinimumWidth(300)
+
+        for w in (self.width_, self.height_, self.patch, self.detail, self.brightness,
+                  self.contrast, self.saturation, self.colors, self.dither_strength):
+            w.valueChanged.connect(self.schedule)
+        for w in (self.fit, self.anchor, self.model, self.downscale, self.dither, self.outline_color):
+            w.currentTextChanged.connect(self.schedule)
+        for w in (self.remove_bg, self.crop, self.tileable, self.outline):
+            w.toggled.connect(self.schedule)
+        self.zoom.valueChanged.connect(self.show_sprite)
+        self.subject.currentTextChanged.connect(self.apply_preset)
+        self.palette.currentTextChanged.connect(self._palette_changed)
+
+    def _build_views(self):
+        self.original_view = QLabel("Drop a photo here")
+        self.original_view.setAlignment(Qt.AlignCenter)
+        self.original_view.setMinimumWidth(260)
+        self.sprite_view = QLabel()
+        self.sprite_view.setAlignment(Qt.AlignCenter)
+        sprite_scroll = QScrollArea()
+        sprite_scroll.setWidget(self.sprite_view)
+        sprite_scroll.setWidgetResizable(True)
+        split = QSplitter()
+        split.addWidget(self.controls)
+        split.addWidget(self.original_view)
+        split.addWidget(sprite_scroll)
+        split.setSizes([320, 420, 500])
+        self.setCentralWidget(split)
+
+    def _build_menu(self):
+        menu = self.menuBar().addMenu("&File")
+        for text, shortcut, slot in (
+            ("&Open photo…", QKeySequence.Open, self.open_dialog),
+            ("Export &PNG…", "Ctrl+E", self.export_png),
+            ("Export .&aseprite…", "Ctrl+Shift+E", self.export_aseprite),
+            ("&Quit", QKeySequence.Quit, self.close),
+        ):
+            action = QAction(text, self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(slot)
+            menu.addAction(action)
+
+    # ---- settings <-> controls -----------------------------------------------
+    def apply_preset(self, subject: str):
+        s = settings_for(subject)
+        self._loading = True
+        try:
+            self.subject.blockSignals(True)
+            self.subject.setCurrentText(subject)
+            self.subject.blockSignals(False)
+            self.width_.setValue(s.width)
+            self.height_.setValue(s.height or 0)
+            self.fit.setCurrentText(s.fit)
+            self.anchor.setCurrentText(s.anchor)
+            self.remove_bg.setChecked(s.remove_background)
+            self.model.setCurrentText(s.cutout_model)
+            self.crop.setChecked(s.crop_to_subject)
+            self.patch.setValue(s.patch)
+            self.detail.setValue(s.detail)
+            self.downscale.setCurrentText(s.downscale)
+            self.brightness.setValue(s.brightness)
+            self.contrast.setValue(s.contrast)
+            self.saturation.setValue(s.saturation)
+            self.tileable.setChecked(s.tileable)
+            self.colors.setValue(s.colors)
+            self.dither.setCurrentText(s.dither)
+            self.dither_strength.setValue(s.dither_strength)
+            self.outline.setChecked(s.outline)
+            self.outline_color.setCurrentText(s.outline_color)
+        finally:
+            self._loading = False
+        self.schedule()
+
+    def current_settings(self) -> Settings:
+        return Settings(
+            width=self.width_.value(), height=self.height_.value() or None,
+            fit=self.fit.currentText(), anchor=self.anchor.currentText(),
+            remove_background=self.remove_bg.isChecked(), cutout_model=self.model.currentText(),
+            crop_to_subject=self.crop.isChecked(), patch=self.patch.value(),
+            detail=self.detail.value(), downscale=self.downscale.currentText(),
+            brightness=self.brightness.value(), contrast=self.contrast.value(),
+            saturation=self.saturation.value(), tileable=self.tileable.isChecked(),
+            palette=self.palette.currentText(), colors=self.colors.value(),
+            dither=self.dither.currentText(), dither_strength=self.dither_strength.value(),
+            outline=self.outline.isChecked(), outline_color=self.outline_color.currentText(),
+        )
+
+    def _palette_changed(self, text: str):
+        if self._loading:
+            return
+        choice = None
+        if text == LOAD_FILE:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Palette file", "", "Palettes (*.gpl *.hex *.txt *.png *.gif)")
+            choice = path or None
+        elif text == LOSPEC:
+            slug, ok = QInputDialog.getText(
+                self, "Lospec palette", "Palette slug from lospec.com/palette-list (e.g. resurrect-64):")
+            choice = f"lospec:{slug.strip().lower()}" if ok and slug.strip() else None
+        else:
+            self._palette_prev = text
+            self.schedule()
+            return
+        self._loading = True
+        try:
+            if choice:
+                if self.palette.findText(choice) < 0:
+                    self.palette.insertItem(self.palette.count() - 2, choice)
+                self.palette.setCurrentText(choice)
+                self._palette_prev = choice
+            else:
+                self.palette.setCurrentText(self._palette_prev)
+        finally:
+            self._loading = False
+        self.schedule()
+
+    # ---- rendering -------------------------------------------------------------
+    def schedule(self, *_):
+        if not self._loading and self.source is not None:
+            self._timer.start()
+
+    def _isolated(self, s: Settings) -> np.ndarray:
+        if not s.remove_background or (self.source[..., 3] < 255).any():
+            return self.source
+        alpha = self.alpha_cache.get(s.cutout_model)
+        if alpha is None:
+            self.statusBar().showMessage(
+                f"Removing background with {s.cutout_model}… (first use downloads the model)")
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+            try:
+                alpha = remove_background(np.ascontiguousarray(self.source[..., :3]), s.cutout_model)
+            finally:
+                QApplication.restoreOverrideCursor()
+            self.alpha_cache[s.cutout_model] = alpha
+        out = self.source.copy()
+        out[..., 3] = alpha
+        return out
+
+    def render(self):
+        if self.source is None:
+            return
+        s = self.current_settings()
+        try:
+            rgba = self._isolated(s)
+            self.sprite = finish(prepare(rgba, s), s)
+        except CutoutUnavailable as e:
+            self._loading = True
+            self.remove_bg.setChecked(False)
+            self._loading = False
+            QMessageBox.warning(self, "Background removal not installed", str(e))
+            self.schedule()
+            return
+        except Exception as e:  # noqa: BLE001 - show any pipeline error instead of crashing the UI
+            self.statusBar().showMessage(f"Error: {e}")
+            return
+        self._show_original(rgba)
+        self.show_sprite()
+        w, h = self.sprite.size
+        self.statusBar().showMessage(f"{w}×{h} px · {len(self.sprite.palette)} colours")
+
+    def _show_original(self, rgba: np.ndarray):
+        h, w = rgba.shape[:2]
+        scale = min(1.0, ORIGINAL_MAX / max(h, w))
+        pix = to_pixmap(checkerboard(rgba, cell=max(4, int(12 / scale))))
+        self.original_view.setPixmap(pix.scaled(int(w * scale), int(h * scale),
+                                                Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def show_sprite(self, *_):
+        if self.sprite is None:
+            return
+        z = self.zoom.value()
+        big = np.repeat(np.repeat(self.sprite.rgba, z, 0), z, 1)
+        self.sprite_view.setPixmap(to_pixmap(checkerboard(big, cell=max(4, z))))
+
+    # ---- files -----------------------------------------------------------------
+    def open_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open photo", "", IMAGE_FILTER)
+        if path:
+            self.open_path(Path(path))
+
+    def open_path(self, path: Path):
+        try:
+            self.source = load_image(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Couldn't open image", f"{path}\n\n{e}")
+            return
+        self.source_path = path
+        self.alpha_cache = {}
+        self.setWindowTitle(f"pixel-pipeline — {path.name}")
+        self._show_original(self.source)
+        self.render()
+
+    def _save_path(self, suffix: str, filt: str) -> str:
+        stem = self.source_path.stem if self.source_path else "sprite"
+        default = str((self.source_path.parent if self.source_path else Path.cwd()) / f"{stem}.sprite{suffix}")
+        path, _ = QFileDialog.getSaveFileName(self, "Export", default, filt)
+        return path
+
+    def export_png(self):
+        if self.sprite is None:
+            return
+        path = self._save_path(".png", "PNG (*.png)")
+        if path:
+            try:
+                self.sprite.save(path, self.export_scale.value())
+                self.statusBar().showMessage(f"Saved {path}")
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, "Export failed", str(e))
+
+    def export_aseprite(self):
+        if self.sprite is None:
+            return
+        path = self._save_path(".aseprite", "Aseprite (*.aseprite *.ase)")
+        if path:
+            try:
+                write_aseprite(path, [self.sprite.rgba], self.sprite.palette)
+                self.statusBar().showMessage(f"Saved {path}")
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, "Export failed", str(e))
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            self.open_path(Path(urls[0].toLocalFile()))
+
+
+def main(argv: list[str] | None = None) -> int:
+    app = QApplication(sys.argv if argv is None else argv)
+    win = MainWindow()
+    win.show()
+    args = app.arguments()[1:]
+    if args:
+        win.open_path(Path(args[0]))
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
