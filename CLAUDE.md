@@ -42,6 +42,10 @@ wants terse answers and fixes over polish.
   authentic sizes unrecognizable for photos, hence readable as the default. Game Boy
   (`mono`) maps photos by brightness (`tone_map`) onto 4 evenly spread DMG shades. The
   JS port in `web/index.html` must stay in sync.
+- **Sprite scale research** (`docs/SPRITE_SCALE.md`, interactive page artifact
+  Jv1VrzgNjgmiH4LgAQg1SR): character height as a share of screen height for 41 classic
+  games by genre, and the matching sprite heights at 320x180 / 640x360. Kevin's new game
+  targets 4K; those are the only bases that scale by whole numbers to 1080p/1440p/4K.
 - **Prompt → sprite** has three routes. (1) Claude draws it: `drawing.py`
   (`sprite_from_rows`), MCP `draw_sprite`, and the web app's "Draw from a prompt" via the
   artifact `sample` capability, which is hidden in the APK. (2) Local GPU: `generate.py`
