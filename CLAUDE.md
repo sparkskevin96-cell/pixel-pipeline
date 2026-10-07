@@ -62,6 +62,14 @@ wants terse answers and fixes over polish.
 - Run `pytest` before pushing; the UI test runs headless (`QT_QPA_PLATFORM=offscreen`).
 - Private repo with limited Actions minutes: keep workflows lean.
 
+## Temporary: built in the Pawgress repo (clean up!)
+
+Kevin couldn't log in to GitHub on 2026-10-07, so (with his OK) the Android APK was built
+by pushing local branch `pawgress-build` (main + a workflow tweak) to
+`sparkskevin96-cell/pawgress` branch `ccr-15172514-6ugcr0`, which published the
+pre-release `pixel-pipeline-android-temp` there. Once `sparkskevin96-cell/pixel-pipeline`
+exists: push `main` there, then delete that Pawgress branch, release and tag.
+
 ## Next up
 
 AI style pass (PixelLab / Retro Diffusion / ComfyUI), palette ramps and shading, batch
