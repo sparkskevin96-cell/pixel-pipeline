@@ -16,11 +16,12 @@ from .pipeline import convert_batch
 from .pixelize import DOWNSCALE_MODES
 from .quantize import DITHER_MODES
 from .settings import ANCHORS, FITS, OUTLINE_STYLES, SUBJECTS, settings_for
+from .systems import SYSTEM_NAMES
 from .video import ALIGN_MODES, video_to_sprites
 
 BOOL = argparse.BooleanOptionalAction
 
-SETTING_ARGS = ("width", "height", "fit", "anchor", "remove_background", "cutout_model",
+SETTING_ARGS = ("system", "width", "height", "fit", "anchor", "remove_background", "cutout_model",
                 "crop_to_subject", "patch", "detail", "downscale", "palette", "colors", "dither",
                 "dither_strength", "cleanup", "outline", "outline_style", "outline_color",
                 "brightness", "contrast", "saturation", "tileable")
@@ -28,6 +29,8 @@ SETTING_ARGS = ("width", "height", "fit", "anchor", "remove_background", "cutout
 
 def _add_setting_args(p, default_subject="object"):
     p.add_argument("-s", "--subject", choices=SUBJECTS, default=default_subject)
+    p.add_argument("--system", choices=SYSTEM_NAMES,
+                   help="retro console look: colours per sprite, palette and sizes of that system")
     p.add_argument("-W", "--width", type=int)
     p.add_argument("-H", "--height", type=int, help="0 = keep the photo's aspect ratio")
     p.add_argument("--fit", choices=FITS)

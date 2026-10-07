@@ -39,6 +39,7 @@ from .palettes import BUILTIN, rgb_to_hex
 from .pipeline import convert_batch
 from .quantize import DITHER_MODES
 from .settings import PRESETS, SUBJECTS, Settings, settings_for
+from .systems import SYSTEM_NAMES, SYSTEMS
 from .video import ALIGN_MODES, video_to_sprites
 
 log = logging.getLogger("pixel_pipeline.mcp")
@@ -52,6 +53,11 @@ ToolOutput = list[str | ImageBlock]
 Subject = Literal[SUBJECTS]
 Dither = Literal[DITHER_MODES]
 IdleStyle = Literal[IDLE_STYLES]
+RetroSystem = Literal[SYSTEM_NAMES]
+SYSTEM_DOC = ("Retro console look: " + "; ".join(
+    f"{k} = {v.name} ({v.sprite_colors} colours/sprite)" for k, v in SYSTEMS.items())
+    + ". Sets the console's palette/colour depth, colours per sprite, typical sizes and outline "
+      "style (explicit width/height/colors still win). off = free colours.")
 Align = Literal[ALIGN_MODES]
 
 GODOT_DOC = ("Also write a Godot 4 SpriteFrames .tres next to the sheet (load it into an "
@@ -239,7 +245,8 @@ def _colours_used(rgba: np.ndarray) -> int:
 # --------------------------------------------------------------------------- settings
 
 # Explicit convert_photos parameters; every other Settings field goes through extra_settings.
-_DIRECT = {"width", "height", "palette", "colors", "dither", "outline", "detail", "remove_background"}
+_DIRECT = {"width", "height", "palette", "colors", "dither", "outline", "detail", "remove_background",
+           "system", "subject"}
 
 
 def _setting_names() -> list[str]:
@@ -274,7 +281,7 @@ def _build_settings(subject: str, explicit: dict, extra: dict | None) -> Setting
     if unknown:
         raise ToolError(f"Unknown setting(s) {', '.join(unknown)}. "
                         f"Valid extra_settings: {', '.join(_setting_names())}")
-    values = {k: _coerce(k, v) for k, v in extra.items()}
+    values = {k: _coerce(k, v) for k, v in extra.items() if k != "subject"}
     values.update({k: v for k, v in explicit.items() if v is not None})
     return settings_for(subject, **values)
 
@@ -323,6 +330,7 @@ def convert_photos(
     subject: Annotated[Subject, Field(
         description="Kind of photo; loads that preset. person/animal/object cut the subject out "
                     "and outline it; background = wide scene, dithered, no cut-out.")] = "object",
+    system: Annotated[RetroSystem, Field(description=SYSTEM_DOC)] = "off",
     width: Annotated[int | None, Field(
         ge=1, le=1024,
         description="Sprite width in true pixels (before `scale`). Typical: 16-64 for characters "
@@ -381,9 +389,9 @@ def convert_photos(
     lower colors for a flatter look, change width/height for a different pixel density).
     """
     files = _input_files(paths, skip_outputs=True)
-    explicit = {"width": width, "height": height, "palette": palette, "colors": colors,
-                "dither": dither, "outline": outline, "detail": detail,
-                "remove_background": remove_background}
+    explicit = {"width": width, "height": height, "palette": None if system != "off" else palette,
+                "colors": colors, "dither": dither, "outline": outline, "detail": detail,
+                "remove_background": remove_background, "system": system}
     settings = _build_settings(subject, explicit, extra_settings)
     folder = _path(out_dir) if out_dir else None
     if folder:
@@ -527,6 +535,7 @@ def video_to_animation(
     video_path: Annotated[str, Field(description="Video file (.mp4/.mov/...), absolute path.")],
     out_png: Annotated[str, Field(description="Sprite sheet .png to write (.json etc. go next to it).")],
     subject: Annotated[Subject, Field(description="Preset for the subject in the clip.")] = "animal",
+    system: Annotated[RetroSystem, Field(description=SYSTEM_DOC)] = "off",
     frames: Annotated[int, Field(ge=2, le=64, description="How many frames to sample.")] = 8,
     start: Annotated[float | None, Field(ge=0, description="Start time in seconds.")] = None,
     end: Annotated[float | None, Field(
@@ -559,8 +568,8 @@ def video_to_animation(
     ONE shared palette, and writes a one-row sprite sheet + .json (+ .aseprite / Godot .tres)."""
     src = _input_files([video_path])[0]
     out = _output_png(out_png)
-    explicit = {"width": width, "height": height, "palette": palette, "colors": colors,
-                "remove_background": remove_background}
+    explicit = {"width": width, "height": height, "palette": None if system != "off" else palette,
+                "colors": colors, "remove_background": remove_background, "system": system}
     settings = _build_settings(subject, explicit, extra_settings)
     with _work_lock:
         sprites, ms = video_to_sprites(src, settings, frames, start, end, fps, align)

@@ -139,6 +139,9 @@ def prepare(rgba: np.ndarray, s: Settings) -> Prepared:
 
 
 def resolve_palette(s: Settings, pixels: np.ndarray) -> np.ndarray:
+    if s.system not in (None, "off"):
+        from .systems import system_palette
+        return system_palette(s.system, pixels, s.colors, s.subject)
     pal = load_palette(s.palette)
     return auto_palette(pixels, s.colors) if pal is None else pal
 

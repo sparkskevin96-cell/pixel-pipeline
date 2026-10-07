@@ -25,6 +25,7 @@ from ..pipeline import finish, load_image, prepare
 from ..pixelize import DOWNSCALE_MODES
 from ..quantize import DITHER_MODES
 from ..settings import ANCHORS, FITS, OUTLINE_STYLES, SUBJECTS, Settings, settings_for
+from ..systems import SYSTEMS
 from ..video import ALIGN_MODES, video_to_sprites
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.heic *.heif *.webp *.bmp *.tif *.tiff *.gif)"
@@ -98,6 +99,10 @@ class MainWindow(QMainWindow):
     # ---- layout ---------------------------------------------------------------
     def _build_controls(self):
         self.subject = _combo(SUBJECTS)
+        self.system = QComboBox()
+        self.system.addItem("Off (free colours)", "off")
+        for key, sysm in SYSTEMS.items():
+            self.system.addItem(f"{sysm.name} ({sysm.sprite_colors} colours/sprite)", key)
         self.width_ = _spin(1, 1024)
         self.height_ = _spin(0, 1024)
         self.height_.setSpecialValueText("auto")
@@ -126,7 +131,8 @@ class MainWindow(QMainWindow):
         self.export_scale = _spin(1, 32)
 
         groups = [
-            ("Subject", [("Type", self.subject), ("", self.remove_bg), ("Model", self.model),
+            ("Subject", [("Type", self.subject), ("Retro system", self.system),
+                         ("", self.remove_bg), ("Model", self.model),
                          ("", self.crop)]),
             ("Size", [("Width", self.width_), ("Height", self.height_), ("Fit", self.fit),
                       ("Anchor", self.anchor)]),
@@ -164,6 +170,7 @@ class MainWindow(QMainWindow):
             w.toggled.connect(self.schedule)
         self.zoom.valueChanged.connect(self.show_sprite)
         self.subject.currentTextChanged.connect(self.apply_preset)
+        self.system.currentIndexChanged.connect(lambda *_: self.apply_preset(self.subject.currentText()))
         self.palette.currentTextChanged.connect(self._palette_changed)
 
     def _build_views(self):
@@ -205,7 +212,9 @@ class MainWindow(QMainWindow):
 
     # ---- settings <-> controls -----------------------------------------------
     def apply_preset(self, subject: str):
-        s = settings_for(subject)
+        system = self.system.currentData() or "off"
+        s = settings_for(subject, system=system)
+        self.palette.setEnabled(system == "off")
         self._loading = True
         try:
             self.subject.blockSignals(True)
@@ -238,6 +247,7 @@ class MainWindow(QMainWindow):
 
     def current_settings(self) -> Settings:
         return Settings(
+            system=self.system.currentData() or "off", subject=self.subject.currentText(),
             width=self.width_.value(), height=self.height_.value() or None,
             fit=self.fit.currentText(), anchor=self.anchor.currentText(),
             remove_background=self.remove_bg.isChecked(), cutout_model=self.model.currentText(),

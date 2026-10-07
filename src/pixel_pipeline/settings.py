@@ -11,6 +11,11 @@ OUTLINE_STYLES = ("solid", "selout")
 
 @dataclass
 class Settings:
+    # Retro console look (nes, snes, gameboy, gbc, sms, genesis, gba, pico8) or "off".
+    # Sets colours per sprite + the console's colour space; see systems.py.
+    system: str = "off"
+    subject: str = "object"
+
     # Output size in sprite pixels. height None or 0 keeps the photo's aspect ratio.
     width: int = 32
     height: int | None = None
@@ -66,13 +71,17 @@ PRESETS: dict[str, dict] = {
 
 
 def settings_for(subject: str = "object", **overrides) -> Settings:
-    """Preset defaults for a subject type; any non-None override wins."""
+    """Preset defaults for a subject type, then the retro system's limits (if any);
+    any non-None override wins."""
+    from .systems import system_overrides
     if subject not in PRESETS:
         raise ValueError(f"Unknown subject '{subject}' (use {', '.join(SUBJECTS)})")
     names = {f.name for f in fields(Settings)}
     unknown = set(overrides) - names
     if unknown:
         raise TypeError(f"Unknown setting(s): {', '.join(sorted(unknown))}")
+    system = overrides.pop("system", None) or "off"
     values = dict(PRESETS[subject])
+    values.update(system_overrides(system, subject))
     values.update({k: v for k, v in overrides.items() if v is not None})
-    return Settings(**values)
+    return Settings(**{**values, "system": system, "subject": subject})
