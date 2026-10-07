@@ -210,6 +210,17 @@ textarea { font: 13px/1.4 var(--font-mono); min-height: 64px; resize: vertical; 
       <input type="file" id="fileGallery" accept="image/*" hidden>
     </fieldset>
 
+    <fieldset class="group" id="drawGroup" hidden>
+      <legend>Draw from a prompt</legend>
+      <label for="drawPrompt" style="font-weight:700">What should Claude draw?</label>
+      <textarea id="drawPrompt" placeholder="e.g. a knight with a red cape and a sword"></textarea>
+      <div class="btns">
+        <button type="button" class="btn primary" id="btnDraw">Draw it</button>
+        <button type="button" class="btn" id="btnStopDraw" hidden>Stop</button>
+      </div>
+      <p class="sub">Claude places every pixel at the size, colours and retro system set below. Uses your Claude usage; best up to 48×48.</p>
+    </fieldset>
+
     <fieldset class="group">
       <legend>Subject</legend>
       <div class="chips" role="radiogroup" aria-label="Subject">
@@ -219,6 +230,21 @@ textarea { font: 13px/1.4 var(--font-mono); min-height: 64px; resize: vertical; 
         <label><input type="radio" name="subject" value="background"><span>Background</span></label>
       </div>
       <p class="sub">Loads sizes, colours and outline defaults for that kind of photo.</p>
+      <div class="row">
+        <label for="system" style="font-weight:700">Retro system</label>
+        <select id="system">
+          <option value="off">Off: free colours</option>
+          <option value="nes">NES: 3 colours per sprite, NES palette</option>
+          <option value="snes">SNES: 15 colours, 15-bit colour</option>
+          <option value="gameboy">Game Boy: 3 shades of green</option>
+          <option value="gbc">Game Boy Color: 3 colours, 15-bit colour</option>
+          <option value="sms">Master System: 15 colours, 64-colour palette</option>
+          <option value="genesis">Genesis / Mega Drive: 15 colours, 512-colour palette</option>
+          <option value="gba">Game Boy Advance: 15 colours, 15-bit colour</option>
+          <option value="pico8">PICO-8: 16-colour palette</option>
+        </select>
+        <p class="sub" id="systemNote">Original console colours and sprite sizes. You can still change anything after.</p>
+      </div>
     </fieldset>
 
     <fieldset class="group">
@@ -382,9 +408,22 @@ const S = {
   subject: "person", width: 32, height: 48, fit: "contain", anchor: "bottom", bg: "auto", crop: true,
   tol: 16, patch: 8, detail: 2, palette: "auto", customHex: "", colors: 16, dither: "none",
   ditherStrength: 1, cleanup: true, outline: true, outlineStyle: "solid", brightness: 0,
-  contrast: 1, saturation: 1, tileable: false, scale: 8, idleStyle: "breathe",
+  contrast: 1, saturation: 1, tileable: false, scale: 8, idleStyle: "breathe", system: "off",
 };
 const WORK_MAX = 768;
+const NES_HEX = "7c7c7c 0000fc 0000bc 4428bc 940084 a80020 a81000 881400 503000 007800 006800 005800 004058 000000 bcbcbc 0078f8 0058f8 6844fc d800cc e40058 f83800 e45c10 ac7c00 00b800 00a800 00a844 008888 f8f8f8 3cbcfc 6888fc 9878f8 f878f8 f85898 f87858 fca044 f8b800 b8f818 58d854 58f898 00e8d8 787878 fcfcfc a4e4fc b8b8f8 d8b8f8 f8b8f8 f8a4c0 f0d0b0 fce0a8 f8d878 d8f878 b8f8b8 b8f8d8 00fcfc f8d8f8";
+const RGB555 = Array.from({ length: 32 }, (_, i) => (i << 3) | (i >> 2));
+const SYSTEMS = { // sprite colours, background colours, sizes per subject, outline, colour space
+  nes: { name: "NES", sprite: 3, bg: 13, outline: "solid", fixed: NES_HEX, sizes: { person: [16, 24], animal: [16, 16], object: [16, 16], background: [256, 240] } },
+  snes: { name: "SNES", sprite: 15, bg: 64, outline: "selout", levels: RGB555, sizes: { person: [24, 32], animal: [32, 32], object: [16, 16], background: [256, 224] } },
+  gameboy: { name: "Game Boy", sprite: 3, bg: 4, outline: "solid", fixed: BUILTIN.gameboy, sizes: { person: [16, 16], animal: [16, 16], object: [16, 16], background: [160, 144] } },
+  gbc: { name: "Game Boy Color", sprite: 3, bg: 32, outline: "solid", levels: RGB555, sizes: { person: [16, 16], animal: [16, 16], object: [16, 16], background: [160, 144] } },
+  sms: { name: "Master System", sprite: 15, bg: 31, outline: "solid", levels: [0, 85, 170, 255], sizes: { person: [16, 24], animal: [16, 16], object: [16, 16], background: [256, 192] } },
+  genesis: { name: "Genesis", sprite: 15, bg: 61, outline: "selout", levels: [0, 52, 87, 116, 144, 172, 206, 255], sizes: { person: [32, 48], animal: [32, 32], object: [24, 24], background: [320, 224] } },
+  gba: { name: "Game Boy Advance", sprite: 15, bg: 64, outline: "selout", levels: RGB555, sizes: { person: [32, 32], animal: [32, 32], object: [16, 16], background: [240, 160] } },
+  pico8: { name: "PICO-8", sprite: 15, bg: 16, outline: "solid", fixed: BUILTIN["pico-8"], sizes: { person: [16, 16], animal: [16, 16], object: [8, 8], background: [128, 128] } },
+};
+const sysMax = () => { const y = SYSTEMS[S.system]; return y ? (S.subject === "background" ? y.bg : y.sprite) : 256; };
 const IDLE_MS = { breathe: 150, bob: 150, sway: 120, rumble: 70 };
 
 // =========================================================================== colour
@@ -696,7 +735,36 @@ function autoPalette(small, mask, k) {
   for (let c = 0; c < k; c++) { labToRgb(cen[c * 3], cen[c * 3 + 1], cen[c * 3 + 2], o, 0); out.push([o[0], o[1], o[2]]); }
   return sortByL([...new Map(out.map(c => [c.join(","), c])).values()]);
 }
+function systemPalette(small, mask) {
+  const y = SYSTEMS[S.system], k = Math.max(1, Math.min(S.colors, sysMax()));
+  const centers = autoPalette(small, mask, k);
+  if (y.levels) {
+    const snap = v => y.levels.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
+    return sortByL([...new Map(centers.map(c => { const s = c.map(snap); return [s.join(","), s]; })).values()]);
+  }
+  const hw = [...new Set(hexList(y.fixed).map(c => c.join(",")))].map(s => s.split(",").map(Number));
+  const hwLab = new Float32Array(hw.length * 3); hw.forEach((c, i) => rgbToLab(c[0], c[1], c[2], hwLab, i * 3));
+  const lab = [0, 0, 0], chosen = [];
+  for (const c of centers) {
+    rgbToLab(c[0], c[1], c[2], lab, 0);
+    let b = 0, bd = Infinity; for (let j = 0; j < hw.length; j++) { const d = d2(lab, 0, hwLab, j * 3); if (d < bd) { bd = d; b = j; } }
+    if (!chosen.includes(b)) chosen.push(b);
+  }
+  // Two centres can land on one hardware colour: add the colour that lowers the error most.
+  const pts = []; for (let i = 0; i < mask.length; i++) if (mask[i]) pts.push(i);
+  const step = Math.max(1, Math.floor(pts.length / 600)), plab = [];
+  for (let i = 0; i < pts.length; i += step) { const o = []; rgbToLab(small[pts[i] * 3], small[pts[i] * 3 + 1], small[pts[i] * 3 + 2], o, 0); plab.push(o); }
+  const err = set => plab.reduce((s, p) => s + Math.min(...set.map(j => d2(p, 0, hwLab, j * 3))), 0);
+  const distinct = new Set(pts.map(i => [small[i * 3], small[i * 3 + 1], small[i * 3 + 2]].join(","))).size;
+  while (chosen.length < Math.min(k, hw.length, distinct)) {
+    let best = -1, be = Infinity;
+    for (let j = 0; j < hw.length; j++) { if (chosen.includes(j)) continue; const e = err([...chosen, j]); if (e < be) { be = e; best = j; } }
+    chosen.push(best);
+  }
+  return sortByL(chosen.map(j => hw[j]));
+}
 function currentPalette(small, mask) {
+  if (S.system !== "off") return systemPalette(small, mask);
   if (S.palette === "auto") return autoPalette(small, mask, S.colors);
   if (S.palette === "custom") { const p = hexList(S.customHex); return p.length ? p : autoPalette(small, mask, S.colors); }
   return hexList(BUILTIN[S.palette]);
@@ -972,13 +1040,31 @@ async function saveFile(name, bytes, mime) {
 // =========================================================================== UI
 const $ = id => document.getElementById(id);
 let sprite = null, timer = 0, animTimer = 0, view = "sprite";
+let drawn = null, sampleFn = null, drawCtl = null; // drawn = {w, h, rgba, name} from "Draw from a prompt"
+const baseName = () => drawn ? drawn.name : src.name;
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, 2600); }
 function hint(msg, warn) { const h = $("hint"); h.textContent = msg; h.classList.toggle("warn", !!warn); }
 
 function schedule() { clearTimeout(timer); $("busy").hidden = false; timer = setTimeout(render, 60); }
+function spriteFromDrawn(d) {
+  const n = d.w * d.h, small = new Float32Array(n * 3), mask = new Uint8Array(n);
+  for (let i = 0; i < n; i++) { small[i * 3] = d.rgba[i * 4]; small[i * 3 + 1] = d.rgba[i * 4 + 1]; small[i * 3 + 2] = d.rgba[i * 4 + 2]; mask[i] = d.rgba[i * 4 + 3] >= 128 ? 1 : 0; }
+  let pal;
+  if (S.system !== "off" || S.palette !== "auto") pal = currentPalette(small, mask); // enforce console / chosen palette
+  else pal = [...new Map([...Array(n).keys()].filter(i => mask[i]).map(i => { const c = [small[i * 3], small[i * 3 + 1], small[i * 3 + 2]]; return [c.join(","), c]; })).values()];
+  if (!pal.length) pal = [[0, 0, 0]];
+  const palLab = new Float32Array(pal.length * 3); pal.forEach((c, i) => rgbToLab(c[0], c[1], c[2], palLab, i * 3));
+  const idx = new Int16Array(n).fill(-1), lab = labArray(small, n), out = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) {
+    if (!mask[i]) continue;
+    let b = 0, bd = Infinity; for (let j = 0; j < pal.length; j++) { const dd = d2(lab, i * 3, palLab, j * 3); if (dd < bd) { bd = dd; b = j; } }
+    idx[i] = b; out[i * 4] = pal[b][0]; out[i * 4 + 1] = pal[b][1]; out[i * 4 + 2] = pal[b][2]; out[i * 4 + 3] = 255;
+  }
+  return { w: d.w, h: d.h, idx, pal, rgba: out };
+}
 function render() {
-  if (!src) return;
-  try { sprite = convert(); }
+  if (!src && !drawn) return;
+  try { sprite = drawn ? spriteFromDrawn(drawn) : convert(); }
   catch (e) { hint(`Couldn't convert this photo: ${e.message}`, true); $("busy").hidden = true; return; }
   $("busy").hidden = true;
   drawSprite(sprite);
@@ -1022,13 +1108,20 @@ function syncControls() {
   for (const name of ["subject", "fit", "anchor", "bg", "outlineStyle"]) document.querySelectorAll(`input[name=${name}]`).forEach(r => { r.checked = r.value === S[name]; });
   for (const k of ["cleanup", "outline", "tileable"]) $(k).checked = S[k];
   $("palette").value = S.palette; $("dither").value = S.dither; $("idleStyle").value = S.idleStyle; $("customHex").value = S.customHex;
-  $("customRow").hidden = S.palette !== "custom"; $("colorsRow").hidden = !(S.palette === "auto" || (S.palette === "custom" && !hexList(S.customHex).length));
+  $("system").value = S.system;
+  const y = SYSTEMS[S.system];
+  $("palette").disabled = !!y; $("colors").max = y ? sysMax() : 48;
+  $("systemNote").textContent = y ? `${y.name}: ${y.fixed ? "original console palette" : "photo colours snapped to the console's colour depth"}, up to ${sysMax()} colours${S.subject === "background" ? "" : " per sprite"}. Change anything after.` : "Original console colours and sprite sizes. You can still change anything after.";
+  $("customRow").hidden = !!y || S.palette !== "custom";
+  $("colorsRow").hidden = !(y || S.palette === "auto" || (S.palette === "custom" && !hexList(S.customHex).length));
   $("ditherRow").hidden = S.dither === "none"; $("outlineStyleRow").hidden = !S.outline;
   const help = { auto: "Auto removes colours touching the photo's edges; works best on a plain wall, floor or sky.", tap: "Open the Photo tab and tap the background. Each tap removes similar connected colours.", keep: "Uses the whole photo. Best for scenes and backgrounds.", ai: "On-device AI finds the subject (Android app)." };
   $("bgHelp").textContent = src && src.hasAlpha ? "This image already has a transparent background, so it's used as-is." : help[S.bg];
 }
 async function applyPreset(name) {
   const p = PRESETS[name]; Object.assign(S, p, { subject: name });
+  const y = SYSTEMS[S.system];
+  if (y) Object.assign(S, { width: y.sizes[name][0], height: y.sizes[name][1], colors: sysMax(), outlineStyle: y.outline }, name === "background" ? { patch: 4 } : {});
   if (S.bg === "auto" && host() && !$("chipAi").hidden) S.bg = "ai";
   syncControls(); restartAnim();
   schedule();
@@ -1039,7 +1132,7 @@ function updateTapButtons() { $("btnUndoTap").disabled = !taps.length; $("btnCle
 async function loadURL(url, name) {
   const img = new Image(); img.decoding = "async"; img.src = url;
   try { await img.decode(); } catch { hint("That file isn't an image this browser can open. Try a JPG or PNG.", true); return; }
-  setSource(img, name);
+  setSource(img, name); drawn = null;
   hint(src.hasAlpha ? "Transparent image: background kept as-is." : S.bg === "tap" ? "Open the Photo tab and tap the background." : "Adjust anything below; the sprite updates live.");
   syncControls();
   schedule();
@@ -1076,11 +1169,11 @@ function onFile(e) {
 
 async function savePng() {
   if (!sprite) return;
-  await saveFile(`${src.name}.sprite.png`, await pngBytes(frameCanvas(sprite, S.scale)), "image/png");
+  await saveFile(`${baseName()}.sprite.png`, await pngBytes(frameCanvas(sprite, S.scale)), "image/png");
 }
 async function savePack() {
   if (!sprite) return;
-  const base = `${src.name}.sprite`;
+  const base = `${baseName()}.sprite`;
   const files = [
     { name: `${base}.png`, data: await pngBytes(frameCanvas(sprite, S.scale)) },
     { name: `${base}@1x.png`, data: await pngBytes(frameCanvas(sprite, 1)) },
@@ -1091,7 +1184,7 @@ async function savePack() {
 }
 async function saveIdle() {
   if (!sprite) return;
-  const frames = idleFrames(sprite, S.idleStyle), sheet = sheetOf(frames), base = `${src.name}.idle`, ms = IDLE_MS[S.idleStyle] || 150;
+  const frames = idleFrames(sprite, S.idleStyle), sheet = sheetOf(frames), base = `${baseName()}.idle`, ms = IDLE_MS[S.idleStyle] || 150;
   const files = [
     { name: `${base}.png`, data: await pngBytes(frameCanvas(sheet, 1)) },
     { name: `${base}@${S.scale}x.png`, data: await pngBytes(frameCanvas(sheet, S.scale)) },
@@ -1114,6 +1207,9 @@ function wire() {
   }));
   for (const k of ["cleanup", "outline", "tileable"]) $(k).addEventListener("change", e => { S[k] = e.target.checked; syncControls(); schedule(); });
   $("palette").addEventListener("change", e => { S.palette = e.target.value; syncControls(); schedule(); });
+  $("system").addEventListener("change", e => { S.system = e.target.value; applyPreset(S.subject); });
+  $("btnDraw").addEventListener("click", drawFromPrompt);
+  $("btnStopDraw").addEventListener("click", () => drawCtl && drawCtl.abort());
   $("customHex").addEventListener("input", e => { S.customHex = e.target.value; syncControls(); schedule(); });
   $("dither").addEventListener("change", e => { S.dither = e.target.value; syncControls(); schedule(); });
   $("idleStyle").addEventListener("change", e => { S.idleStyle = e.target.value; restartAnim(); });
@@ -1140,11 +1236,78 @@ function wire() {
   let rt; window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => sprite && view === "sprite" && drawSprite(sprite), 100); });
 }
 
+const SUBJECT_RULE = {
+  person: "a full-body character in side view facing right, feet on the bottom row",
+  animal: "the whole animal in side view facing right, feet on the bottom row",
+  object: "the whole object, centred",
+  background: "a complete scene that fills every pixel (no transparency)",
+};
+function drawPromptText(prompt, w, h) {
+  const y = SYSTEMS[S.system], k = Math.max(2, Math.min(S.colors, sysMax())), bg = S.subject === "background";
+  let colours = `Use at most ${k} colours.`;
+  if (y && y.fixed) colours = `Use at most ${k} colours, chosen only from this console palette: ${[...new Set(hexList(y.fixed).map(toHex))].join(" ")}.`;
+  else if (y) colours = `Use at most ${k} colours; every red, green and blue value must be one of ${y.levels.join(", ")} (the ${y.name} colour depth).`;
+  else if (S.palette === "custom" && hexList(S.customHex).length) colours = `Use only these colours: ${hexList(S.customHex).map(toHex).join(" ")}.`;
+  else if (S.palette !== "auto" && BUILTIN[S.palette]) colours = `Use only these colours: ${hexList(BUILTIN[S.palette]).map(toHex).join(" ")}.`;
+  return [
+    `You are an expert pixel artist making a ${y ? y.name + "-style " : ""}game sprite.`,
+    `Draw "${prompt}" as ${SUBJECT_RULE[S.subject]}.`,
+    `The canvas is exactly ${w} pixels wide and ${h} pixels tall; use most of it.`,
+    colours,
+    bg ? "" : `Leave the background transparent.${S.outline ? " Give the subject a clean 1-pixel dark outline." : ""}`,
+    "Make a readable silhouette with simple shading lit from the top-left. No anti-aliasing and no noisy dithering.",
+    `Reply with only JSON: {"palette": ["#rrggbb", ...], "rows": [...]}. "rows" has exactly ${h} strings of exactly ${w} characters each; every character is "." for transparent or 0-9 then a-z, an index into "palette".`,
+  ].filter(Boolean).join("\n");
+}
+function parseDrawing(data, w, h) {
+  const pal = (Array.isArray(data && data.palette) ? data.palette : []).map(c => hexList(String(c))[0]).filter(Boolean);
+  const rows = Array.isArray(data && data.rows) ? data.rows.map(String) : [];
+  if (!pal.length || !rows.length) throw new Error("the reply had no palette or rows");
+  const rgba = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const row = rows[y] || "";
+    for (let x = 0; x < w; x++) {
+      const ch = (row[x] || ".").toLowerCase(), i = parseInt(ch, 36);
+      if (ch === "." || Number.isNaN(i) || !pal[i]) continue;
+      const o = (y * w + x) * 4; rgba[o] = pal[i][0]; rgba[o + 1] = pal[i][1]; rgba[o + 2] = pal[i][2]; rgba[o + 3] = 255;
+    }
+  }
+  return rgba;
+}
+async function drawFromPrompt() {
+  const prompt = $("drawPrompt").value.trim();
+  if (!prompt) { hint("Type what Claude should draw first.", true); return; }
+  if (!sampleFn) { hint("Drawing from a prompt works in the web version inside Claude.", true); return; }
+  const w = Math.max(8, Math.min(64, S.width)), h = Math.max(8, Math.min(64, S.height || S.width));
+  drawCtl = new AbortController();
+  $("btnDraw").disabled = true; $("btnStopDraw").hidden = false; $("busy").hidden = false;
+  hint(`Claude is drawing a ${w}×${h} "${prompt}"… (usually 10–60 s)`);
+  try {
+    const data = await sampleFn.json(drawPromptText(prompt, w, h), { signal: drawCtl.signal, cache: false });
+    const name = prompt.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "drawing";
+    drawn = { w, h, rgba: parseDrawing(data, w, h), name };
+    setView("sprite"); render();
+    hint("Drawn by Claude. Save it, preview the idle, or tap Draw it again for another take.");
+  } catch (e) {
+    const code = e && e.code;
+    if (code === "cancelled") hint("Stopped.");
+    else if (code === "not_granted" || code === "sampling_disabled") { $("drawGroup").hidden = true; hint("Claude isn't allowed to draw here.", true); }
+    else if (code === "rate_limited") hint("Claude is busy or you've hit your usage limit. Try again in a bit.", true);
+    else if (code === "invalid_json") hint("Couldn't read that drawing. Tap Draw it to try again.", true);
+    else hint(`Couldn't draw: ${(e && (e.message || e.code)) || e}`, true);
+  } finally {
+    $("btnDraw").disabled = false; $("btnStopDraw").hidden = true; $("busy").hidden = true;
+  }
+}
+
 async function boot() {
   wire(); syncControls();
   if (host()) {
     $("hostBadge").hidden = false;
     try { const info = await hostCall("info", {}); if (info && info.segment) { $("chipAi").hidden = false; S.bg = "ai"; syncControls(); } } catch { /* older app */ }
+  }
+  if (!host() && window.claude && window.claude.use) {
+    window.claude.use("sample").then(fn => { sampleFn = fn; $("drawGroup").hidden = !fn; }).catch(() => {});
   }
   await loadURL(SAMPLE, "sample");
   hint("Sample: NASA photo (public domain). Take or choose your own photo above.");
