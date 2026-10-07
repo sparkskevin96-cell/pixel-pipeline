@@ -135,13 +135,16 @@ def prepare(rgba: np.ndarray, s: Settings) -> Prepared:
     rgb = adjust(rgb, s.brightness, s.contrast, s.saturation)
     small, mask = pixelize(rgb, alpha, s.patch, s.detail, s.downscale, s.alpha_threshold,
                            wrap=s.tileable)
+    if s.system not in (None, "off"):
+        from .systems import tone_map
+        small = tone_map(s.system, small, mask)
     return Prepared(small, mask)
 
 
 def resolve_palette(s: Settings, pixels: np.ndarray) -> np.ndarray:
     if s.system not in (None, "off"):
         from .systems import system_palette
-        return system_palette(s.system, pixels, s.colors, s.subject)
+        return system_palette(s.system, pixels, s.colors, s.subject, s.look)
     pal = load_palette(s.palette)
     return auto_palette(pixels, s.colors) if pal is None else pal
 

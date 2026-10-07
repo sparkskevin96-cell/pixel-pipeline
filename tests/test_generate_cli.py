@@ -16,7 +16,7 @@ def test_cli_generate_saves_sprites_raw_and_seeds(comfy, tmp_path, capsys):
     assert "seed 7:" in text and "seed 8:" in text
     for i in (1, 2):
         sprite = tmp_path / f"knight-{i}.png"
-        assert Image.open(sprite).size == (24, 32)          # SNES person size
+        assert Image.open(sprite).size == (48, 64)          # readable person size
         assert (tmp_path / f"knight-{i}.raw.png").exists()
         assert (tmp_path / f"knight-{i}.aseprite").exists()
     assert len(fake.prompts) == 2

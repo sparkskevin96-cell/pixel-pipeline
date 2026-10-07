@@ -102,7 +102,11 @@ class MainWindow(QMainWindow):
         self.system = QComboBox()
         self.system.addItem("Off (free colours)", "off")
         for key, sysm in SYSTEMS.items():
-            self.system.addItem(f"{sysm.name} ({sysm.sprite_colors} colours/sprite)", key)
+            self.system.addItem(sysm.name, key)
+        self.look = QComboBox()
+        self.look.addItem("Readable (console colours, recognizable size)", "readable")
+        self.look.addItem("Authentic (one tiny sprite of that era)", "authentic")
+        self.look.setEnabled(False)
         self.width_ = _spin(1, 1024)
         self.height_ = _spin(0, 1024)
         self.height_.setSpecialValueText("auto")
@@ -131,7 +135,7 @@ class MainWindow(QMainWindow):
         self.export_scale = _spin(1, 32)
 
         groups = [
-            ("Subject", [("Type", self.subject), ("Retro system", self.system),
+            ("Subject", [("Type", self.subject), ("Retro system", self.system), ("Look", self.look),
                          ("", self.remove_bg), ("Model", self.model),
                          ("", self.crop)]),
             ("Size", [("Width", self.width_), ("Height", self.height_), ("Fit", self.fit),
@@ -171,6 +175,7 @@ class MainWindow(QMainWindow):
         self.zoom.valueChanged.connect(self.show_sprite)
         self.subject.currentTextChanged.connect(self.apply_preset)
         self.system.currentIndexChanged.connect(lambda *_: self.apply_preset(self.subject.currentText()))
+        self.look.currentIndexChanged.connect(lambda *_: self.apply_preset(self.subject.currentText()))
         self.palette.currentTextChanged.connect(self._palette_changed)
 
     def _build_views(self):
@@ -214,8 +219,9 @@ class MainWindow(QMainWindow):
     # ---- settings <-> controls -----------------------------------------------
     def apply_preset(self, subject: str):
         system = self.system.currentData() or "off"
-        s = settings_for(subject, system=system)
+        s = settings_for(subject, system=system, look=self.look.currentData())
         self.palette.setEnabled(system == "off")
+        self.look.setEnabled(system != "off")
         self._loading = True
         try:
             self.subject.blockSignals(True)
@@ -248,7 +254,8 @@ class MainWindow(QMainWindow):
 
     def current_settings(self) -> Settings:
         return Settings(
-            system=self.system.currentData() or "off", subject=self.subject.currentText(),
+            system=self.system.currentData() or "off", look=self.look.currentData() or "readable",
+            subject=self.subject.currentText(),
             width=self.width_.value(), height=self.height_.value() or None,
             fit=self.fit.currentText(), anchor=self.anchor.currentText(),
             remove_background=self.remove_bg.isChecked(), cutout_model=self.model.currentText(),

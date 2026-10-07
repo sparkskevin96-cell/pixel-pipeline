@@ -93,6 +93,7 @@ pixel-pipeline tileset forest.png --tile 16 -o forest_tiles.png --godot
 
 # Retro console look: original palette / colour depth, colours per sprite, sizes
 pixel-pipeline convert rex.jpg -s animal --system nes -o rex_nes.png      # also snes, gameboy, gbc, sms, genesis, gba, pico8
+pixel-pipeline convert rex.jpg -s animal --system nes --look authentic -o rex_tiny.png   # one 16x16, 3-colour sprite
 
 # Text prompt -> sprite on your own GPU (ComfyUI; setup: docs/LOCAL_AI.md)
 pixel-pipeline generate --check
@@ -121,7 +122,8 @@ pixel-pipeline <command> --help              # every option
 | Setting | CLI | What it does |
 |---|---|---|
 | Subject preset | `-s person\|animal\|object\|background` | Loads sensible defaults for that kind of photo |
-| Retro system | `--system nes\|snes\|gameboy\|gbc\|sms\|genesis\|gba\|pico8` | Original console colours (hardware palette or colour depth), colours per sprite (NES/GB 3, SNES/Genesis/GBA 15), typical sizes and outline style |
+| Retro system | `--system nes\|snes\|gameboy\|gbc\|sms\|genesis\|gba\|pico8` | Original console colours (hardware palette or colour depth) and that era's outline style. Game Boy maps brightness to its 4 shades |
+| Look | `--look readable\|authentic` | With a system. `readable` (default): recognizable size (people 48×64, animals 48×48, objects 32×32) with a multi-palette character's colours (NES 12, Game Boy 4, SNES/Genesis/GBA 32). `authentic`: one sprite of that era (NES 16×24 in 3 colours), faithful but photos turn into blobs |
 | Size | `-W 32 -H 48` | Output size in sprite pixels. `-H 0` keeps the photo's aspect |
 | Fit / anchor | `--fit contain\|cover\|stretch`, `--anchor bottom\|center` | Pad or crop to the size; `bottom` keeps feet on the floor |
 | Background removal | `--bg-removal / --no-bg-removal`, `--model` | Cut the subject out (`u2net_human_seg` for people, `birefnet-general` for best edges) |

@@ -42,16 +42,19 @@ def parse_rows(rows: list[str], palette: list[str]) -> tuple[np.ndarray, np.ndar
 
 
 def sprite_from_rows(rows: list[str], palette: list[str], system: str = "off",
-                     subject: str = "object") -> Sprite:
-    """Build a sprite; with a retro system, colours are snapped to what it can show."""
+                     subject: str = "object", look: str = "readable") -> Sprite:
+    """Build a sprite; with a retro system, colours are snapped to what it can show
+    (look: readable allows a multi-palette character's colours, authentic one palette)."""
     idx, pal = parse_rows(rows, palette)
     if system in (None, "off"):
         return sprite_from_indices(idx, pal)
-    from .systems import SYSTEMS, system_palette
+    from .systems import SYSTEMS, system_palette, tone_map
     mask = idx >= 0
     rgb = np.zeros(idx.shape + (3,), np.uint8)
     rgb[mask] = pal[idx[mask]]
-    sys_pal = system_palette(system, rgb[mask], SYSTEMS[system].max_colors(subject), subject)
+    rgb = tone_map(system, rgb, mask)
+    sys_pal = system_palette(system, rgb[mask], SYSTEMS[system].max_colors(subject, look),
+                             subject, look)
     new = np.full(idx.shape, -1, np.int16)
     new[mask] = nearest(rgb_to_lab(rgb[mask]), rgb_to_lab(sys_pal))
     return sprite_from_indices(new, sys_pal)

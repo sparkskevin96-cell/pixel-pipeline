@@ -14,6 +14,9 @@ class Settings:
     # Retro console look (nes, snes, gameboy, gbc, sms, genesis, gba, pico8) or "off".
     # Sets colours per sprite + the console's colour space; see systems.py.
     system: str = "off"
+    # readable: console colours at a size a photo stays recognizable (48x64 people)
+    # authentic: one tiny sprite of that era (NES 16x24, 3 colours)
+    look: str = "readable"
     subject: str = "object"
 
     # Output size in sprite pixels. height None or 0 keeps the photo's aspect ratio.
@@ -81,7 +84,8 @@ def settings_for(subject: str = "object", **overrides) -> Settings:
     if unknown:
         raise TypeError(f"Unknown setting(s): {', '.join(sorted(unknown))}")
     system = overrides.pop("system", None) or "off"
+    look = overrides.pop("look", None) or "readable"
     values = dict(PRESETS[subject])
-    values.update(system_overrides(system, subject))
+    values.update(system_overrides(system, subject, look))
     values.update({k: v for k, v in overrides.items() if v is not None})
-    return Settings(**{**values, "system": system, "subject": subject})
+    return Settings(**{**values, "system": system, "look": look, "subject": subject})

@@ -37,7 +37,11 @@ wants terse answers and fixes over polish.
 - **Retro systems** (`systems.py`): `system` setting (nes, snes, gameboy, gbc, sms,
   genesis, gba, pico8). It applies original hardware palettes or colour depths, colours
   per sprite, sizes per subject and outline style over the subject preset; explicit
-  settings still win. The JS port in `web/index.html` must stay in sync.
+  settings still win. `look`: `readable` (default; 48x64 people, multi-palette colour
+  budgets) or `authentic` (one era sprite, e.g. NES 16x24 in 3 colours). Kevin found the
+  authentic sizes unrecognizable for photos, hence readable as the default. Game Boy
+  (`mono`) maps photos by brightness (`tone_map`) onto 4 evenly spread DMG shades. The
+  JS port in `web/index.html` must stay in sync.
 - **Prompt → sprite** has three routes. (1) Claude draws it: `drawing.py`
   (`sprite_from_rows`), MCP `draw_sprite`, and the web app's "Draw from a prompt" via the
   artifact `sample` capability, which is hidden in the APK. (2) Local GPU: `generate.py`

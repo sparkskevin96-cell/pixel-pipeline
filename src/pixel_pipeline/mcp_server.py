@@ -40,7 +40,7 @@ from .palettes import BUILTIN, rgb_to_hex
 from .pipeline import convert_batch
 from .quantize import DITHER_MODES
 from .settings import PRESETS, SUBJECTS, Settings, settings_for
-from .systems import SYSTEM_NAMES, SYSTEMS
+from .systems import LOOKS, READABLE_SIZES, SYSTEM_NAMES, SYSTEMS
 from .video import ALIGN_MODES, video_to_sprites
 
 log = logging.getLogger("pixel_pipeline.mcp")
@@ -55,10 +55,16 @@ Subject = Literal[SUBJECTS]
 Dither = Literal[DITHER_MODES]
 IdleStyle = Literal[IDLE_STYLES]
 RetroSystem = Literal[SYSTEM_NAMES]
+Look = Literal[LOOKS]
 SYSTEM_DOC = ("Retro console look: " + "; ".join(
-    f"{k} = {v.name} ({v.sprite_colors} colours/sprite)" for k, v in SYSTEMS.items())
-    + ". Sets the console's palette/colour depth, colours per sprite, typical sizes and outline "
-      "style (explicit width/height/colors still win). off = free colours.")
+    f"{k} = {v.name} ({v.readable_colors} colours readable / {v.sprite_colors} authentic)"
+    for k, v in SYSTEMS.items())
+    + ". Sets the console's palette/colour depth, colours, sizes and outline style "
+      "(explicit width/height/colors still win). off = free colours.")
+LOOK_DOC = ("With a system: readable (default) keeps a photo recognizable: the console's colours "
+            "at " + ", ".join(f"{k} {w}x{h}" for k, (w, h) in READABLE_SIZES.items())
+            + " with a multi-palette character's colours. authentic = one sprite of that era "
+              "(e.g. NES 16x24, 3 colours): faithful, but photos usually become unreadable blobs.")
 Align = Literal[ALIGN_MODES]
 
 GODOT_DOC = ("Also write a Godot 4 SpriteFrames .tres next to the sheet (load it into an "
@@ -249,7 +255,7 @@ def _colours_used(rgba: np.ndarray) -> int:
 
 # Explicit convert_photos parameters; every other Settings field goes through extra_settings.
 _DIRECT = {"width", "height", "palette", "colors", "dither", "outline", "detail", "remove_background",
-           "system", "subject"}
+           "system", "look", "subject"}
 
 
 def _setting_names() -> list[str]:
@@ -334,6 +340,7 @@ def convert_photos(
         description="Kind of photo; loads that preset. person/animal/object cut the subject out "
                     "and outline it; background = wide scene, dithered, no cut-out.")] = "object",
     system: Annotated[RetroSystem, Field(description=SYSTEM_DOC)] = "off",
+    look: Annotated[Look, Field(description=LOOK_DOC)] = "readable",
     width: Annotated[int | None, Field(
         ge=1, le=1024,
         description="Sprite width in true pixels (before `scale`). Typical: 16-64 for characters "
@@ -394,7 +401,7 @@ def convert_photos(
     files = _input_files(paths, skip_outputs=True)
     explicit = {"width": width, "height": height, "palette": None if system != "off" else palette,
                 "colors": colors, "dither": dither, "outline": outline, "detail": detail,
-                "remove_background": remove_background, "system": system}
+                "remove_background": remove_background, "system": system, "look": look}
     settings = _build_settings(subject, explicit, extra_settings)
     folder = _path(out_dir) if out_dir else None
     if folder:
@@ -539,6 +546,7 @@ def video_to_animation(
     out_png: Annotated[str, Field(description="Sprite sheet .png to write (.json etc. go next to it).")],
     subject: Annotated[Subject, Field(description="Preset for the subject in the clip.")] = "animal",
     system: Annotated[RetroSystem, Field(description=SYSTEM_DOC)] = "off",
+    look: Annotated[Look, Field(description=LOOK_DOC)] = "readable",
     frames: Annotated[int, Field(ge=2, le=64, description="How many frames to sample.")] = 8,
     start: Annotated[float | None, Field(ge=0, description="Start time in seconds.")] = None,
     end: Annotated[float | None, Field(
@@ -572,7 +580,7 @@ def video_to_animation(
     src = _input_files([video_path])[0]
     out = _output_png(out_png)
     explicit = {"width": width, "height": height, "palette": None if system != "off" else palette,
-                "colors": colors, "remove_background": remove_background, "system": system}
+                "colors": colors, "remove_background": remove_background, "system": system, "look": look}
     settings = _build_settings(subject, explicit, extra_settings)
     with _work_lock:
         sprites, ms = video_to_sprites(src, settings, frames, start, end, fps, align)
@@ -665,6 +673,7 @@ def generate_sprite(
     out_png: Annotated[str, Field(description="Output .png; the raw AI image is saved as <stem>.raw.png.")],
     subject: Annotated[Subject, Field(description="Shapes the prompt and the conversion preset.")] = "object",
     system: Annotated[RetroSystem, Field(description=SYSTEM_DOC)] = "off",
+    look: Annotated[Look, Field(description=LOOK_DOC)] = "readable",
     width: Annotated[int | None, Field(ge=1, le=1024, description="Sprite width. null = preset/system.")] = None,
     height: Annotated[int | None, Field(ge=0, le=1024, description="Sprite height. null = preset/system.")] = None,
     palette: Annotated[str, Field(description="Same values as convert_photos (ignored with a system).")] = "auto",
@@ -689,7 +698,7 @@ def generate_sprite(
     pass it as init_image. If ComfyUI isn't running the error says how to start it."""
     from .generate import generate_sprite as _generate
     explicit = {"width": width, "height": height, "palette": None if system != "off" else palette,
-                "colors": colors, "system": system}
+                "colors": colors, "system": system, "look": look}
     settings = _build_settings(subject, explicit, extra_settings)
     out = _output_png(out_png)
     init = _input_files([init_image])[0] if init_image else None
@@ -732,6 +741,8 @@ def draw_sprite(
     system: Annotated[RetroSystem, Field(
         description="Snap the colours to a retro console's palette/colour depth and its colours-per-"
                     "sprite limit. " + SYSTEM_DOC)] = "off",
+    look: Annotated[Look, Field(description="readable = a multi-palette character's colours, "
+                                            "authentic = one sprite palette.")] = "readable",
     subject: Annotated[Subject, Field(description="Used for the system's colour limit (background = more).")] = "object",
     scale: Annotated[int, Field(ge=1, le=32, description="Enlargement for the viewing PNG.")] = 8,
     aseprite: Annotated[bool, Field(description="Also write an editable .aseprite.")] = True,
@@ -745,7 +756,7 @@ def draw_sprite(
     make_sprite_sheet and the other tools (use the @1x PNG)."""
     from .drawing import sprite_from_rows
     out = _output_png(out_png)
-    sprite = sprite_from_rows(rows, palette, system, subject)
+    sprite = sprite_from_rows(rows, palette, system, subject, look)
     one_x = out.with_name(out.stem + "@1x.png")
     sprite.save(out, scale)
     sprite.save(one_x, 1)
