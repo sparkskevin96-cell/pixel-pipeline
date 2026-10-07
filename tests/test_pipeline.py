@@ -81,8 +81,9 @@ def test_tileable_removes_the_wrap_seam(gradient):
     assert _seam(tiled.rgba) < _seam(plain.rgba) / 3
 
 
-def test_missing_rembg_raises_helpful_error(gradient, monkeypatch):
-    monkeypatch.setitem(sys.modules, "rembg", None)
+def test_missing_onnxruntime_raises_helpful_error(gradient, monkeypatch):
+    monkeypatch.setattr("pixel_pipeline.cutout._sessions", {})
+    monkeypatch.setitem(sys.modules, "onnxruntime", None)
     with pytest.raises(CutoutUnavailable, match="pixel-pipeline\\[cutout\\]"):
         convert(gradient, settings_for("animal"))
 

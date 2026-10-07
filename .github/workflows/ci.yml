@@ -1,0 +1,101 @@
+# Tests on Linux + Windows; on main (or by hand) also builds the Windows app.
+# Private repo, limited free minutes (Windows counts double), so: pushes only run on
+# main (PRs cover branches), docs-only changes are skipped, a newer push cancels an older
+# run, and the exe is only built for main / manual runs ("Run workflow" in the Actions tab).
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", ".gitignore"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", ".gitignore"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUTF8: "1"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen  # headless Qt for the UI test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Qt system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: Install
+        run: python -m pip install -e ".[dev,ui,cutout]"
+      - name: Test
+        run: python -m pytest -q
+
+  build-windows:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: python -m pip install ".[ui,cutout,build]"
+      - name: Build (PyInstaller)
+        run: pyinstaller packaging/pixel-pipeline.spec --noconfirm
+      - name: Smoke test
+        env:
+          REMBG_HOME: ${{ runner.temp }}\rembg
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $app = "./dist/PixelPipeline"
+          function Check($what) { if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" } }
+
+          & "$app/pixel-pipeline.exe" --help; Check "--help"
+          python -c "from PIL import Image, ImageDraw; im = Image.new('RGB', (320, 240), (70, 130, 200)); ImageDraw.Draw(im).ellipse((90, 50, 230, 210), fill=(220, 120, 40)); im.save('smoke.png')"
+          & "$app/pixel-pipeline.exe" convert smoke.png --no-bg-removal -o smoke-plain.png; Check "convert"
+          # Background removal with the 5 MB u2netp model proves onnxruntime is bundled.
+          & "$app/pixel-pipeline.exe" convert smoke.png --bg-removal --model u2netp -o smoke-cutout.png; Check "convert --bg-removal"
+
+          # Desktop app: opens the main window, quits after 3 s (see packaging/gui_main.py).
+          $env:PIXEL_PIPELINE_SMOKE_TEST = "3"
+          $p = Start-Process "$app/PixelPipeline.exe" -PassThru
+          $null = $p.Handle  # keeps ExitCode readable after exit
+          if (-not $p.WaitForExit(60000)) { $p | Stop-Process -Force; throw "desktop app hung" }
+          if ($p.ExitCode -ne 0) {
+            Get-Content smoke-test-error.txt -ErrorAction SilentlyContinue
+            throw "desktop app failed ($($p.ExitCode))"
+          }
+          "Bundle size: {0:N0} MB" -f ((Get-ChildItem $app -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+      # upload-artifact zips the folder itself, so the download is one zip (no zip-in-zip).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelPipeline-windows
+          path: dist/PixelPipeline/
+          if-no-files-found: error
+          retention-days: 7  # artifacts count against the private-repo storage quota

@@ -29,7 +29,8 @@ from ..video import ALIGN_MODES, video_to_sprites
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.heic *.heif *.webp *.bmp *.tif *.tiff *.gif)"
 VIDEO_FILTER = "Videos (*.mp4 *.mov *.m4v *.avi *.webm *.mkv)"
-CUTOUT_MODELS = ["isnet-general-use", "u2net_human_seg", "birefnet-general", "birefnet-portrait", "u2net"]
+CUTOUT_MODELS = ["isnet-general-use", "u2net_human_seg", "birefnet-general-lite", "birefnet-general",
+                 "birefnet-portrait", "isnet-anime", "u2netp"]
 LOAD_FILE, LOSPEC = "Load file…", "Lospec…"
 ORIGINAL_MAX = 420
 

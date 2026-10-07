@@ -12,18 +12,23 @@ dependencies = [
     "numpy>=1.24",
     "opencv-python-headless>=4.8",
     "pillow>=10",
+    "pillow-heif>=0.16",  # iPhone .heic photos
 ]
 
 [project.optional-dependencies]
 # Background removal (people/animals/objects). CPU is fine for single images.
-cutout = ["rembg[cpu]>=2.0.57"]
+cutout = ["onnxruntime>=1.17"]
 # Same, on an NVIDIA GPU (needs CUDA + cuDNN installed).
-cutout-gpu = ["rembg[gpu]>=2.0.57"]
+cutout-gpu = ["onnxruntime-gpu>=1.17"]
+build = ["pyinstaller>=6.6"]
+# MCP server so Claude can drive the pipeline (pixel-pipeline-mcp).
+mcp = ["mcp>=2.0,<3"]
 ui = ["PySide6>=6.6"]
 dev = ["pytest>=8", "scikit-image>=0.22"]
 
 [project.scripts]
 pixel-pipeline = "pixel_pipeline.cli:main"
+pixel-pipeline-mcp = "pixel_pipeline.mcp_server:main"
 
 [project.gui-scripts]
 pixel-pipeline-ui = "pixel_pipeline.ui.app:main"
