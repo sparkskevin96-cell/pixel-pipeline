@@ -1,0 +1,35 @@
+name: pixel_pipeline
+description: "Pixel Pipeline for Android: the web app (../web/index.html) in a WebView, with native photo picking, on-device subject cut-out and saving."
+publish_to: 'none'
+
+# CI builds with --build-name 1.0.<run number> --build-number <run number>.
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  gal: ^2.3.3
+  google_mlkit_subject_segmentation: ^0.2.1
+  image: ^4.10.1
+  image_picker: ^1.2.4
+  package_info_plus: ^10.2.2
+  path_provider: ^2.1.6
+  share_plus: ^13.3.1
+  url_launcher: ^6.3.3
+  webview_flutter: ^4.14.1
+  webview_flutter_android: ^4.14.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    # Wrapped copy of ../web/index.html, written by `dart run tool/sync_web.dart`.
+    - assets/www/index.html
+    - assets/icon/sprite.png

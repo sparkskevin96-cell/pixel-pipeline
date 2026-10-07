@@ -1,0 +1,10 @@
+# Lints: package:flutter_lints (flutter analyze, run in CI).
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+
+formatter:
+  page_width: 100

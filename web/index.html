@@ -489,10 +489,11 @@ function getAlpha() {
   const key = [S.bg, S.tol, taps.join(","), aiMask ? 1 : 0].join("|");
   if (alphaCache.key === key) return alphaCache.alpha;
   let alpha = new Uint8Array(n).fill(255);
-  if (S.bg === "ai" && aiMask) alpha = aiMask;
-  else if (S.bg === "auto" || (S.bg === "tap" && taps.length)) {
+  const mode = S.bg === "ai" && !aiMask ? "auto" : S.bg; // AI still running: show Auto meanwhile
+  if (mode === "ai") alpha = aiMask;
+  else if (mode === "auto" || (mode === "tap" && taps.length)) {
     let seeds;
-    seeds = S.bg === "auto" ? edgeSeeds(S.tol) : taps;
+    seeds = mode === "auto" ? edgeSeeds(S.tol) : taps;
     const bg = floodBackground(seeds, S.tol);
     const fg = new Uint8Array(n); for (let i = 0; i < n; i++) fg[i] = bg[i] ? 0 : 1;
     const keep = largestComponent(fg, w, h);
@@ -1017,8 +1018,8 @@ async function applyPreset(name) {
   const p = PRESETS[name]; Object.assign(S, p, { subject: name });
   if (S.bg === "auto" && host() && !$("chipAi").hidden) S.bg = "ai";
   syncControls();
-  if (S.bg === "ai" && !aiMask) await runAi();
   schedule();
+  if (S.bg === "ai" && !aiMask) runAi().then(schedule);
 }
 function updateTapButtons() { $("btnUndoTap").disabled = !taps.length; $("btnClearTaps").disabled = !taps.length; }
 
@@ -1028,8 +1029,8 @@ async function loadURL(url, name) {
   setSource(img, name);
   hint(src.hasAlpha ? "Transparent image: background kept as-is." : S.bg === "tap" ? "Open the Photo tab and tap the background." : "Adjust anything below; the sprite updates live.");
   syncControls();
-  if (S.bg === "ai") await runAi();
   schedule();
+  if (S.bg === "ai") runAi().then(schedule);
 }
 async function runAi() {
   if (!host() || !src || src.hasAlpha) return;

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the web app's page background (light theme) so there is no white flash on launch. -->
+    <color name="app_background">#EEF1F6</color>
+    <color name="ic_launcher_background">#3B5DC9</color>
+</resources>

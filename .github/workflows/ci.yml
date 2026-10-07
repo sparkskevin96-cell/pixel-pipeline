@@ -7,9 +7,9 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**", ".gitignore"]
+    paths-ignore: ["**.md", "docs/**", ".gitignore", "mobile/**", "web/**", ".github/workflows/android.yml"]
   pull_request:
-    paths-ignore: ["**.md", "docs/**", ".gitignore"]
+    paths-ignore: ["**.md", "docs/**", ".gitignore", "mobile/**", "web/**", ".github/workflows/android.yml"]
   workflow_dispatch:
 
 permissions:

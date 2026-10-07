@@ -1,0 +1,100 @@
+# Android app (mobile/): the web app in a WebView + native bridge.
+# Builds an arm64 APK and publishes it as the "android-latest" pre-release, so Kevin can
+# download it on his phone from the repo's Releases page. Private repo with limited
+# minutes: only runs when mobile/ or web/ change (or by hand), a newer push cancels an
+# older run, and Flutter + Gradle are cached.
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mobile/**"
+      - "web/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # create/replace the android-latest release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            mobile/android/*.gradle*
+            mobile/android/app/*.gradle*
+            mobile/android/gradle/wrapper/gradle-wrapper.properties
+            mobile/pubspec.lock
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.6  # the version the app was written and tested against
+          cache: true
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Sync the web app into the app assets
+        run: dart run tool/sync_web.dart
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build APK (arm64)
+        run: >-
+          flutter build apk --release --split-per-abi --target-platform android-arm64
+          --build-name "1.0.${{ github.run_number }}" --build-number "${{ github.run_number }}"
+
+      - name: Name the APK
+        id: apk
+        run: |
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk pixel-pipeline-arm64.apk
+          ls -l pixel-pipeline-arm64.apk
+          echo "path=mobile/pixel-pipeline-arm64.apk" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pixel-pipeline-android-1.0.${{ github.run_number }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7  # artifacts count against the private-repo storage quota
+
+      # Replace the previous build: delete the release and its tag, then recreate both at
+      # this commit, so the download link never changes:
+      #   https://github.com/<owner>/<repo>/releases/download/android-latest/pixel-pipeline-arm64.apk
+      - name: Publish the android-latest pre-release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: 1.0.${{ github.run_number }}
+        run: |
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/android-latest" 2>/dev/null || true  # tag left by a failed run
+          gh release create android-latest pixel-pipeline-arm64.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Android app $VERSION" \
+            --notes "Personal sideload build of Pixel Pipeline for Android, version $VERSION, commit ${GITHUB_SHA::7}. Not Play Store signed.
+
+          On your phone: tap pixel-pipeline-arm64.apk below, open the download, and allow your browser to install unknown apps if asked. It installs over the previous build. Details: mobile/README.md."
