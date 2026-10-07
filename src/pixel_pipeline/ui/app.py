@@ -17,12 +17,14 @@ from PySide6.QtWidgets import (
 )
 
 from ..aseprite import write_aseprite
+from ..export import write_animation
 from ..cutout import CutoutUnavailable, remove_background
 from ..palettes import BUILTIN
 from ..pipeline import finish, load_image, prepare
 from ..pixelize import DOWNSCALE_MODES
 from ..quantize import DITHER_MODES
-from ..settings import ANCHORS, FITS, SUBJECTS, Settings, settings_for
+from ..animate import IDLE_STYLES, idle_frames
+from ..settings import ANCHORS, FITS, OUTLINE_STYLES, SUBJECTS, Settings, settings_for
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.gif)"
 CUTOUT_MODELS = ["isnet-general-use", "u2net_human_seg", "birefnet-general", "birefnet-portrait", "u2net"]
@@ -108,7 +110,9 @@ class MainWindow(QMainWindow):
         self.colors = _spin(2, 64)
         self.dither = _combo(DITHER_MODES)
         self.dither_strength = _spin(0, 2, 0.1, 2)
+        self.cleanup = QCheckBox("Clean up stray pixels")
         self.outline = QCheckBox("1px outline")
+        self.outline_style = _combo(OUTLINE_STYLES)
         self.outline_color = _combo(["auto", "#000000"], editable=True)
         self.zoom = _spin(1, 32)
         self.zoom.setValue(8)
@@ -125,7 +129,8 @@ class MainWindow(QMainWindow):
                         ("", self.tileable)]),
             ("Colour", [("Palette", self.palette), ("Colours (auto)", self.colors),
                         ("Dither", self.dither), ("Dither strength", self.dither_strength)]),
-            ("Finish", [("", self.outline), ("Outline colour", self.outline_color)]),
+            ("Finish", [("", self.cleanup), ("", self.outline), ("Outline style", self.outline_style),
+                        ("Outline colour", self.outline_color)]),
             ("View / export", [("Preview zoom", self.zoom), ("PNG export scale", self.export_scale)]),
         ]
         panel = QWidget()
@@ -145,9 +150,10 @@ class MainWindow(QMainWindow):
         for w in (self.width_, self.height_, self.patch, self.detail, self.brightness,
                   self.contrast, self.saturation, self.colors, self.dither_strength):
             w.valueChanged.connect(self.schedule)
-        for w in (self.fit, self.anchor, self.model, self.downscale, self.dither, self.outline_color):
+        for w in (self.fit, self.anchor, self.model, self.downscale, self.dither, self.outline_style,
+                  self.outline_color):
             w.currentTextChanged.connect(self.schedule)
-        for w in (self.remove_bg, self.crop, self.tileable, self.outline):
+        for w in (self.remove_bg, self.crop, self.tileable, self.cleanup, self.outline):
             w.toggled.connect(self.schedule)
         self.zoom.valueChanged.connect(self.show_sprite)
         self.subject.currentTextChanged.connect(self.apply_preset)
@@ -175,6 +181,7 @@ class MainWindow(QMainWindow):
             ("&Open photo…", QKeySequence.Open, self.open_dialog),
             ("Export &PNG…", "Ctrl+E", self.export_png),
             ("Export .&aseprite…", "Ctrl+Shift+E", self.export_aseprite),
+            ("Export &idle animation…", "Ctrl+I", self.export_idle),
             ("&Quit", QKeySequence.Quit, self.close),
         ):
             action = QAction(text, self)
@@ -207,7 +214,9 @@ class MainWindow(QMainWindow):
             self.colors.setValue(s.colors)
             self.dither.setCurrentText(s.dither)
             self.dither_strength.setValue(s.dither_strength)
+            self.cleanup.setChecked(s.cleanup)
             self.outline.setChecked(s.outline)
+            self.outline_style.setCurrentText(s.outline_style)
             self.outline_color.setCurrentText(s.outline_color)
         finally:
             self._loading = False
@@ -224,7 +233,9 @@ class MainWindow(QMainWindow):
             saturation=self.saturation.value(), tileable=self.tileable.isChecked(),
             palette=self.palette.currentText(), colors=self.colors.value(),
             dither=self.dither.currentText(), dither_strength=self.dither_strength.value(),
-            outline=self.outline.isChecked(), outline_color=self.outline_color.currentText(),
+            cleanup=self.cleanup.isChecked(), outline=self.outline.isChecked(),
+            outline_style=self.outline_style.currentText(),
+            outline_color=self.outline_color.currentText(),
         )
 
     def _palette_changed(self, text: str):
@@ -360,6 +371,24 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Saved {path}")
             except Exception as e:  # noqa: BLE001
                 QMessageBox.warning(self, "Export failed", str(e))
+
+    def export_idle(self):
+        """Idle loop as sprite sheet + .aseprite + Godot SpriteFrames."""
+        if self.sprite is None:
+            return
+        style, ok = QInputDialog.getItem(self, "Idle animation", "Style:", list(IDLE_STYLES), 0, False)
+        if not ok:
+            return
+        path = self._save_path(f".{style}.png", "Sprite sheet (*.png)")
+        if not path:
+            return
+        try:
+            frames = idle_frames(self.sprite.rgba, style)
+            written = write_animation(frames, Path(path), 150, "idle", aseprite=True, godot=True,
+                                      palette=self.sprite.palette)
+            self.statusBar().showMessage("Saved " + ", ".join(p.name for p in written))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Export failed", str(e))
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():

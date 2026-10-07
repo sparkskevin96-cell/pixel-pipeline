@@ -18,8 +18,9 @@ from PIL import Image, ImageOps
 
 from .color import adjust, fill_transparent, luminance
 from .cutout import remove_background
+from .finishing import outline_ring, remove_orphans, selout_colors
 from .palettes import auto_palette, hex_to_rgb, load_palette
-from .pixelize import KERNEL_CROSS, make_tileable, pixelize
+from .pixelize import make_tileable, pixelize
 from .quantize import quantize
 from .settings import Settings
 
@@ -156,20 +157,32 @@ def _outline_index(palette: np.ndarray, color: str) -> tuple[np.ndarray, int]:
 
 
 def finish(prep: Prepared, s: Settings, palette: np.ndarray | None = None) -> Sprite:
-    """Snap to the palette, dither, add the outline."""
+    """Snap to the palette, dither, clean up, add the outline."""
     mask = prep.mask.copy()
     pixels = prep.rgb[mask] if mask.any() else prep.rgb.reshape(-1, 3)
     pal = palette if palette is not None else resolve_palette(s, pixels)
     idx = quantize(prep.rgb, mask, pal, s.dither, s.dither_strength)
+    if s.cleanup and s.dither == "none":  # dither patterns are deliberately "lonely" pixels
+        idx = remove_orphans(idx, pal)
     if s.outline:
-        pal, oi = _outline_index(pal, s.outline_color)
-        ring = cv2.dilate(mask.astype(np.uint8), KERNEL_CROSS).astype(bool) & ~mask
-        idx[ring] = oi
+        ring = outline_ring(mask)
+        if s.outline_style == "selout":
+            idx[ring] = selout_colors(idx, ring, pal)[ring]
+        elif s.outline_style == "solid":
+            pal, oi = _outline_index(pal, s.outline_color)
+            idx[ring] = oi
+        else:
+            raise ValueError(f"Unknown outline style '{s.outline_style}' (use solid, selout)")
         mask |= ring
-    rgba = np.zeros(mask.shape + (4,), np.uint8)
-    rgba[mask, :3] = pal[idx[mask]]
+    return sprite_from_indices(idx, pal)
+
+
+def sprite_from_indices(idx: np.ndarray, palette: np.ndarray) -> Sprite:
+    mask = idx >= 0
+    rgba = np.zeros(idx.shape + (4,), np.uint8)
+    rgba[mask, :3] = palette[idx[mask]]
     rgba[mask, 3] = 255
-    return Sprite(rgba, idx, pal)
+    return Sprite(rgba, idx, palette)
 
 
 def convert(src: ImageSource, settings: Settings, palette: np.ndarray | None = None) -> Sprite:
@@ -177,13 +190,20 @@ def convert(src: ImageSource, settings: Settings, palette: np.ndarray | None = N
     return finish(prepare(isolate(load_image(src), settings), settings), settings, palette)
 
 
-def convert_batch(sources: list[ImageSource], settings: Settings,
-                  shared_palette: bool = True) -> list[Sprite]:
-    """Many photos -> sprites. shared_palette keeps colours identical across the set."""
-    preps = [prepare(isolate(load_image(src), settings), settings) for src in sources]
+def sprites_from_rgba(images: list[np.ndarray], settings: Settings,
+                      shared_palette: bool = True) -> list[Sprite]:
+    """Already-isolated RGBA images -> sprites (optionally sharing one palette)."""
+    preps = [prepare(rgba, settings) for rgba in images]
     palette = None
     if shared_palette and preps:
         pixels = np.concatenate([p.rgb[p.mask] if p.mask.any() else p.rgb.reshape(-1, 3)
                                  for p in preps])
         palette = resolve_palette(settings, pixels)
     return [finish(p, settings, palette) for p in preps]
+
+
+def convert_batch(sources: list[ImageSource], settings: Settings,
+                  shared_palette: bool = True) -> list[Sprite]:
+    """Many photos -> sprites. shared_palette keeps colours identical across the set."""
+    return sprites_from_rgba([isolate(load_image(src), settings) for src in sources],
+                             settings, shared_palette)

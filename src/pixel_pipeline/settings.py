@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, fields
 SUBJECTS = ("person", "animal", "object", "background")
 FITS = ("contain", "cover", "stretch")
 ANCHORS = ("bottom", "center")
+OUTLINE_STYLES = ("solid", "selout")
 
 
 @dataclass
@@ -38,8 +39,10 @@ class Settings:
     dither_strength: float = 1.0
 
     # Sprite finishing
+    cleanup: bool = True            # remove stray low-contrast single pixels (keeps highlights)
     outline: bool = True            # 1px outline around the silhouette
-    outline_color: str = "auto"     # auto (darkest palette colour) | #rrggbb
+    outline_style: str = "solid"    # solid (one colour) | selout (darker shade of what it touches)
+    outline_color: str = "auto"     # solid only: auto (darkest palette colour) | #rrggbb
     alpha_threshold: int = 128
 
     def resolve_size(self, src_w: int, src_h: int) -> tuple[int, int]:
@@ -57,7 +60,8 @@ PRESETS: dict[str, dict] = {
     "object": dict(width=32, height=32, anchor="center", detail=1, colors=12, outline=True),
     "background": dict(width=160, height=90, fit="cover", anchor="center",
                        remove_background=False, crop_to_subject=False, detail=1,
-                       colors=32, outline=False, dither="bayer4", dither_strength=0.6),
+                       colors=32, outline=False, dither="bayer4", dither_strength=0.6,
+                       cleanup=False),
 }
 
 

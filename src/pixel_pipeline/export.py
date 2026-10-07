@@ -9,10 +9,34 @@ import numpy as np
 from PIL import Image
 
 from . import __version__
+from .aseprite import write_aseprite
+from .godot import write_sprite_frames
 
 
 def load_rgba(path) -> np.ndarray:
     return np.asarray(Image.open(path).convert("RGBA")).copy()
+
+
+def pixel_scale(rgba: np.ndarray) -> int:
+    """Integer upscale factor of nearest-neighbour-enlarged pixel art (1 if none)."""
+    h, w = rgba.shape[:2]
+    for k in range(math.gcd(h, w), 1, -1):
+        if h % k or w % k:
+            continue
+        small = rgba[::k, ::k]
+        if np.array_equal(np.repeat(np.repeat(small, k, 0), k, 1), rgba):
+            return k
+    return 1
+
+
+def load_sprite(path) -> np.ndarray:
+    """Load pixel art at true 1x size (undoes an upscaled export) with binary alpha."""
+    rgba = load_rgba(path)
+    k = pixel_scale(rgba)
+    if k > 1:
+        rgba = np.ascontiguousarray(rgba[::k, ::k])
+    rgba[..., 3] = np.where(rgba[..., 3] >= 128, 255, 0)
+    return rgba
 
 
 def pack_sheet(frames: list[np.ndarray], columns: int | None = None, padding: int = 0):
@@ -130,3 +154,24 @@ def write_tileset(rgba: np.ndarray, tile: int, out_png, columns: int = 8) -> Pat
     out_tmj = out_png.with_suffix(".tmj")
     out_tmj.write_text(json.dumps(tmj, indent=2), encoding="utf-8")
     return out_tmj
+
+
+def write_animation(frames: list[np.ndarray], out: Path, duration: int, tag: str | None = None,
+                    columns: int | None = None, aseprite: bool = False, godot: bool = False,
+                    palette: np.ndarray | None = None, names: list[str] | None = None) -> list[Path]:
+    """Sheet PNG + JSON, and optionally .aseprite and Godot .tres. Returns written paths."""
+    out = Path(out)
+    columns = columns or len(frames)
+    written = [out, write_sheet(frames, out, columns, duration, tag, names)]
+    if aseprite:
+        if len({f.shape for f in frames}) != 1:
+            raise ValueError(".aseprite animation needs all frames the same size")
+        tags = [(tag, 0, len(frames) - 1)] if tag else []
+        ase = out.with_suffix(".aseprite")
+        write_aseprite(ase, frames, palette, durations=duration, tags=tags)
+        written.append(ase)
+    if godot:
+        _, rects = pack_sheet(frames, columns)
+        written.append(write_sprite_frames(out.with_suffix(".tres"), out.name, rects,
+                                           name=tag or "default", duration_ms=duration))
+    return written
