@@ -56,3 +56,16 @@ def test_cli_system_flag(tmp_path, blob_png, capsys):
     out = tmp_path / "nes.png"
     assert main(["convert", str(blob_png), "-s", "animal", "--system", "nes", "-o", str(out)]) == 0
     assert "(16x16, 3 colours)" in capsys.readouterr().out
+
+
+def test_drawn_rows_become_a_sprite_and_snap_to_a_system():
+    from pixel_pipeline.drawing import sprite_from_rows
+    rows = ["..00..", ".0110.", "012210", ".0110.", "..00.."]
+    pal = ["#101820", "#c83030", "#f0d080"]
+    free = sprite_from_rows(rows, pal)
+    assert free.size == (6, 5) and free.rgba[0, 0, 3] == 0
+    assert colours(free).tolist() == sorted([[16, 24, 32], [200, 48, 48], [240, 208, 128]])
+    gb = sprite_from_rows(rows, pal, system="gameboy")
+    assert within(colours(gb), hex_to_rgb(BUILTIN["gameboy"]))
+    with pytest.raises(ValueError, match="palette has 3"):
+        sprite_from_rows(["05"], pal)

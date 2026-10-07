@@ -121,6 +121,13 @@ async def _session(tmp_path: Path) -> None:
         assert not plx.is_error, _text(plx)
         assert (tmp_path / "plx" / "scene_parallax.tscn").exists() and _images(plx)
 
+        drew = await client.call_tool("draw_sprite", {
+            "rows": ["..00..", ".0110.", "012210", ".0110.", "..00.."],
+            "palette": ["#101820", "#c83030", "#f0d080"], "out_png": str(tmp_path / "gem.png"),
+            "system": "nes"})
+        assert not drew.is_error, _text(drew)
+        assert Image.open(tmp_path / "gem@1x.png").size == (6, 5) and "NES" in _text(drew)
+
 
 def test_mcp_server_over_stdio(tmp_path):
     asyncio.run(_session(tmp_path))

@@ -655,6 +655,46 @@ def parallax_layers(
     return [text + f"\nPreview: all layers stacked, enlarged x{factor}.", _png(preview)]
 
 
+@tool(title="Draw a sprite pixel by pixel")
+def draw_sprite(
+    rows: Annotated[list[str], Field(
+        description="The sprite, one string per pixel row, top to bottom, all the same length. "
+                    "'.' = transparent; 0-9 then a-z = index into `palette`.")],
+    palette: Annotated[list[str], Field(description="Colours as #rrggbb, indexed by the row characters.")],
+    out_png: Annotated[str, Field(description="Where to save the sprite (.png); 1x copy and .aseprite go next to it.")],
+    system: Annotated[RetroSystem, Field(
+        description="Snap the colours to a retro console's palette/colour depth and its colours-per-"
+                    "sprite limit. " + SYSTEM_DOC)] = "off",
+    subject: Annotated[Subject, Field(description="Used for the system's colour limit (background = more).")] = "object",
+    scale: Annotated[int, Field(ge=1, le=32, description="Enlargement for the viewing PNG.")] = 8,
+    aseprite: Annotated[bool, Field(description="Also write an editable .aseprite.")] = True,
+) -> ToolOutput:
+    """YOU draw the sprite yourself, pixel by pixel. Good for icons, items, simple characters
+    and as a rough sketch for generate_sprite's init_image (the local GPU then renders the
+    detail and the converter snaps it back to the grid). Pixel-art tips: 16-48 px, a clear
+    silhouette, 1px dark outline, 3-5 shades per material lit from the top-left, no
+    anti-aliasing, characters in side view feet on the bottom row. Look at the returned
+    preview and redraw anything that reads wrong. The result works with idle_animation,
+    make_sprite_sheet and the other tools (use the @1x PNG)."""
+    from .drawing import sprite_from_rows
+    out = _output_png(out_png)
+    sprite = sprite_from_rows(rows, palette, system, subject)
+    one_x = out.with_name(out.stem + "@1x.png")
+    sprite.save(out, scale)
+    sprite.save(one_x, 1)
+    written = [out, one_x]
+    if aseprite:
+        ase = out.with_suffix(".aseprite")
+        write_aseprite(ase, [sprite.rgba], sprite.palette)
+        written.append(ase)
+    w, h = sprite.size
+    text = (f"Drew {w}x{h} px, {_colours_used(sprite.rgba)} colours"
+            + (f" (snapped to {SYSTEMS[system].name})" if system != "off" else "")
+            + f": {_hex_list(sprite.palette)}\n" + "\n".join(f"  {p}" for p in written))
+    preview, factor = _enlarge(Image.fromarray(sprite.rgba, "RGBA"))
+    return [text + f"\nPreview: enlarged x{factor}.", _png(preview)]
+
+
 @tool(title="Preview an image", read_only=True)
 def preview_image(
     path: Annotated[str, Field(description="Any image file: input photo, sprite, sheet, tileset.")],
