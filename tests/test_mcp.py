@@ -111,6 +111,16 @@ async def _session(tmp_path: Path) -> None:
         assert Image.open(tmp_path / "walk.png").size == (80, 12)
         assert '&"walk"' in (tmp_path / "walk.tres").read_text() and _images(walk)
 
+        depth = tmp_path / "depth.png"
+        Image.fromarray(np.tile(np.linspace(0, 255, 96, dtype=np.uint8)[:, None], (1, 160))).save(depth)
+        scene = tmp_path / "scene.png"
+        Image.fromarray(np.random.default_rng(0).integers(0, 255, (96, 160, 3), dtype=np.uint8)).save(scene)
+        plx = await client.call_tool("parallax_layers", {
+            "photo_path": str(scene), "out_dir": str(tmp_path / "plx"), "width": 64, "height": 36,
+            "depth_path": str(depth)})
+        assert not plx.is_error, _text(plx)
+        assert (tmp_path / "plx" / "scene_parallax.tscn").exists() and _images(plx)
+
 
 def test_mcp_server_over_stdio(tmp_path):
     asyncio.run(_session(tmp_path))

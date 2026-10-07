@@ -605,6 +605,44 @@ def idle_animation(
                              f"{duration_ms} ms/frame", rgbas, written)
 
 
+@tool(title="Parallax background layers", open_world=True)
+def parallax_layers(
+    photo_path: Annotated[str, Field(description="A scenery photo (landscape, street, forest...).")],
+    out_dir: Annotated[str, Field(description="Folder for the layer PNGs, preview and Godot scene.")],
+    layers: Annotated[int, Field(ge=2, le=6, description="Number of depth layers, far to near.")] = 3,
+    width: Annotated[int, Field(ge=16, le=1920, description="Layer width in pixels.")] = 320,
+    height: Annotated[int, Field(ge=16, le=1080, description="Layer height in pixels.")] = 180,
+    palette: Annotated[str, Field(description="Same values as convert_photos; one palette for all layers.")] = "auto",
+    colors: Annotated[int, Field(ge=2, le=256, description="Palette size for auto.")] = 32,
+    dither: Annotated[Dither, Field(description="Dither for all layers.")] = "bayer4",
+    wrap: Annotated[bool, Field(description="Layers repeat seamlessly left-right.")] = True,
+    scroll_scales: Annotated[list[float] | None, Field(
+        description="Godot scroll speed per layer, far to near (default 0.2 / 0.5 / 0.85).")] = None,
+    godot: Annotated[bool, Field(description="Write a Godot 4 Parallax2D scene (.tscn).")] = True,
+    depth_path: Annotated[str | None, Field(
+        description="Optional greyscale depth map to use instead of the model (white = near), "
+                    "e.g. one painted in Aseprite.")] = None,
+) -> ToolOutput:
+    """Split a scenery photo into far/mid/near parallax layers using a local depth model
+    (Depth Anything V2 Small, ~95 MB download on first use), pixelize every layer with ONE
+    shared palette, and write the layer PNGs, a preview and a Godot 4 Parallax2D scene.
+    Best on landscapes; objects that span depths (a cup's rim vs its body) can tear."""
+    from .parallax import make_parallax
+    src = _input_files([photo_path])[0]
+    folder = _path(out_dir)
+    with _work_lock:
+        res = make_parallax(src, folder, None, layers, width, height, palette, colors, dither,
+                            wrap, scroll_scales, godot=godot,
+                            depth=_input_files([depth_path])[0] if depth_path else None)
+    written = list(res["layers"]) + [res["preview"]] + ([res["godot"]] if res.get("godot") else [])
+    text = (f"{src.name}: {len(res['layers'])} layers {width}x{height}, scroll "
+            f"{res['scroll_scales']}, depth cuts {[round(c, 3) for c in res['cuts']]}\n"
+            + "\n".join(f"  {p}" for p in written))
+    with Image.open(res["preview"]) as prev:
+        preview, factor = _enlarge(prev)
+    return [text + f"\nPreview: all layers stacked, enlarged x{factor}.", _png(preview)]
+
+
 @tool(title="Preview an image", read_only=True)
 def preview_image(
     path: Annotated[str, Field(description="Any image file: input photo, sprite, sheet, tileset.")],

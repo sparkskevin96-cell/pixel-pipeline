@@ -1,4 +1,4 @@
-"""Command line: pixel-pipeline convert | video | idle | sheet | tileset | palettes"""
+"""Command line: pixel-pipeline convert | video | idle | parallax | sheet | tileset | palettes"""
 from __future__ import annotations
 
 import argparse
@@ -166,6 +166,53 @@ def _cmd_idle(a) -> int:
     return 0
 
 
+# ---- parallax ------------------------------------------------------------------------------
+
+def _floats(text: str) -> list[float]:
+    try:
+        return [float(v) for v in text.split(",") if v.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected comma-separated numbers, got '{text}'") from None
+
+
+def _add_parallax(sub):
+    p = sub.add_parser("parallax", help="landscape photo -> near/mid/far parallax layers (+ Godot scene)",
+                       description="Estimate depth, split the photo into layers, pixelize them with "
+                                   "one shared palette, and write PNG layers plus a Godot 4 "
+                                   "Parallax2D scene. Works best on scenery.")
+    p.add_argument("photo", type=Path)
+    p.add_argument("-o", "--out", type=Path, required=True, help="output folder")
+    p.add_argument("--name", help="file name prefix (default: photo name)")
+    p.add_argument("--layers", type=int, default=3)
+    p.add_argument("-W", "--width", type=int, default=320)
+    p.add_argument("-H", "--height", type=int, default=180)
+    p.add_argument("--palette", default="auto")
+    p.add_argument("--colors", type=int, default=32)
+    p.add_argument("--dither", choices=DITHER_MODES, default="bayer4")
+    p.add_argument("--wrap", action=BOOL, default=True, help="layers repeat seamlessly left-right")
+    p.add_argument("--scroll", type=_floats, help="scroll speed per layer far->near, e.g. 0.2,0.5,0.85")
+    p.add_argument("--depth", type=Path, help="use this depth map instead of the model (white = near)")
+    p.add_argument("--cuts", type=_floats, help="depth cut points 0-1, e.g. 0.3,0.6")
+    p.add_argument("--fill", choices=("mirror", "rows", "telea", "ns"), default="mirror",
+                   help="how hidden areas behind nearer layers are filled")
+    p.add_argument("--godot", action=BOOL, default=True, help="write the Godot Parallax2D scene")
+    p.add_argument("--scale", type=int, default=1, help="also write an upscaled preview")
+    p.add_argument("--save-depth", action="store_true", help="also write the depth map")
+    p.set_defaults(func=_cmd_parallax)
+
+
+def _cmd_parallax(a) -> int:
+    from .parallax import make_parallax
+    if not a.photo.exists():
+        raise SystemExit(f"error: {a.photo} not found")
+    res = make_parallax(a.photo, a.out, a.name, a.layers, a.width, a.height, a.palette, a.colors,
+                        a.dither, a.wrap, a.scroll, depth=a.depth, thresholds=a.cuts, fill=a.fill,
+                        godot=a.godot, scale=a.scale, save_depth=a.save_depth)
+    written = list(res["layers"]) + [res["preview"]] + [res[k] for k in ("godot", "depth") if res.get(k)]
+    _print_written(f"{a.photo.name}: {len(res['layers'])} layers, scroll {res['scroll_scales']}", written)
+    return 0
+
+
 # ---- sheet / tileset / palettes ------------------------------------------------------------
 
 def _add_sheet(sub):
@@ -219,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_convert(sub)
     _add_video(sub)
     _add_idle(sub)
+    _add_parallax(sub)
     _add_sheet(sub)
     _add_tileset(sub)
     sub.add_parser("palettes", help="list built-in palettes").set_defaults(func=_cmd_palettes)

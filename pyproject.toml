@@ -20,6 +20,8 @@ dependencies = [
 cutout = ["onnxruntime>=1.17"]
 # Same, on an NVIDIA GPU (needs CUDA + cuDNN installed).
 cutout-gpu = ["onnxruntime-gpu>=1.17"]
+# Depth model for parallax layers (same runtime as cutout).
+depth = ["onnxruntime>=1.17"]
 build = ["pyinstaller>=6.6"]
 # MCP server so Claude can drive the pipeline (pixel-pipeline-mcp).
 mcp = ["mcp>=2.0,<3"]

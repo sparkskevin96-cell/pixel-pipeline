@@ -89,6 +89,9 @@ pixel-pipeline sheet frames/*.png -o hero_wave.png --tag wave --duration 120 --a
 pixel-pipeline convert forest.jpg -s background -W 256 -H 144 --tileable -o forest.png
 pixel-pipeline tileset forest.png --tile 16 -o forest_tiles.png --godot
 
+# Scenery photo -> far/mid/near parallax layers + Godot 4 Parallax2D scene
+pixel-pipeline parallax lake.jpg -o bg/ -W 320 -H 180 --scale 3
+
 pixel-pipeline palettes                      # list built-ins
 pixel-pipeline convert me.jpg -s person --palette lospec:resurrect-64 --outline-style selout
 pixel-pipeline <command> --help              # every option
@@ -138,6 +141,12 @@ pixel-pipeline <command> --help              # every option
   `.tres`. For crisp pixels set Project Settings → Rendering → Textures → Default
   Texture Filter = **Nearest**.
 - **Tileset + .tmj**: unique tiles plus a Tiled map that rebuilds the image.
+- **Parallax** (`parallax`): one PNG per depth layer (far one opaque, nearer ones
+  transparent, with hidden areas filled so scrolling never shows holes), sharing one
+  palette, and `<name>_parallax.tscn` with Parallax2D nodes (scroll 0.2 / 0.5 / 0.85,
+  horizontal repeat). Drop the folder into your Godot project and instance the scene. The
+  depth model (Depth Anything V2 Small, ~95 MB) downloads on first use. It works best on
+  scenery. `--depth my_depth.png` uses a hand-painted depth map instead (white = near).
 
 ## Claude (MCP server)
 
@@ -154,8 +163,8 @@ Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`), then restart it:
     "command": "C:\\path\\to\\pixel-pipeline\\.venv\\Scripts\\pixel-pipeline-mcp.exe" } } }
 ```
 
-Tools: `convert_photos`, `video_to_animation`, `idle_animation`, `make_sprite_sheet`,
-`make_tileset`, `preview_image`, `list_palettes`. Every result includes a preview
+Tools: `convert_photos`, `video_to_animation`, `idle_animation`, `parallax_layers`,
+`make_sprite_sheet`, `make_tileset`, `preview_image`, `list_palettes`. Every result includes a preview
 image so Claude can check its work and adjust. Use absolute paths. Example:
 
 > Turn the photos in C:\Users\spark\Pictures\rex into 32x32 animal sprites with the

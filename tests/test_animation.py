@@ -187,3 +187,16 @@ def test_cli_idle_video_tileset_godot(tmp_path, blob_png):
     tiles = tmp_path / "tiles.png"
     assert main(["tileset", str(idle), "--tile", "8", "-o", str(tiles), "--godot"]) == 0
     assert "TileSetAtlasSource" in tiles.with_suffix(".tres").read_text()
+
+
+def test_cli_parallax_with_painted_depth(tmp_path):
+    scene = tmp_path / "scene.png"
+    Image.fromarray(np.random.default_rng(1).integers(0, 255, (90, 160, 3), dtype=np.uint8)).save(scene)
+    depth = tmp_path / "depth.png"
+    Image.fromarray(np.tile(np.linspace(0, 255, 90, dtype=np.uint8)[:, None], (1, 160))).save(depth)
+    out = tmp_path / "bg"
+    assert main(["parallax", str(scene), "-o", str(out), "-W", "64", "-H", "36",
+                 "--depth", str(depth), "--scroll", "0.1,0.4,0.9"]) == 0
+    layers = sorted(out.glob("scene_layer*.png"))
+    assert len(layers) == 3 and all(Image.open(p).size == (64, 36) for p in layers)
+    assert "scroll_scale = Vector2(0.4, 1)" in (out / "scene_parallax.tscn").read_text()
