@@ -1,50 +1,68 @@
 # pixel-pipeline — context for Claude
 
-Kevin "spark" Sparks's personal game-dev tool: photos → pixel-art sprites, sheets,
-tilesets, `.aseprite`. Not a product (yet), and separate from Pawgress. Kevin has a
-game-dev / pixel-art background, wants terse answers and fixes over polish.
+Kevin "spark" Sparks's personal game-dev tool: photos and phone videos → pixel-art
+sprites, animations, sheets, tilesets, `.aseprite`, Godot resources. Separate from
+Pawgress. Kevin has a game-dev / pixel-art background, uses **Godot**, owns
+**Aseprite**, works on Windows (RTX 4080 Laptop, 12 GB VRAM) and an Android phone. He
+wants terse answers and fixes over polish.
 
 ## Decisions (2026-10-07)
 
-- **Hybrid:** free algorithmic converter is the core. AI is a later, optional,
-  pluggable "style" step, and its output always goes back through the converter
-  so it lands on the exact grid and palette.
+- **Hybrid:** the free algorithmic converter is the core. AI is a later, optional,
+  pluggable "style" step, and its output always goes back through the converter so it
+  lands on the exact grid and palette. Next AI step: test PixelLab (40 free gens)
+  against Retro Diffusion API (~$0.01/img) on Kevin's photos. Local models
+  (Qwen-Image-Edit / Flux Kontext via ComfyUI) fit his 12 GB GPU.
 - **Desktop app, Python + Qt (PySide6).** Windows first.
-- **Converter first, AI later.** Then test PixelLab (40 free gens) against Retro
-  Diffusion API (~$0.01/img) on Kevin's own photos before wiring one in. Local
-  models are viable: Kevin has an RTX 4080 Laptop (12 GB VRAM), enough for
-  Qwen-Image-Edit / Flux Kontext quantized via ComfyUI.
-- Kevin **owns Aseprite** (Aseprite MCP servers such as pixel-mcp are an option
-  for Claude-driven cleanup).
 - **No PyTorch in the core.** PixelOE's algorithm is reimplemented in numpy/OpenCV
-  (`pixelize.py`, credited in THIRD_PARTY_NOTICES). rembg is an optional extra.
-- **`.aseprite` is written directly** from the official spec
-  (`docs/ase-file-specs.md` in aseprite/aseprite). Indexed when ≤255 colours with
-  binary alpha (index 0 = transparent), else RGBA. Verified against the
-  independent `ase-parser` npm package, plus the round-trip reader in
-  `tests/test_aseprite.py`.
+  (`pixelize.py`, credited in THIRD_PARTY_NOTICES).
+- **Background removal = rembg's ONNX models run directly with onnxruntime**
+  (`cutout.py`). No rembg dependency (it breaks PyInstaller). Masks match rembg
+  bit-for-bit. Models are cached in `~/.rembg/models`.
+- **`.aseprite` is written directly** from the official spec. Indexed when ≤255
+  colours with binary alpha (index 0 = transparent), else RGBA. Verified against the
+  `ase-parser` npm package and the round-trip reader in `tests/test_aseprite.py`. The
+  web app has a JS port of the same writer.
+- **Godot 4 resources** (`godot.py`): SpriteFrames and TileSet `.tres` with relative
+  texture paths. Verified by loading them in Godot 4.7 headless (set `GODOT_BIN` to run
+  that test).
+- **Phone:** `web/index.html` is a self-contained JS port of the converter (no AI
+  cut-out; colour-based Auto/Tap background removal). It is published as a claude.ai
+  artifact (Goc5YHwKAowqd1bqDDCS9m) and is ALSO the UI of the Android app. `mobile/` is a
+  Flutter shell that loads it and adds native pickImage / ML Kit segment / save through a
+  JS bridge (`window.PixelHost` channel + `window.__pixelHostReply`). Keep that bridge
+  contract stable. The file is a fragment (no doctype/html/head) because the artifact
+  host wraps it; the app wraps it in `tool/sync_web.dart`. Re-publish the artifact after
+  editing it.
+- The container that built this couldn't reach dl.google.com, so APKs build only in
+  GitHub Actions.
 
 ## File map
 
-- `settings.py`: `Settings` dataclass + per-subject `PRESETS`; `settings_for()`
-  (None overrides = keep preset; height 0 = auto aspect)
-- `pipeline.py`: load → isolate → prepare (crop, fit, fill, pixelize) → finish
-  (palette, dither, outline); `convert`, `convert_batch` (shared palette)
-- `pixelize.py`: outline expansion, contrast downscale, tileable cross-fade
-- `quantize.py`: nearest-in-Lab, Bayer, Floyd–Steinberg
-- `palettes.py`: built-ins, .gpl/.hex/image files, `lospec:<slug>` (cached in
-  ~/.cache/pixel-pipeline), auto k-means
-- `cutout.py`: rembg wrapper (`CutoutUnavailable` if the extra isn't installed)
-- `aseprite.py`, `export.py` (sheet JSON, Tiled .tmj), `cli.py`, `ui/app.py`
+- `settings.py`: `Settings` + per-subject `PRESETS`; `settings_for()` (None overrides =
+  keep preset; height 0 = auto aspect)
+- `pipeline.py`: load → isolate → prepare (crop, fit, fill, pixelize) → finish (palette,
+  dither, cleanup, outline); `convert`, `convert_batch`, `sprites_from_rgba` (shared
+  palette)
+- `pixelize.py` (outline expansion, contrast downscale, tileable), `quantize.py`,
+  `palettes.py`, `finishing.py` (orphan cleanup, sel-out), `color.py`
+- `video.py` (frames → aligned sprites, track/fixed), `animate.py` (breathe/bob/sway)
+- `export.py` (sheets + JSON, tilesets + Tiled .tmj, `write_animation`, `load_sprite`
+  undoes upscaled exports), `aseprite.py`, `godot.py`
+- `cli.py` (convert, video, idle, sheet, tileset, palettes), `ui/app.py` (desktop),
+  `mcp_server.py` (MCP tools for Claude; needs mcp>=2)
+- `depth.py` + `parallax.py`: depth-based parallax layers + Godot Parallax2D scene
+- `packaging/` (PyInstaller spec), `.github/workflows/ci.yml` (tests on win+linux, exe on
+  main), `.github/workflows/android.yml` (APK + `android-latest` release)
 
 ## Conventions
 
 - Images are numpy uint8 RGBA (H, W, 4); sprite alpha is binary (0/255).
 - Perceptual maths in Lab via `color.py`.
-- Run `pytest` before pushing; UI test runs headless (`QT_QPA_PLATFORM=offscreen`,
-  needs libEGL on Linux).
+- Run `pytest` before pushing; the UI test runs headless (`QT_QPA_PLATFORM=offscreen`).
+- Private repo with limited Actions minutes: keep workflows lean.
 
-## Next up (roadmap)
+## Next up
 
-AI style pass (PixelLab / Retro Diffusion / ComfyUI), an MCP server for Claude,
-video → frames, sel-out outlines, batch and sheet tools in the UI.
+AI style pass (PixelLab / Retro Diffusion / ComfyUI), palette ramps and shading, batch
+tools in the desktop app, video import on phone.
