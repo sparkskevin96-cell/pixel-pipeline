@@ -139,6 +139,8 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .chip b { font: 500 13.5px/1.3 var(--font-mono); font-variant-numeric: tabular-nums; }
 .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--panel-2); }
 .chip[aria-pressed="true"] b { color: var(--accent); }
+.chip.look { border-color: var(--accent); }
+.chip.look b { color: var(--accent); }
 
 .modes { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; flex: none; padding-inline: 2px; }
 .modes::-webkit-scrollbar { display: none; }
@@ -320,7 +322,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
     <span>Photo</span>
     <div class="opts"><button type="button" class="opt" id="btnSample">Load the sample photo</button></div>
   </div>
-  <p class="sub">Retro systems use each console's original colours: the real NES, Game Boy and PICO-8 palettes, or your photo's colours snapped to what SNES, Genesis and the others could show.</p>
+  <p class="sub">Retro systems use each console's original colours: the real NES, Game Boy and PICO-8 palettes, or your photo's colours snapped to what SNES, Genesis and the others could show. Look: Readable makes a big character (48×64 for people) with the colours games got by stacking sprite palettes; Authentic is one sprite of that era (NES 16×24 in 3 colours), faithful but usually too small to tell what a photo was.</p>
 </section>
 
 <input type="file" id="fileCamera" accept="image/*" capture="environment" hidden>
@@ -349,22 +351,35 @@ const S = {
   subject: "person", width: 32, height: 48, fit: "contain", anchor: "bottom", bg: "auto", crop: true,
   tol: 16, patch: 8, detail: 2, palette: "auto", customHex: "", colors: 16, dither: "none",
   ditherStrength: 1, cleanup: true, outline: true, outlineStyle: "solid", brightness: 0,
-  contrast: 1, saturation: 1, tileable: false, scale: 8, idleStyle: "breathe", system: "off",
+  contrast: 1, saturation: 1, tileable: false, scale: 8, idleStyle: "breathe", system: "off", look: "readable",
 };
 const WORK_MAX = 768;
 const NES_HEX = "7c7c7c 0000fc 0000bc 4428bc 940084 a80020 a81000 881400 503000 007800 006800 005800 004058 000000 bcbcbc 0078f8 0058f8 6844fc d800cc e40058 f83800 e45c10 ac7c00 00b800 00a800 00a844 008888 f8f8f8 3cbcfc 6888fc 9878f8 f878f8 f85898 f87858 fca044 f8b800 b8f818 58d854 58f898 00e8d8 787878 fcfcfc a4e4fc b8b8f8 d8b8f8 f8b8f8 f8a4c0 f0d0b0 fce0a8 f8d878 d8f878 b8f8b8 b8f8d8 00fcfc f8d8f8";
 const RGB555 = Array.from({ length: 32 }, (_, i) => (i << 3) | (i >> 2));
+// Readable look: console colours at a size a photo stays recognizable, with the colours a big
+// multi-sprite character had (rc). Authentic: one sprite of that era (sizes, sprite colours).
+const READABLE_SIZES = { person: [48, 64], animal: [48, 48], object: [32, 32] };
+const DMG_HEX = "081820 346856 88c070 e0f8d0"; // 4 evenly spread Game Boy shades
 const SYSTEMS = { // sprite colours, background colours, sizes per subject, outline, colour space
-  nes: { name: "NES", sprite: 3, bg: 13, outline: "solid", fixed: NES_HEX, sizes: { person: [16, 24], animal: [16, 16], object: [16, 16], background: [256, 240] } },
-  snes: { name: "SNES", sprite: 15, bg: 64, outline: "selout", levels: RGB555, sizes: { person: [24, 32], animal: [32, 32], object: [16, 16], background: [256, 224] } },
-  gameboy: { name: "Game Boy", sprite: 3, bg: 4, outline: "solid", fixed: BUILTIN.gameboy, sizes: { person: [16, 16], animal: [16, 16], object: [16, 16], background: [160, 144] } },
-  gbc: { name: "Game Boy Color", sprite: 3, bg: 32, outline: "solid", levels: RGB555, sizes: { person: [16, 16], animal: [16, 16], object: [16, 16], background: [160, 144] } },
-  sms: { name: "Master System", sprite: 15, bg: 31, outline: "solid", levels: [0, 85, 170, 255], sizes: { person: [16, 24], animal: [16, 16], object: [16, 16], background: [256, 192] } },
-  genesis: { name: "Genesis", sprite: 15, bg: 61, outline: "selout", levels: [0, 52, 87, 116, 144, 172, 206, 255], sizes: { person: [32, 48], animal: [32, 32], object: [24, 24], background: [320, 224] } },
-  gba: { name: "Game Boy Advance", sprite: 15, bg: 64, outline: "selout", levels: RGB555, sizes: { person: [32, 32], animal: [32, 32], object: [16, 16], background: [240, 160] } },
-  pico8: { name: "PICO-8", sprite: 15, bg: 16, outline: "solid", fixed: BUILTIN["pico-8"], sizes: { person: [16, 16], animal: [16, 16], object: [8, 8], background: [128, 128] } },
+  nes: { name: "NES", sprite: 3, rc: 12, bg: 13, outline: "solid", fixed: NES_HEX, sizes: { person: [16, 24], animal: [16, 16], object: [16, 16], background: [256, 240] } },
+  snes: { name: "SNES", sprite: 15, rc: 32, bg: 64, outline: "selout", levels: RGB555, sizes: { person: [24, 32], animal: [32, 32], object: [16, 16], background: [256, 224] } },
+  gameboy: { name: "Game Boy", sprite: 3, rc: 4, bg: 4, outline: "solid", fixed: DMG_HEX, mono: true, sizes: { person: [16, 16], animal: [16, 16], object: [16, 16], background: [160, 144] } },
+  gbc: { name: "Game Boy Color", sprite: 3, rc: 24, bg: 32, outline: "solid", levels: RGB555, sizes: { person: [16, 16], animal: [16, 16], object: [16, 16], background: [160, 144] } },
+  sms: { name: "Master System", sprite: 15, rc: 15, bg: 31, outline: "solid", levels: [0, 85, 170, 255], sizes: { person: [16, 24], animal: [16, 16], object: [16, 16], background: [256, 192] } },
+  genesis: { name: "Genesis", sprite: 15, rc: 32, bg: 61, outline: "selout", levels: [0, 52, 87, 116, 144, 172, 206, 255], sizes: { person: [32, 48], animal: [32, 32], object: [24, 24], background: [320, 224] } },
+  gba: { name: "Game Boy Advance", sprite: 15, rc: 32, bg: 64, outline: "selout", levels: RGB555, sizes: { person: [32, 32], animal: [32, 32], object: [16, 16], background: [240, 160] } },
+  pico8: { name: "PICO-8", sprite: 15, rc: 16, bg: 16, outline: "solid", fixed: BUILTIN["pico-8"], sizes: { person: [16, 16], animal: [16, 16], object: [8, 8], background: [128, 128] } },
 };
-const sysMax = () => { const y = SYSTEMS[S.system]; return y ? (S.subject === "background" ? y.bg : y.sprite) : 256; };
+const sysMax = () => { const y = SYSTEMS[S.system]; return y ? (S.subject === "background" ? y.bg : S.look === "readable" ? y.rc : y.sprite) : 256; };
+const sysSize = (y, subject) => S.look === "readable" && READABLE_SIZES[subject] ? READABLE_SIZES[subject] : y.sizes[subject];
+// Every colour a system can show when that's a short list (hardware palette, or the
+// Master System's 64), else null (deep colour: snap each channel).
+function sysGamut(y) {
+  if (y.fixed) return [...new Set(hexList(y.fixed).map(c => c.join(",")))].map(s => s.split(",").map(Number));
+  if (y.levels.length ** 3 > 64) return null;
+  const out = []; for (const r of y.levels) for (const g of y.levels) for (const b of y.levels) out.push([r, g, b]);
+  return out;
+}
 const IDLE_MS = { breathe: 150, bob: 150, sway: 120, rumble: 70 };
 
 // =========================================================================== colour
@@ -676,14 +691,32 @@ function autoPalette(small, mask, k) {
   for (let c = 0; c < k; c++) { labToRgb(cen[c * 3], cen[c * 3 + 1], cen[c * 3 + 2], o, 0); out.push([o[0], o[1], o[2]]); }
   return sortByL([...new Map(out.map(c => [c.join(","), c])).values()]);
 }
+// Shades-of-one-hue systems (Game Boy): recolour by brightness so light and dark parts land on
+// different shades (like the Game Boy Camera), half stretched to the subject's range, half
+// equalized so each shade gets a fair share. Others: unchanged.
+function toneMap(small, mask) {
+  const y = SYSTEMS[S.system]; if (!y || !y.mono) return;
+  const n = mask.length, lab = [0, 0, 0], lum = new Float32Array(n), vals = [];
+  for (let i = 0; i < n; i++) { rgbToLab(small[i * 3], small[i * 3 + 1], small[i * 3 + 2], lab, 0); lum[i] = lab[0]; if (mask[i]) vals.push(lab[0]); }
+  if (!vals.length) for (let i = 0; i < n; i++) vals.push(lum[i]);
+  vals.sort((a, b) => a - b);
+  const pct = q => { const x = q * (vals.length - 1), i = Math.floor(x), f = x - i; return i + 1 < vals.length ? vals[i] * (1 - f) + vals[i + 1] * f : vals[i]; };
+  const lo = pct(0.02), hi = pct(0.98), ramp = sortByL(sysGamut(y)), top = ramp.length - 1;
+  const rank = v => { let a = 0, b = vals.length; while (a < b) { const m = (a + b) >> 1; if (vals[m] <= v) a = m + 1; else b = m; } return a / vals.length; };
+  for (let i = 0; i < n; i++) {
+    const st = Math.min(1, Math.max(0, (lum[i] - lo) / Math.max(hi - lo, 1e-6)));
+    const t = (st + rank(lum[i])) / 2 * top, j = Math.min(Math.floor(t), top - 1), f = t - j;
+    for (let c = 0; c < 3; c++) small[i * 3 + c] = Math.round(ramp[j][c] * (1 - f) + ramp[j + 1][c] * f);
+  }
+}
 function systemPalette(small, mask) {
   const y = SYSTEMS[S.system], k = Math.max(1, Math.min(S.colors, sysMax()));
   const centers = autoPalette(small, mask, k);
-  if (y.levels) {
+  const hw = sysGamut(y);
+  if (!hw) {
     const snap = v => y.levels.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
     return sortByL([...new Map(centers.map(c => { const s = c.map(snap); return [s.join(","), s]; })).values()]);
   }
-  const hw = [...new Set(hexList(y.fixed).map(c => c.join(",")))].map(s => s.split(",").map(Number));
   const hwLab = new Float32Array(hw.length * 3); hw.forEach((c, i) => rgbToLab(c[0], c[1], c[2], hwLab, i * 3));
   const lab = [0, 0, 0], chosen = [];
   for (const c of centers) {
@@ -808,6 +841,7 @@ function convert() {
   adjust(rgb, n);
   if (S.detail > 0) rgb = matchColor(outlineExpansion(rgb, CW, CH, S.detail, p), rgb, a, n);
   const { small, mask, w, h } = downscale(rgb, a, CW, CH, p);
+  toneMap(small, mask);
   const pal = currentPalette(small, mask);
   const { idx, palLab } = quantize(small, mask, w, h, pal);
   if (S.cleanup && S.dither === "none") removeOrphans(idx, w, h, palLab);
@@ -991,6 +1025,7 @@ function spriteFromDrawn(d) {
   const n = d.w * d.h, small = new Float32Array(n * 3), mask = new Uint8Array(n);
   for (let i = 0; i < n; i++) { small[i * 3] = d.rgba[i * 4]; small[i * 3 + 1] = d.rgba[i * 4 + 1]; small[i * 3 + 2] = d.rgba[i * 4 + 2]; mask[i] = d.rgba[i * 4 + 3] >= 128 ? 1 : 0; }
   let pal;
+  toneMap(small, mask);
   if (S.system !== "off" || S.palette !== "auto") pal = currentPalette(small, mask); // enforce console / chosen palette
   else pal = [...new Map([...Array(n).keys()].filter(i => mask[i]).map(i => { const c = [small[i * 3], small[i * 3 + 1], small[i * 3 + 2]]; return [c.join(","), c]; })).values()];
   if (!pal.length) pal = [[0, 0, 0]];
@@ -1076,7 +1111,21 @@ const CHIP_ORDER = ["width", "height", "colors", "detail", "dither", "ditherStre
 let activeDial = null, dialState = null, settleT = 0;
 const chipEls = {};
 
+const LOOK_LABEL = { readable: "Readable", authentic: "Authentic" };
+let lookChip = null;
 function buildChips() {
+  lookChip = document.createElement("button");
+  const name = document.createElement("span"), val = document.createElement("b");
+  lookChip.type = "button"; lookChip.className = "chip look"; name.textContent = "Look"; lookChip.append(name, val);
+  lookChip.setAttribute("aria-label", "Look: readable or authentic console size");
+  lookChip.addEventListener("click", () => {
+    S.look = S.look === "readable" ? "authentic" : "readable";
+    closeDial(); applyPreset(S.subject);
+    const y = SYSTEMS[S.system];
+    hint(S.look === "readable" ? `Readable: ${y.name} colours at a size you can recognize.`
+                               : `Authentic: one ${y.name} sprite, ${S.width}×${S.height} in ${S.colors} colours. Tiny on purpose.`);
+  });
+  $("chips").append(lookChip);
   for (const k of CHIP_ORDER) {
     const b = document.createElement("button"), name = document.createElement("span"), val = document.createElement("b");
     b.type = "button"; b.className = "chip"; name.textContent = DIALS[k].name; b.append(name, val);
@@ -1085,6 +1134,8 @@ function buildChips() {
   }
 }
 function updateChips() {
+  lookChip.hidden = S.system === "off" || S.subject === "background";
+  lookChip.lastChild.textContent = LOOK_LABEL[S.look];
   for (const k of CHIP_ORDER) {
     const d = DIALS[k], el = chipEls[k], shown = !d.show || d.show();
     el.b.hidden = !shown; el.val.textContent = (d.short || d.fmt)(S[k]);
@@ -1226,7 +1277,7 @@ function renderChrome() {
 async function applyPreset(name) {
   const p = PRESETS[name]; Object.assign(S, p, { subject: name });
   const y = SYSTEMS[S.system];
-  if (y) Object.assign(S, { width: y.sizes[name][0], height: y.sizes[name][1], colors: sysMax(), outlineStyle: y.outline }, name === "background" ? { patch: 4 } : {});
+  if (y) { const [w, h] = sysSize(y, name); Object.assign(S, { width: w, height: h, colors: sysMax(), outlineStyle: y.outline }, name === "background" ? { patch: 4 } : {}); }
   if (S.bg === "auto" && aiAvailable) S.bg = "ai";
   if (dialState) layoutDial();
   renderChrome(); restartAnim();
