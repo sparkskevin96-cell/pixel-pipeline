@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
-from ..animate import IDLE_STYLES, idle_frames
+from ..animate import IDLE_MS, IDLE_STYLES, SUBJECT_IDLE, idle_frames
 from ..aseprite import write_aseprite
 from ..cutout import CutoutUnavailable, remove_background
 from ..export import write_animation
@@ -471,7 +471,9 @@ class MainWindow(QMainWindow):
         """Idle loop as sprite sheet + .aseprite + Godot SpriteFrames."""
         if self.sprite is None:
             return
-        style, ok = QInputDialog.getItem(self, "Idle animation", "Style:", list(IDLE_STYLES), 0, False)
+        styles = list(IDLE_STYLES)
+        default = styles.index(SUBJECT_IDLE.get(self.subject.currentText(), "breathe"))
+        style, ok = QInputDialog.getItem(self, "Idle animation", "Style:", styles, default, False)
         if not ok:
             return
         path = self._save_path(f".{style}.png", "Sprite sheet (*.png)")
@@ -479,7 +481,7 @@ class MainWindow(QMainWindow):
             return
         try:
             frames = idle_frames(self.sprite.rgba, style)
-            written = write_animation(frames, Path(path), 150, "idle", aseprite=True, godot=True,
+            written = write_animation(frames, Path(path), IDLE_MS[style], "idle", aseprite=True, godot=True,
                                       palette=self.sprite.palette)
             self.statusBar().showMessage("Saved " + ", ".join(p.name for p in written))
         except Exception as e:  # noqa: BLE001

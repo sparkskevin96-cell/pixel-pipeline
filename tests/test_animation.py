@@ -65,6 +65,18 @@ def test_breathe_moves_torso_not_feet():
     assert not squashed[4].any() and squashed[5].any()        # top dropped by 1px
 
 
+def test_rumble_shakes_body_keeps_wheels():
+    from pixel_pipeline.animate import rumble
+    rgba = figure()
+    frames = rumble(rgba)
+    assert len(frames) == 2 and frames[0].shape == frames[1].shape
+    still, hop = frames
+    assert np.array_equal(still[-3:], hop[-3:])              # wheels planted
+    top = np.nonzero(still[..., 3].any(1))[0][0]
+    assert np.nonzero(hop[..., 3].any(1))[0][0] == top - 1    # body up 1px
+    assert (hop[..., 3] > 0).sum() > (still[..., 3] > 0).sum() - still.shape[1]  # stays attached
+
+
 def test_bob_and_sway_keep_frame_size_and_pixels():
     rgba = figure()
     for frames in (bob(rgba, 4, 2), sway(rgba, 8, 1), idle_frames(rgba, "breathe")):

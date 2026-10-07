@@ -100,6 +100,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .meta { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .meta-text { font: 500 12px/1.3 var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.idle-ctl { display: flex; align-items: center; gap: 8px; }
+select.mini { width: auto; padding: 5px 8px; font-size: 13px; }
 .swatches { display: flex; flex-wrap: wrap; gap: 2px; min-height: 14px; }
 .swatches span { width: 12px; height: 12px; border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(127,127,127,0.25); }
 .hint { margin: 0; font-size: 13px; color: var(--muted); min-height: 1.45em; }
@@ -182,7 +184,15 @@ textarea { font: 13px/1.4 var(--font-mono); min-height: 64px; resize: vertical; 
     </div>
     <div class="meta">
       <span class="meta-text" id="meta">loading sample…</span>
-      <label class="check" style="font-size:13px"><input type="checkbox" id="animate"> Idle preview</label>
+      <div class="idle-ctl">
+        <label class="check" style="font-size:13px"><input type="checkbox" id="animate"> Idle</label>
+        <select id="idleStyle" class="mini" aria-label="Idle animation style">
+          <option value="breathe">Breathe</option>
+          <option value="bob">Bob</option>
+          <option value="sway">Sway</option>
+          <option value="rumble">Engine rumble</option>
+        </select>
+      </div>
     </div>
     <div class="swatches" id="swatches" aria-label="Palette"></div>
     <p class="hint" id="hint">Sample: NASA photo (public domain). Take or choose your own photo below.</p>
@@ -337,14 +347,7 @@ textarea { font: 13px/1.4 var(--font-mono); min-height: 64px; resize: vertical; 
         <input type="range" id="scale" min="1" max="16" value="8">
         <p class="sub">The pack always includes the true 1× PNG too.</p>
       </div>
-      <div class="row">
-        <label for="idleStyle" style="font-weight:700">Idle animation</label>
-        <select id="idleStyle">
-          <option value="breathe">Breathe: torso moves, feet planted</option>
-          <option value="bob">Bob: floats up and down</option>
-          <option value="sway">Sway: top leans side to side</option>
-        </select>
-      </div>
+      <p class="sub">Idle styles: Breathe (people, animals: torso moves, feet planted), Bob (items float), Sway (plants, hair), Engine rumble (vehicles, machines: body shakes over the wheels). Pick one next to the Idle preview.</p>
       <p class="sub">Pack = PNGs + editable .aseprite + palette (.gpl). Idle = sprite sheet + .json + animated .aseprite + Godot SpriteFrames (.tres).</p>
     </fieldset>
   </section>
@@ -370,10 +373,10 @@ const BUILTIN = {
   "1bit": "000000 ffffff",
 };
 const PRESETS = {
-  person: { patch: 8, width: 32, height: 48, fit: "contain", anchor: "bottom", bg: "auto", crop: true, detail: 2, colors: 16, dither: "none", ditherStrength: 1, cleanup: true, outline: true },
-  animal: { patch: 8, width: 32, height: 32, fit: "contain", anchor: "bottom", bg: "auto", crop: true, detail: 2, colors: 16, dither: "none", ditherStrength: 1, cleanup: true, outline: true },
-  object: { patch: 8, width: 32, height: 32, fit: "contain", anchor: "center", bg: "auto", crop: true, detail: 1, colors: 12, dither: "none", ditherStrength: 1, cleanup: true, outline: true },
-  background: { patch: 4, width: 160, height: 90, fit: "cover", anchor: "center", bg: "keep", crop: false, detail: 1, colors: 32, dither: "bayer4", ditherStrength: 0.6, cleanup: false, outline: false },
+  person: { idleStyle: "breathe", patch: 8, width: 32, height: 48, fit: "contain", anchor: "bottom", bg: "auto", crop: true, detail: 2, colors: 16, dither: "none", ditherStrength: 1, cleanup: true, outline: true },
+  animal: { idleStyle: "breathe", patch: 8, width: 32, height: 32, fit: "contain", anchor: "bottom", bg: "auto", crop: true, detail: 2, colors: 16, dither: "none", ditherStrength: 1, cleanup: true, outline: true },
+  object: { idleStyle: "bob", patch: 8, width: 32, height: 32, fit: "contain", anchor: "center", bg: "auto", crop: true, detail: 1, colors: 12, dither: "none", ditherStrength: 1, cleanup: true, outline: true },
+  background: { idleStyle: "sway", patch: 4, width: 160, height: 90, fit: "cover", anchor: "center", bg: "keep", crop: false, detail: 1, colors: 32, dither: "bayer4", ditherStrength: 0.6, cleanup: false, outline: false },
 };
 const S = {
   subject: "person", width: 32, height: 48, fit: "contain", anchor: "bottom", bg: "auto", crop: true,
@@ -382,6 +385,7 @@ const S = {
   contrast: 1, saturation: 1, tileable: false, scale: 8, idleStyle: "breathe",
 };
 const WORK_MAX = 768;
+const IDLE_MS = { breathe: 150, bob: 150, sway: 120, rumble: 70 };
 
 // =========================================================================== colour
 const LIN = new Float32Array(256);
@@ -832,6 +836,15 @@ function idleFrames(f, style) {
       return o;
     });
   }
+  if (style === "rumble") { // body hops 1px over planted wheels, like an idling engine
+    const room = Math.max(0, 1 - top), base = pad(f, room, 0, 0, 0), t = top + room, b = bot + room;
+    const cut = t + Math.round((b - t) * 0.7);
+    return [0, 1].map(off => {
+      const o = { w: base.w, h: base.h, rgba: base.rgba.slice() };
+      if (off) { for (let y = t - 1; y < cut; y++) row(o, y).set(row(base, y + 1)); row(o, cut).set(row(base, cut)); }
+      return o;
+    });
+  }
   const cut = top + Math.round((bot - top) * 0.45);
   return wave(4, 1).map(off => {
     const o = { w: f.w, h: f.h, rgba: f.rgba.slice() };
@@ -995,7 +1008,7 @@ function restartAnim() {
   clearInterval(animTimer);
   if (!$("animate").checked || !sprite) return;
   const frames = idleFrames(sprite, S.idleStyle); let i = 0;
-  animTimer = setInterval(() => { i = (i + 1) % frames.length; drawSprite(frames[i]); }, 150);
+  animTimer = setInterval(() => { i = (i + 1) % frames.length; drawSprite(frames[i]); }, IDLE_MS[S.idleStyle] || 150);
 }
 function setView(v) {
   view = v; $("tabSprite").setAttribute("aria-selected", v === "sprite"); $("tabPhoto").setAttribute("aria-selected", v === "photo");
@@ -1017,7 +1030,7 @@ function syncControls() {
 async function applyPreset(name) {
   const p = PRESETS[name]; Object.assign(S, p, { subject: name });
   if (S.bg === "auto" && host() && !$("chipAi").hidden) S.bg = "ai";
-  syncControls();
+  syncControls(); restartAnim();
   schedule();
   if (S.bg === "ai" && !aiMask) runAi().then(schedule);
 }
@@ -1078,7 +1091,7 @@ async function savePack() {
 }
 async function saveIdle() {
   if (!sprite) return;
-  const frames = idleFrames(sprite, S.idleStyle), sheet = sheetOf(frames), base = `${src.name}.idle`, ms = 150;
+  const frames = idleFrames(sprite, S.idleStyle), sheet = sheetOf(frames), base = `${src.name}.idle`, ms = IDLE_MS[S.idleStyle] || 150;
   const files = [
     { name: `${base}.png`, data: await pngBytes(frameCanvas(sheet, 1)) },
     { name: `${base}@${S.scale}x.png`, data: await pngBytes(frameCanvas(sheet, S.scale)) },

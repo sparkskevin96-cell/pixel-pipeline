@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .animate import IDLE_STYLES, idle_frames
+from .animate import IDLE_MS, IDLE_STYLES, idle_frames
 from .aseprite import write_aseprite
 from .cutout import CutoutUnavailable
 from .export import load_rgba, load_sprite, write_animation, write_tileset
@@ -150,10 +150,12 @@ def _cmd_video(a) -> int:
 def _add_idle(sub):
     p = sub.add_parser("idle", help="sprite -> looping idle animation (breathe / bob / sway)")
     p.add_argument("sprite", type=Path, help="a pixel-art sprite PNG (e.g. from convert)")
-    _add_animation_out(p, default_tag="idle", duration_help="ms per frame (default 150)")
+    _add_animation_out(p, default_tag="idle",
+                       duration_help="ms per frame (default: 150, sway 120, rumble 70)")
     p.add_argument("--style", choices=IDLE_STYLES, default="breathe",
-                   help="breathe (characters), bob (floating items), sway (plants, hair)")
-    p.add_argument("--frames", type=int, help="frames in the loop (default 4; sway 8)")
+                   help="breathe (characters), bob (floating items), sway (plants, hair), "
+                        "rumble (vehicles, machines)")
+    p.add_argument("--frames", type=int, help="frames in the loop (default 4; sway 8; rumble 2)")
     p.add_argument("--amount", type=int, default=1, help="movement in pixels (default 1)")
     p.set_defaults(func=_cmd_idle)
 
@@ -161,7 +163,8 @@ def _add_idle(sub):
 def _cmd_idle(a) -> int:
     rgba = load_sprite(a.sprite)
     frames = idle_frames(rgba, a.style, a.frames, a.amount)
-    written = write_animation(frames, a.out, a.duration or 150, a.tag, a.columns, a.aseprite, a.godot)
+    written = write_animation(frames, a.out, a.duration or IDLE_MS[a.style], a.tag, a.columns,
+                              a.aseprite, a.godot)
     _print_written(f"{a.sprite.name}: {len(frames)}-frame {a.style}", written)
     return 0
 

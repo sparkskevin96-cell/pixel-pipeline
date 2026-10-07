@@ -32,7 +32,7 @@ from pydantic import Field
 from . import __version__
 from .aseprite import write_aseprite
 from .cutout import CutoutUnavailable
-from .animate import IDLE_STYLES, idle_frames
+from .animate import IDLE_MS, IDLE_STYLES, idle_frames
 from .export import load_rgba, load_sprite, write_animation, write_tileset
 from .godot import write_tileset as write_godot_tileset
 from .palettes import BUILTIN, rgb_to_hex
@@ -584,11 +584,13 @@ def idle_animation(
     style: Annotated[IdleStyle, Field(
         description="breathe = torso squashes 1px, feet planted (characters, animals). bob = whole "
                     "sprite floats (pickups, flying). sway = top leans side to side (plants, "
-                    "trees, hair, flags).")] = "breathe",
+                    "trees, hair, flags). rumble = body shakes over planted wheels (vehicles, "
+                    "machines idling).")] = "breathe",
     frames: Annotated[int | None, Field(
-        ge=2, le=32, description="Frames in the loop. null = 4 (sway 8).")] = None,
+        ge=2, le=32, description="Frames in the loop. null = 4 (sway 8, rumble 2).")] = None,
     amount: Annotated[int, Field(ge=1, le=8, description="Movement in pixels.")] = 1,
-    duration_ms: Annotated[int, Field(ge=1, le=60000, description="ms per frame.")] = 150,
+    duration_ms: Annotated[int | None, Field(
+        ge=1, le=60000, description="ms per frame. null = style default (150; sway 120; rumble 70).")] = None,
     tag: Annotated[str, Field(description="Animation name.")] = "idle",
     aseprite: Annotated[bool, Field(description="Also write an animated .aseprite.")] = True,
     godot: Annotated[bool, Field(description=GODOT_DOC)] = False,
@@ -599,6 +601,7 @@ def idle_animation(
     out = _output_png(out_png)
     rgba = load_sprite(src)
     rgbas = idle_frames(rgba, style, frames, amount)
+    duration_ms = duration_ms or IDLE_MS[style]
     written = write_animation(rgbas, out, duration_ms, tag, None, aseprite, godot)
     h, w = rgbas[0].shape[:2]
     return _animation_result(f"{src.name}: {len(rgbas)}-frame {style} loop, {w}x{h} px, "

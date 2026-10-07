@@ -3,12 +3,15 @@
 breathe  upper body squashes down by `amount` px and back (characters, animals)
 bob      whole sprite floats up and down (pickups, flying things)
 sway     top leans left/right, bottom stays planted (plants, trees, hair, flags)
+rumble   body shakes over planted wheels/base (vehicles, machines idling)
 """
 from __future__ import annotations
 
 import numpy as np
 
-IDLE_STYLES = ("breathe", "bob", "sway")
+IDLE_STYLES = ("breathe", "bob", "sway", "rumble")
+IDLE_MS = {"breathe": 150, "bob": 150, "sway": 120, "rumble": 70}  # good default frame times
+SUBJECT_IDLE = {"person": "breathe", "animal": "breathe", "object": "bob", "background": "sway"}
 
 
 def _wave(frames: int, amount: int) -> list[int]:
@@ -73,6 +76,25 @@ def sway(rgba: np.ndarray, frames: int = 8, amount: int = 1, pivot: float = 0.75
     return out
 
 
+def rumble(rgba: np.ndarray, frames: int = 2, amount: int = 1, pivot: float = 0.7) -> list[np.ndarray]:
+    """Engine idle: everything above `pivot` (fraction down the body) hops up `amount` px on
+    alternate frames, stretching the row above the wheels so the body stays attached."""
+    top, bottom = _opaque_rows(rgba)
+    room = max(0, amount - top)
+    base = _pad(rgba, top=room)
+    top, bottom = top + room, bottom + room
+    cut = top + int(round((bottom - top) * pivot))
+    out = []
+    for i in range(frames):
+        off = amount if i % 2 else 0
+        f = base.copy()
+        if off:
+            f[top - off:cut + 1 - off] = base[top:cut + 1]
+            f[cut + 1 - off:cut + 1] = base[cut]
+        out.append(f)
+    return out
+
+
 def idle_frames(rgba: np.ndarray, style: str = "breathe", frames: int | None = None,
                 amount: int = 1) -> list[np.ndarray]:
     if style == "breathe":
@@ -81,4 +103,6 @@ def idle_frames(rgba: np.ndarray, style: str = "breathe", frames: int | None = N
         return bob(rgba, frames or 4, amount)
     if style == "sway":
         return sway(rgba, frames or 8, amount)
+    if style == "rumble":
+        return rumble(rgba, frames or 2, amount)
     raise ValueError(f"Unknown idle style '{style}' (use {', '.join(IDLE_STYLES)})")
