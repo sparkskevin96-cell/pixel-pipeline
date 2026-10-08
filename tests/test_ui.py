@@ -45,3 +45,38 @@ def test_video_import_animates_and_exports(app, tmp_path):
     written = write_animation(win.anim["frames"], tmp_path / "walk.png", win.anim["ms"], "walk",
                               aseprite=True, godot=True, palette=win.anim["palette"])
     assert all(p.exists() for p in written)
+
+
+def test_model_studio_makes_saves_and_updates(app, tmp_path, monkeypatch):
+    trimesh = pytest.importorskip("trimesh")
+    import numpy as np
+    from PIL import Image
+
+    import pixel_pipeline.model3d as model3d
+    from pixel_pipeline.ui.model_studio import ModelStudio
+
+    def fake_prompt_to_model(prompt, out, *, progress=None, seed=None, **kw):
+        body = trimesh.creation.box(extents=[0.6, 1.2, 0.4])
+        body.visual.vertex_colors = np.tile(np.array([200, 40, 40, 255], np.uint8), (8, 1))
+        body.export(out)
+        pic = out.with_suffix(".front.png")
+        Image.new("RGBA", (64, 64), (200, 40, 40, 255)).save(pic)
+        progress("picture", "Making a front picture")
+        return model3d.ModelResult(out, pic, None, 42)
+
+    monkeypatch.setattr(model3d, "prompt_to_model", fake_prompt_to_model)
+    win = ModelStudio()
+    win.sync = True
+    win.prompt.setText("a red box knight")
+    win.directions.setCurrentText("8")
+    win.make()
+    assert len(win.sprites) == 8 and len(win.spin) == 8 and win.result.seed == 42
+    assert not win.model_view.pixmap().isNull() and not win.sprite_view.pixmap().isNull()
+    assert win.save_btn.isEnabled()
+    written = win.save_all(str(tmp_path / "knight.glb"))
+    names = {p.name for p in written}
+    assert {"knight.glb", "knight.front.png", "knight_dirs.png", "knight_dirs.tres",
+            "knight_dirs_facing.gd", "knight_dirs_spin.gif"} <= names
+    win.directions.setCurrentText("4")
+    win.update_sprites()
+    assert len(win.sprites) == 4

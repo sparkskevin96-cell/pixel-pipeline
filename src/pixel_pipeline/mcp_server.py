@@ -166,10 +166,10 @@ def _input_files(paths: list[str], skip_outputs: bool = False) -> list[Path]:
     return out
 
 
-def _output_png(raw: str) -> Path:
+def _output_png(raw: str, suffix: str = ".png") -> Path:
     p = _path(raw)
-    if p.suffix.lower() != ".png":
-        raise ToolError(f"Output must be a .png path, got {p}")
+    if p.suffix.lower() != suffix:
+        raise ToolError(f"Output must be a {suffix} path, got {p}")
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -653,6 +653,67 @@ def turnaround(
             f"{_hex_list(sprites[0].palette)}\n" + "\n".join(f"  {p}" for p in written))
     preview = _contact_sheet([s.rgba for s in sprites], direction_names(directions))
     return [text + "\nPreview: every direction, clockwise from facing right (E).", _png(preview)]
+
+
+@tool(title="Prompt to 3D model (local GPU)", open_world=True)
+def prompt_to_model(
+    out_glb: Annotated[str, Field(description="Coloured model to write (.glb). The front picture "
+                                              "(<name>.front.png) and raw shape go next to it.")],
+    prompt: Annotated[str | None, Field(
+        description="What to make, e.g. 'a knight with a red cape'. Plain words; it's wrapped "
+                    "into a clean full-body front-view prompt.")] = None,
+    subject: Annotated[Literal["person", "animal", "object"], Field(
+        description="Shapes the picture prompt.")] = "person",
+    picture: Annotated[str | None, Field(
+        description="Use this front picture instead of a prompt (absolute path).")] = None,
+    back: Annotated[str | None, Field(
+        description="Optional back-view picture, used to colour the far side.")] = None,
+    shape: Annotated[str | None, Field(
+        description="Use this ready shape (.glb) instead of ComfyUI; needs `picture`.")] = None,
+    seed: Annotated[int | None, Field(description="Re-make a specific result.")] = None,
+    directions: Annotated[Literal[0, 4, 8, 16], Field(
+        description="Also make this many facing sprites (0 = model only).")] = 16,
+    width: Annotated[int, Field(ge=8, le=512, description="Sprite width.")] = 48,
+    height: Annotated[int, Field(ge=8, le=512, description="Sprite height.")] = 48,
+    colors: Annotated[int, Field(ge=2, le=64, description="Sprite palette size.")] = 24,
+    elevation: Annotated[float, Field(ge=0, le=89, description="Sprite camera tilt, degrees.")] = 30.0,
+) -> ToolOutput:
+    """Make a coloured 3D model on the user's own GPU: prompt -> clean front picture (SDXL) ->
+    3D shape (Hunyuan3D in ComfyUI) -> painted from the picture -> .glb, then (by default)
+    16-direction sprites with Godot/Aseprite files. Takes 1-3 minutes. The back is guessed
+    from the front unless `back` is given. If ComfyUI or the Hunyuan3D checkpoint is
+    missing, the error says what to install (docs/LOCAL_AI.md)."""
+    from .model3d import prompt_to_model as _make
+    out = _output_png(out_glb, ".glb")
+    pic = _input_files([picture])[0] if picture else None
+    bk = _input_files([back])[0] if back else None
+    shp = _input_files([shape])[0] if shape else None
+    if not prompt and pic is None:
+        raise ToolError("Give a prompt or a picture.")
+    steps: list[str] = []
+    with _work_lock:
+        res = _make(prompt, out, subject=subject, picture=pic, back=bk, shape=shp, seed=seed,
+                    progress=lambda step, text: steps.append(text))
+        written = [res.model, res.picture] + ([res.raw] if res.raw else [])
+        sprites = None
+        if directions:
+            from .turnaround import render_model, turnaround_sprites, union_crop
+            s = settings_for(subject, width=width, height=height, colors=colors)
+            views = union_crop(render_model(res.model, directions, elevation),
+                               s.margin, s.alpha_threshold)
+            sprites = turnaround_sprites(views, s)
+            written += write_turnaround(sprites, res.model.with_name(res.model.stem + "_dirs.png"),
+                                        aseprite=True, godot=True)
+    seed_text = f" (seed {res.seed})" if res.seed is not None else ""
+    text = ("\n".join(steps) + f"\nModel{seed_text}:\n" + "\n".join(f"  {p}" for p in written))
+    blocks: ToolOutput = [text]
+    front = Image.open(res.picture).convert("RGBA") if res.picture.suffix == ".png" else None
+    if front is not None:
+        blocks.append(_png(_enlarge(front, 1)[0] if max(front.size) <= 512 else front.resize(
+            (512, round(512 * front.size[1] / front.size[0])))))
+    if sprites:
+        blocks.append(_png(_contact_sheet([sp.rgba for sp in sprites], direction_names(directions))))
+    return blocks
 
 
 @tool(title="Idle animation from a sprite")

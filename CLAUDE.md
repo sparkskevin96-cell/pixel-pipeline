@@ -47,8 +47,15 @@ wants terse answers and fixes over polish.
   camera (`elevation`), one scale/palette; or photos/video walking around a subject
   (`views_from_capture`: start in front, walk right; `mirror` for half captures).
   Directions follow Godot's Vector2.angle (E, ESE, SE ... clockwise); `--godot` writes an
-  animation per direction plus `_facing.gd`. Kevin's plan: prompt -> front image ->
-  image-to-3D AI (not wired yet; docs/LOCAL_AI.md lists options for 12 GB) -> turnaround.
+  animation per direction plus `_facing.gd`.
+- **Prompt to Model** (`model3d.py`, CLI `model`, MCP `prompt_to_model`, Qt
+  `ui/model_studio.py` = `pixel-pipeline-model` / Ctrl+M / `--model`): prompt -> SDXL front
+  picture (no pixel LoRA) -> ComfyUI native Hunyuan3D 2.1 shape (workflow mirrors ComfyUI's
+  own blueprint; history key "3d") -> `paint_from_picture` (finds orientation by silhouette
+  IoU over 24 rotations, projects the picture on front-visible vertices, blurred
+  through-projection behind, optional back picture) -> turnaround. Untested on a real GPU;
+  the fake ComfyUI in tests/test_generate.py knows the 3D nodes. ComfyUI source for node
+  names: github.com/Comfy-Org/ComfyUI comfy_extras/nodes_hunyuan3d.py, nodes_save_3d.py.
 - **Sprite scale research** (`docs/SPRITE_SCALE.md`, interactive page artifact
   Jv1VrzgNjgmiH4LgAQg1SR): character height as a share of screen height for 41 classic
   games by genre, and the matching sprite heights. Kevin decided all his games render at

@@ -133,6 +133,56 @@ palette.
 | Several characters / a sprite sheet instead of one | Re-roll (new seed), simplify the prompt, or use `--init` with a sketch. |
 | Background not cut out cleanly | Try `--model birefnet-general`, or a plainer prompt ("on a plain white background"). |
 
+## Prompt to 3D model (the Prompt to Model app)
+
+Type what you want; your GPU makes a front picture, turns it into a 3D shape with
+Hunyuan3D 2.1 (built into ComfyUI), the tool paints the shape from the picture, then shows it
+spinning next to its 4/8/16-direction sprites. **Save all** writes the `.glb`, the picture, the
+sprite sheet + `.json`, `.aseprite`, Godot SpriteFrames + a facing script, and a spinning GIF.
+
+Setup (once, on top of steps 1–3 above):
+1. **Update ComfyUI** (portable: run `update\update_comfyui.bat`). The Hunyuan3D nodes and
+   "Voxel to Mesh" need a 2025 or newer ComfyUI.
+2. **Download** [hunyuan_3d_v2.1.safetensors](https://huggingface.co/Comfy-Org/hunyuan3D_2.1_repackaged/resolve/main/hunyuan_3d_v2.1.safetensors)
+   (several GB) into `ComfyUI\models\checkpoints\`. Restart ComfyUI. Older Hunyuan3D 2.0
+   checkpoints (`hunyuan3d-dit-v2-0`, `-mini`, `-mv`) work too; the first one installed is used.
+3. Open the app: **`pixel-pipeline-model`**, or **PixelPipeline.exe → File → Prompt to 3D model**
+   (Ctrl+M), or `PixelPipeline.exe --model`. Command line:
+
+   ```
+   pixel-pipeline model "a knight with a red cape" -o knight.glb --directions 16 --godot --aseprite
+   pixel-pipeline model --image my_drawing.png -o hero.glb          # your own front picture
+   pixel-pipeline model --image front.png --back back.png -o hero.glb  # better colours behind
+   ```
+
+How it works and what to expect (not yet timed on your laptop):
+- **Picture** (~10 s): SDXL **without** the pixel-art LoRA, prompted for one whole subject
+  facing the viewer on plain white with even light. Clean pictures rebuild best.
+- **Shape** (likely 1–3 min): Hunyuan3D 2.1, wired exactly like ComfyUI's own "Image to Model
+  (Hunyuan3d 2.1)" template (30 steps, cfg 5, octree 256). About 10 GB of VRAM, so close games
+  and other GPU apps first. `--octree 192` is lighter, `384` more detailed.
+- **Colour** (CPU, ~10–40 s): Hunyuan's own texture step needs ~21 GB, so the tool paints the
+  shape itself: the picture goes onto everything the front view shows (it finds the model's
+  orientation by matching outlines), and the back gets a blurred version of the front
+  straight through, so a red cape stays red behind but the back of a head may come out skin
+  coloured. Give a back-view picture (`--back`, or draw one) to fix that.
+- **Sprites**: rendered with one camera tilt (`--elevation 30` top-down/isometric, `0` side
+  view), one scale and one palette. Pick the size with the [sprite scale table](SPRITE_SCALE.md).
+
+Swap in a different 3D model maker: export any ComfyUI workflow in API format with
+`{{image}}` in its LoadImage and a "Save 3D Model" (SaveGLB) node at the end, and pass it with
+`--template`. A model that comes back with its own colours (e.g. ComfyUI's TRELLIS.2 nodes on a
+16 GB+ GPU) is kept as it is. Or skip the GPU: **Open a 3D model…** in the app takes any
+`.glb` (Tripo, Meshy, Blender, ...).
+
+| Problem | Fix |
+|---|---|
+| `No Hunyuan3D checkpoint in ComfyUI/models/checkpoints` | Download it (step 2) into that folder and restart ComfyUI. |
+| `Node 'VoxelToMesh' has unknown class_type` (or `EmptyLatentHunyuan3Dv2`) | Update ComfyUI (step 1). |
+| Out of memory during the shape | Close other GPU apps, use `--octree 192`, or add `--lowvram` to the ComfyUI start line. |
+| Model's colours look shifted or "the outline only matches the picture N%" | The shape doesn't match the picture well (often extra props or a cropped picture). Re-roll with another seed, or simplify the prompt. |
+| Wrong way round in the sprites | It found the back instead of the front: turn it with `turnaround model.glb --yaw 180`. |
+
 ## Image to 3D (for 8- and 16-direction sprites)
 
 `pixel-pipeline turnaround model.glb` turns any 3D model into 4, 8 or 16 facing sprites. To

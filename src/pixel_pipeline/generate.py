@@ -370,6 +370,30 @@ class ComfyClient:
             images.append(img)
         return images
 
+    def fetch_files(self, prompt_id: str, entry: dict | None = None,
+                    suffixes: tuple[str, ...] = (".glb", ".gltf", ".obj", ".ply", ".stl"),
+                    ) -> list[tuple[str, bytes]]:
+        """Files a finished prompt saved whose names end in `suffixes` (e.g. SaveGLB's
+        "3d" outputs): [(filename, bytes)]."""
+        if entry is None:
+            entry = (self._get_json(f"/history/{urllib.parse.quote(prompt_id)}") or {}).get(prompt_id) or {}
+        refs = []
+        for nid in sorted(entry.get("outputs") or {}, key=str):
+            for items in (entry["outputs"][nid] or {}).values():
+                if isinstance(items, list):
+                    refs += [r for r in items if isinstance(r, dict)
+                             and str(r.get("filename", "")).lower().endswith(suffixes)]
+        files = []
+        for r in refs:
+            query = urllib.parse.urlencode({"filename": r.get("filename", ""),
+                                            "subfolder": r.get("subfolder", ""),
+                                            "type": r.get("type", "output")})
+            try:
+                files.append((str(r["filename"]), self._request("GET", f"/view?{query}", timeout=120)))
+            except _HTTPStatus as e:
+                raise ComfyUIError(f"ComfyUI couldn't send {r.get('filename')} (HTTP {e.code}).") from None
+        return files
+
     def upload_image(self, image: ImageSource, name: str | None = None) -> str:
         """POST /upload/image into ComfyUI's input folder. Returns the name LoadImage wants."""
         img = image if isinstance(image, Image.Image) else Image.fromarray(load_image(image))

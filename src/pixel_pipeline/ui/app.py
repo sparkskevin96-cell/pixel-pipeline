@@ -204,6 +204,7 @@ class MainWindow(QMainWindow):
             (None, None, None),
             ("Open &video…", "Ctrl+Shift+O", self.open_video),
             ("&Generate from prompt (local GPU)…", "Ctrl+G", self.generate_dialog),
+            ("Prompt to 3D &model + directions (local GPU)…", "Ctrl+M", self.open_model_studio),
             ("Export video a&nimation…", "Ctrl+Shift+A", self.export_video_animation),
             (None, None, None),
             ("&Quit", QKeySequence.Quit, self.close),
@@ -477,6 +478,11 @@ class MainWindow(QMainWindow):
         self.set_source(load_image(raw), Path.cwd() / f"{slug or 'generated'}.png")
         self.statusBar().showMessage(f"Generated “{prompt}” (seed {seed}). Tweak anything on the left.")
 
+    def open_model_studio(self):
+        from .model_studio import ModelStudio
+        self._studio = ModelStudio()
+        self._studio.show()
+
     def set_source(self, rgba, path: Path):
         self.source = rgba
         self.source_path = path
@@ -545,9 +551,14 @@ class MainWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv if argv is None else argv)
+    args = app.arguments()[1:]
+    if "--model" in args:  # straight into Prompt to Model
+        from .model_studio import ModelStudio
+        win = ModelStudio()
+        win.show()
+        return app.exec()
     win = MainWindow()
     win.show()
-    args = app.arguments()[1:]
     if args:
         win.open_path(Path(args[0]))
     return app.exec()

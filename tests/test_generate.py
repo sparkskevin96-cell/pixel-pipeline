@@ -48,7 +48,14 @@ TEMPLATES = Path(__file__).resolve().parents[1] / "tools" / "comfyui"
 OUTPUTS = {"CheckpointLoaderSimple": ["MODEL", "CLIP", "VAE"], "LoraLoader": ["MODEL", "CLIP"],
            "ModelSamplingDiscrete": ["MODEL"], "VAELoader": ["VAE"], "CLIPTextEncode": ["CONDITIONING"],
            "EmptyLatentImage": ["LATENT"], "LoadImage": ["IMAGE", "MASK"], "VAEEncode": ["LATENT"],
-           "KSampler": ["LATENT"], "VAEDecode": ["IMAGE"], "SaveImage": [], "PreviewImage": []}
+           "KSampler": ["LATENT"], "VAEDecode": ["IMAGE"], "SaveImage": [], "PreviewImage": [],
+           # Hunyuan3D 2 (comfy_extras/nodes_hunyuan3d.py, nodes_save_3d.py)
+           "ImageOnlyCheckpointLoader": ["MODEL", "CLIP_VISION", "VAE"],
+           "CLIPVisionEncode": ["CLIP_VISION_OUTPUT"],
+           "Hunyuan3Dv2Conditioning": ["CONDITIONING", "CONDITIONING"],
+           "Hunyuan3Dv2ConditioningMultiView": ["CONDITIONING", "CONDITIONING"],
+           "EmptyLatentHunyuan3Dv2": ["LATENT"], "ModelSamplingAuraFlow": ["MODEL"],
+           "VAEDecodeHunyuan3D": ["VOXEL"], "VoxelToMesh": ["MESH"], "SaveGLB": []}
 SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "lcm"]
 SCHEDULERS = ["normal", "karras", "sgm_uniform", "simple"]
 INPUTS = {
@@ -68,6 +75,15 @@ INPUTS = {
     "VAEDecode": {"samples": "LATENT", "vae": "VAE"},
     "SaveImage": {"images": "IMAGE", "filename_prefix": str},
     "PreviewImage": {"images": "IMAGE"},
+    "ImageOnlyCheckpointLoader": {"ckpt_name": "checkpoints"},
+    "CLIPVisionEncode": {"clip_vision": "CLIP_VISION", "image": "IMAGE", "crop": ["center", "none"]},
+    "Hunyuan3Dv2Conditioning": {"clip_vision_output": "CLIP_VISION_OUTPUT"},
+    "Hunyuan3Dv2ConditioningMultiView": {"front": "CLIP_VISION_OUTPUT"},
+    "EmptyLatentHunyuan3Dv2": {"resolution": int, "batch_size": int},
+    "ModelSamplingAuraFlow": {"model": "MODEL", "shift": float},
+    "VAEDecodeHunyuan3D": {"samples": "LATENT", "vae": "VAE", "num_chunks": int, "octree_resolution": int},
+    "VoxelToMesh": {"voxel": "VOXEL", "algorithm": ["surface net", "basic"], "threshold": float},
+    "SaveGLB": {"mesh": "MESH", "filename_prefix": str},
 }
 LISTS = ("checkpoints", "loras", "vae", "uploads")
 
@@ -143,7 +159,7 @@ class FakeComfy:
                             input_name=name)
                 elif not isinstance(v, kind):
                     bad(nid, cls, "invalid_input_type", f"Not a {kind.__name__}", name, input_name=name)
-        if not any(n["class_type"] in ("SaveImage", "PreviewImage") for n in wf.values()):
+        if not any(n["class_type"] in ("SaveImage", "PreviewImage", "SaveGLB") for n in wf.values()):
             return {"type": "prompt_no_outputs", "message": "Prompt has no outputs", "details": "",
                     "extra_info": {}}, {}
         if errors:
@@ -153,6 +169,8 @@ class FakeComfy:
 
     # -- "execution": draw a plain-background sprite-ish picture
     def render(self, wf, pid):
+        if any(n["class_type"] == "SaveGLB" for n in wf.values()):
+            return self.render_3d(wf)
         sampler = next(n for n in wf.values() if n["class_type"] == "KSampler")
         src = wf[sampler["inputs"]["latent_image"][0]]
         if src["class_type"] == "EmptyLatentImage":
@@ -175,6 +193,21 @@ class FakeComfy:
                 img.save(buf, "PNG")
                 self.files[(kind, name)] = buf.getvalue()
                 outputs[nid] = {"images": [{"filename": name, "subfolder": "", "type": kind}]}
+        return outputs
+
+    def render_3d(self, wf):
+        """A grey ellipsoid shaped like the fake pictures (glTF: y up, front +z)."""
+        import trimesh
+        mesh = trimesh.creation.icosphere(subdivisions=4)
+        mesh.apply_scale([0.4, 0.75, 0.3])
+        outputs = {}
+        for nid, node in wf.items():
+            if node["class_type"] == "SaveGLB":
+                sub, _, prefix = node["inputs"]["filename_prefix"].rpartition("/")
+                name = f"{prefix}_{len(self.files) + 1:05}_.glb"
+                self.files[("output", sub, name)] = mesh.export(file_type="glb")
+                outputs[nid] = {"3d": [{"filename": name, "subfolder": sub, "type": "output"}],
+                                "camera_info": [None], "model_3d_info": []}
         return outputs
 
     def finish(self, pid):
@@ -238,7 +271,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {pid: fake.history[pid]})
         if path == "/view":
             key = (q.get("type", "output"), q.get("filename"))
-            if q.get("subfolder") or key not in fake.files:
+            if q.get("subfolder"):
+                key = (key[0], q["subfolder"], key[1])
+            if key not in fake.files:
                 return self.send(404, b"404: Not Found", "text/plain")
             return self.send(200, fake.files[key], "image/png")
         return self.send(404, b"404: Not Found", "text/plain")

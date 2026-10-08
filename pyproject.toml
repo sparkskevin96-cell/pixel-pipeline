@@ -35,6 +35,7 @@ pixel-pipeline-mcp = "pixel_pipeline.mcp_server:main"
 
 [project.gui-scripts]
 pixel-pipeline-ui = "pixel_pipeline.ui.app:main"
+pixel-pipeline-model = "pixel_pipeline.ui.model_studio:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

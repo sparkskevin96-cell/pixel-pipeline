@@ -113,6 +113,13 @@ pixel-pipeline convert me.jpg -s person --palette lospec:resurrect-64 --outline-
 pixel-pipeline <command> --help              # every option
 ```
 
+### Prompt to Model (app)
+
+`pixel-pipeline-model` (or File → Prompt to 3D model in the desktop app): type what you want,
+your GPU makes a picture and a 3D model (Hunyuan3D in ComfyUI), and you get it spinning next
+to its 4/8/16-direction sprites, ready for Godot. Setup and details:
+[docs/LOCAL_AI.md](docs/LOCAL_AI.md#prompt-to-3d-model-the-prompt-to-model-app).
+
 ### Any sprite in 16 directions
 
 A photo or a generated picture only shows one side, so the other directions have to be
@@ -120,10 +127,10 @@ made up. The tool does it the way pre-rendered games did (Diablo, StarCraft): th
 model.
 
 1. **Front view**: `generate` on your GPU, Draw mode, or any picture of the thing.
-2. **Image → 3D model (.glb)**: an image-to-3D AI invents the back and sides. On your
-   4080 (12 GB): Stable Fast 3D or TripoSR make coloured models in about 6 GB; Hunyuan3D
-   2.1 makes better shapes, but its texture step needs about 21 GB. Online: Tripo, Meshy or
-   the Hunyuan3D demo. See [docs/LOCAL_AI.md](docs/LOCAL_AI.md#image-to-3d-for-8-and-16-direction-sprites).
+2. **Image → 3D model (.glb)**: an image-to-3D AI invents the back and sides.
+   `pixel-pipeline model` / the Prompt to Model app does it on your GPU (Hunyuan3D shape +
+   painted from the picture). Online alternatives: Tripo, Meshy or the Hunyuan3D demo. See
+   [docs/LOCAL_AI.md](docs/LOCAL_AI.md#image-to-3d-for-8--and-16-direction-sprites).
 3. **`turnaround model.glb`**: renders every direction with one camera angle
    (`--elevation 30` top-down/isometric, `0` side view), one scale and one palette.
 

@@ -278,6 +278,72 @@ def _cmd_turnaround(a) -> int:
     return 0
 
 
+# ---- model ---------------------------------------------------------------------------------
+
+def _add_model(sub):
+    p = sub.add_parser(
+        "model", help="prompt or picture -> coloured 3D model (.glb) on your GPU, + direction sprites",
+        description="Prompt -> front picture (SDXL) -> 3D shape (Hunyuan3D in ComfyUI) -> painted "
+                    "from the picture -> .glb. Add --directions to also make 4/8/16-direction "
+                    "sprites. Setup: docs/LOCAL_AI.md ('Prompt to 3D model').")
+    p.add_argument("prompt", nargs="?", help="what to make, e.g. 'a knight with a red cape'")
+    p.add_argument("-o", "--out", type=Path, required=True, help="coloured model .glb")
+    p.add_argument("-s", "--subject", choices=("person", "animal", "object"), default="person")
+    p.add_argument("--image", type=Path, help="use this front picture instead of a prompt")
+    p.add_argument("--back", type=Path, help="optional back-view picture for the far side")
+    p.add_argument("--shape", type=Path, help="use this ready shape (.glb) instead of ComfyUI")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--checkpoint", help="Hunyuan3D checkpoint (default: first one installed)")
+    p.add_argument("--steps", type=int, default=30)
+    p.add_argument("--octree", type=int, default=256, help="mesh detail 256-512 (default 256)")
+    p.add_argument("--template", type=Path,
+                   help="your own 3D workflow (API format, {{image}} in, SaveGLB out)")
+    p.add_argument("--comfyui", help="ComfyUI address (default $COMFYUI_URL or http://127.0.0.1:8188)")
+    p.add_argument("--cutout", default="isnet-general-use", help="background-removal model")
+    g = p.add_argument_group("direction sprites")
+    g.add_argument("--directions", type=int, choices=DIRECTION_COUNTS,
+                   help="also render 4/8/16 facing sprites")
+    g.add_argument("--sprites", type=Path, help="sprite sheet .png (default: <out>_dirs.png)")
+    g.add_argument("-W", "--width", type=int, default=48)
+    g.add_argument("-H", "--height", type=int, default=48)
+    g.add_argument("--colors", type=int, default=24)
+    g.add_argument("--elevation", type=float, default=30.0)
+    g.add_argument("--godot", action="store_true")
+    g.add_argument("--aseprite", action="store_true")
+    g.add_argument("--preview", type=int, metavar="SCALE")
+    p.set_defaults(func=_cmd_model)
+
+
+def _cmd_model(a) -> int:
+    from .generate import ComfyClient
+    from .model3d import ShapeOptions, prompt_to_model
+    if not a.prompt and not a.image:
+        raise SystemExit("error: give a prompt or --image")
+    for path in (a.image, a.back, a.shape, a.template):
+        if path and not path.exists():
+            raise SystemExit(f"error: {path} not found")
+    opts = ShapeOptions(checkpoint=a.checkpoint, steps=a.steps, octree=a.octree,
+                        template=str(a.template) if a.template else None)
+    needs_gpu = a.image is None or a.shape is None
+    client = ComfyClient(a.comfyui) if needs_gpu else None
+    res = prompt_to_model(a.prompt, a.out, subject=a.subject, picture=a.image, back=a.back,
+                          shape=a.shape, client=client, seed=a.seed, shape_options=opts,
+                          cutout_model=a.cutout, progress=lambda step, text: print(text))
+    written = [res.model, res.picture] + ([res.raw] if res.raw else [])
+    if a.directions:
+        from .turnaround import render_model, turnaround_sprites, union_crop, write_preview, write_turnaround
+        s = settings_for(a.subject, width=a.width, height=a.height, colors=a.colors)
+        views = union_crop(render_model(res.model, a.directions, a.elevation), s.margin, s.alpha_threshold)
+        sprites = turnaround_sprites(views, s)
+        sheet = a.sprites or a.out.with_name(a.out.stem + "_dirs.png")
+        written += write_turnaround(sprites, sheet, a.aseprite, a.godot)
+        if a.preview:
+            written.append(write_preview(sprites, sheet.with_name(sheet.stem + "_spin.gif"), a.preview))
+    seed = f" (seed {res.seed})" if res.seed is not None else ""
+    _print_written(f"{a.prompt or a.image.name}{seed}", written)
+    return 0
+
+
 # ---- idle ----------------------------------------------------------------------------------
 
 def _add_idle(sub):
@@ -403,6 +469,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_generate(sub)
     _add_video(sub)
     _add_turnaround(sub)
+    _add_model(sub)
     _add_idle(sub)
     _add_parallax(sub)
     _add_sheet(sub)
