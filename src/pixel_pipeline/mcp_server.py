@@ -787,6 +787,35 @@ def portrait(
             + (f", seed {seed}" if prompt else "") + f"\n  {out}\nPreview x{factor}.", _png(preview)]
 
 
+@tool(title="Map tiles with terrain transitions", open_world=True)
+def map_tiles(
+    out_png: Annotated[str, Field(description="Atlas .png to write (TileSet .tres and example map next to it).")],
+    terrains: Annotated[list[str], Field(
+        description="Base terrain first, then the others, each 'name' (built-in: grass, water, "
+                    "sand, road, dirt, stone, snow), 'name=C:/path/texture.jpg' (a texture photo) "
+                    "or 'name=prompt:<text>' (made on the user's GPU).")] = ["grass", "water", "sand", "road"],  # noqa: B006
+    tile: Annotated[int, Field(ge=8, le=256, description="Tile size (32 suits a 640x360 map view).")] = 32,
+    variants: Annotated[int, Field(ge=1, le=15, description="Base tile variations.")] = 4,
+    seed: Annotated[int, Field(description="Pattern seed.")] = 0,
+) -> ToolOutput:
+    """Seamless pixel-art terrain tiles for a tactics/top-down map: each non-base terrain gets
+    15 corner tiles blending it into the base (shores, edges), plus a Godot TileSet with a
+    Match Corners terrain set so painting in Godot picks the right tiles, and an example map.
+    Terrains only blend into the base: keep base between two other terrains."""
+    from .maptiles import build_terrain_set, terrain, write_terrain
+    out = _output_png(out_png)
+    built = []
+    with _work_lock:
+        for spec in terrains:
+            name, _, source = spec.partition("=")
+            built.append(terrain(name.strip(), source.strip() or None, tile, seed=seed))
+        ts = build_terrain_set(built, variants, seed)
+        written = write_terrain(ts, out, True, (20, 11), seed)
+    example = Image.open(out.with_name(out.stem + "_example.png")).convert("RGBA")
+    return [f"{len(built)} terrains ({', '.join(ts.names)}), {tile}px tiles\n"
+            + "\n".join(f"  {p}" for p in written) + "\nPreview: the example map.", _png(example)]
+
+
 @tool(title="Idle animation from a sprite")
 def idle_animation(
     sprite_path: Annotated[str, Field(

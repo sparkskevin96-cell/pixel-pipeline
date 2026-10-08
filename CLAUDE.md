@@ -61,6 +61,11 @@ wants terse answers and fixes over polish.
   recoloured in LCh keeping lightness; Godot palette-swap shader + material per team (verified
   by rendering in Godot under xvfb-run + Mesa: `xvfb-run -a godot --rendering-driver opengl3`).
   Portraits: YuNet face box (downloaded on first use), else the subject's top.
+- **Map tiles** (`maptiles.py`, CLI `maptiles`, MCP `map_tiles`): built-in procedural
+  seamless terrains (periodic noise) or photo/prompt textures; corner masks are smoothstep
+  bilinear + shared periodic jitter so tiles agree on edges; base variants only add interior
+  details (same edges). TileSet .tres format copied from Godot's own ResourceSaver output;
+  alternatives 0:0/1-15 = grass next to empty cells (Godot treats empty as a terrain).
 - **Sprite scale research** (`docs/SPRITE_SCALE.md`, interactive page artifact
   Jv1VrzgNjgmiH4LgAQg1SR): character height as a share of screen height for 41 classic
   games by genre, and the matching sprite heights. Kevin decided all his games render at

@@ -103,6 +103,10 @@ pixel-pipeline generate "a blue wizard" -s person --init sketch.png --denoise 0.
 # Scenery photo -> far/mid/near parallax layers + Godot 4 Parallax2D scene
 pixel-pipeline parallax lake.jpg -o bg/ -W 320 -H 180 --scale 3
 
+# Map tiles: grass base + water/sand/road with corner transitions + Godot TileSet (paint with Terrains)
+pixel-pipeline maptiles -o maps/terrain.png -t grass -t water -t sand -t road
+pixel-pipeline maptiles -o maps/cave.png -t stone -t water=murky_water.jpg -t "lava=prompt:glowing lava cracks"
+
 # Team colours (Fire Emblem style): blue player, red enemy, green ally, purple other, grey spent
 pixel-pipeline teams knight_dirs.png --godot          # + palette strip, shader, a material per team
 # Dialogue portrait (head and shoulders) from a photo, a picture, or a prompt on your GPU
@@ -192,6 +196,10 @@ a model lying on its back needs `--up z`.
   `.tres`. For crisp pixels set Project Settings → Rendering → Textures → Default
   Texture Filter = **Nearest**.
 - **Tileset + .tmj**: unique tiles plus a Tiled map that rebuilds the image.
+- **Map tiles** (`maptiles`): an atlas (row 0 = base variants, then a row per terrain with its
+  15 corner tiles, the last one full), `<name>.tres` TileSet with a Match Corners terrain set,
+  and an example map. In Godot add a TileMapLayer, set the TileSet, and paint in the
+  **Terrains** tab. Terrains blend only into the base, so keep base between two others.
 - **Team colours** (`teams`): a PNG per team, and with `--godot` a palette strip
   (`<name>_teams.png`, row 0 = colours as drawn, then player, enemy, ally, other, spent), the
   `team_colours.gdshader` palette-swap shader and a ShaderMaterial per team: put one on the
