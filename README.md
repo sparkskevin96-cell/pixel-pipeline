@@ -117,6 +117,10 @@ pixel-pipeline portrait --prompt "a young knight with red hair" -o knight_face.p
 pixel-pipeline turnaround knight.glb -o knight_dirs.png --directions 16 -W 48 -H 48 --godot --aseprite --preview 6
 # ...or from a video walking all the way around a still subject (start in front, walk to your right)
 pixel-pipeline turnaround walkaround.mp4 -o rex_dirs.png -s animal --directions 8
+# Animated: every animation of a rigged .glb in 8 directions (walk_E, walk_SE ... in Godot)
+pixel-pipeline turnaround knight_rigged.glb -o knight_anim.png --animate --frames 8 --directions 8 --godot --preview 3
+# ...animations from separate Mixamo downloads, colours from the original Prompt to Model .glb
+pixel-pipeline turnaround knight_idle.glb knight_walk.glb --animate --colours-from knight.glb -o knight_anim.png --godot
 
 pixel-pipeline palettes                      # list built-ins
 pixel-pipeline convert me.jpg -s person --palette lospec:resurrect-64 --outline-style selout
@@ -149,6 +153,35 @@ SSE, S (facing the viewer) ... N (away). With `--godot` you get SpriteFrames wit
 animation per direction and `<name>_facing.gd`: attach it to an AnimatedSprite2D and call
 `face(velocity)`. If S doesn't face the viewer, turn the model with `--yaw 90` (or 180, -90);
 a model lying on its back needs `--up z`.
+
+### Animated directions (walk, attack ... in 16 directions)
+
+`turnaround --animate` plays a rigged, animated model (.glb/.gltf with a skeleton) and
+renders every frame from every direction, like Diablo and StarCraft did: one scale, one
+ground line and one palette across all of them. The sheet has a row per animation and
+direction and a column per frame. With `--godot` the SpriteFrames hold `walk_E`,
+`walk_ESE`, ... and `<name>_facing.gd` has `face(velocity)` plus `act(&"walk")`; turning
+mid-walk keeps the step. Walks stay on the spot (root motion is removed; `--no-in-place`
+keeps it). Loops are detected (a walk's last frame isn't a repeat of its first); one-shot
+animations end on their last pose and don't loop in Godot.
+
+Getting a rigged model, free:
+
+1. Make the model: Prompt to Model or `pixel-pipeline model ... --obj` (Save all in the app
+   writes the `.obj` too). Any humanoid in a T- or A-pose works.
+2. [Mixamo](https://www.mixamo.com) (free Adobe account): Upload Character → the `.obj` →
+   place the markers → it adds a skeleton. Pick animations; tick **In Place** for walks and
+   runs. Download each as FBX (first one *With Skin*, the rest can be *Without Skin*).
+3. FBX → glTF: in Blender, File → Import → FBX, then File → Export → glTF 2.0 (.glb). Or
+   in Godot 4 drop the FBX in a project, open it, and Scene → Export As → glTF 2.0.
+4. `pixel-pipeline turnaround idle.glb walk.glb attack.glb --animate --colours-from knight.glb ...`
+   The first file gives the model, every file adds its animations (named after the file
+   when the name inside is Mixamo's `mixamo.com`). Mixamo drops vertex colours, so
+   `--colours-from` copies them back from the original by shape. `--animations idle,walk`
+   picks and orders them; `run=walk_fast` renames.
+
+Tripo and Meshy can also auto-rig and animate their models (paid). Rendering is about 0.1 s
+per frame, so 3 animations x 16 directions x 8 frames takes under a minute.
 
 ### Video tips
 
@@ -206,7 +239,9 @@ a model lying on its back needs `--up z`.
   AnimatedSprite2D and set `team` / `spent` in code, so one sheet serves every side.
 - **Turnaround** (`turnaround`): one sheet with a frame per direction (8 per row), JSON with
   a tag per direction, `.aseprite` with the same tags, Godot SpriteFrames with an animation
-  per direction plus a `_facing.gd` script, and `--preview` a spinning GIF.
+  per direction plus a `_facing.gd` script, and `--preview` a spinning GIF. With
+  `--animate`: a row per animation and direction, tags/animations `walk_SE` etc.,
+  `_facing.gd` with `face()` and `act()`, and `--preview` a GIF playing every direction.
 - **Parallax** (`parallax`): one PNG per depth layer (far one opaque, nearer ones
   transparent, with hidden areas filled so scrolling never shows holes), sharing one
   palette, and `<name>_parallax.tscn` with Parallax2D nodes (scroll 0.2 / 0.5 / 0.85,
@@ -231,7 +266,8 @@ Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`), then restart it:
 
 Tools: `convert_photos`, `generate_sprite` (local GPU), `draw_sprite` (Claude draws it
 pixel by pixel), `video_to_animation`, `idle_animation`, `parallax_layers`,
-`make_sprite_sheet`, `make_tileset`, `preview_image`, `list_palettes`.
+`make_sprite_sheet`, `make_tileset`, `turnaround` (also animated), `prompt_to_model` (local
+GPU), `team_colours`, `portrait`, `map_tiles`, `preview_image`, `list_palettes`.
 
 **Claude + your PC:** Claude can sketch a sprite with `draw_sprite`, pass it to
 `generate_sprite` as `init_image` so your GPU renders the detail, and then check the

@@ -167,55 +167,72 @@ def render_model(path, directions: int = 16, elevation: float = 30.0, size: int 
     size x size, all at one scale with the model's ground point in the same place.
     yaw: degrees to turn the model if its front isn't +z. light: 0 = flat texture colours,
     1 = full shading from the upper left."""
-    names = direction_names(directions)
     pts, cols, nrm = load_model_points(path, points or 10 * size * size, up)
+    views = render_points([(pts, nrm)], cols, directions, elevation, size, yaw, light)
+    return [v[0] for v in views]
+
+
+def render_points(poses: list[tuple[np.ndarray, np.ndarray]], colours: np.ndarray,
+                  directions: int = 16, elevation: float = 30.0, size: int = 512,
+                  yaw: float = 0.0, light: float = 0.35) -> list[list[np.ndarray]]:
+    """Render coloured points in one or more poses (the same points moved: (points, normals)
+    per pose, standing on y = 0 around the y axis, front +z) facing every direction.
+    Returns views[direction][pose], all framed alike: one scale, one ground point."""
+    names = direction_names(directions)
     e = math.radians(elevation)
     ce, se = math.cos(e), math.sin(e)
-    radius = float(np.sqrt(pts[:, 0] ** 2 + pts[:, 2] ** 2).max())
-    top = float(pts[:, 1].max()) * ce + radius * se
-    bottom = -radius * se
+    radius = max(float(np.sqrt(p[:, 0] ** 2 + p[:, 2] ** 2).max()) for p, _ in poses)
+    top = max(float(p[:, 1].max()) for p, _ in poses) * ce + radius * se
+    bottom = min(float(p[:, 1].min()) for p, _ in poses) * ce - radius * se
     scale = size * 0.94 / max(2 * radius, top - bottom, 1e-9)
     ox = size / 2
     oy = (size - (top - bottom) * scale) / 2 + top * scale  # screen row of the ground point
     light_dir = np.array([-0.45, 0.6, 0.66])
     light_dir /= np.linalg.norm(light_dir)
-    base = cols.astype(np.float32)
+    base = colours.astype(np.float32)
     views = []
     for k in range(len(names)):
         a = k * 360.0 / len(names)                   # facing angle on screen (Godot)
         t = math.radians(90.0 - a + yaw)            # model turn about its up axis
         ct, st = math.cos(t), math.sin(t)
-        x = pts[:, 0] * ct + pts[:, 2] * st
-        z = -pts[:, 0] * st + pts[:, 2] * ct
-        y = pts[:, 1]
-        sy = y * ce - z * se                         # up on screen
-        depth = -y * se - z * ce                     # smaller = nearer the camera
-        ix = np.floor(ox + x * scale).astype(np.int64)
-        iy = np.floor(oy - sy * scale).astype(np.int64)
-        ok = (ix >= 0) & (ix < size) & (iy >= 0) & (iy < size)
-        lin = iy[ok] * size + ix[ok]
-        order = np.lexsort((depth[ok], lin))
-        first = np.unique(lin[order], return_index=True)[1]
-        pick = np.nonzero(ok)[0][order[first]]
-        rgb = np.zeros((size * size, 3), np.float32)
-        alpha = np.zeros(size * size, np.uint8)
-        c = base[pick]
-        if light > 0:
-            nx = nrm[pick, 0] * ct + nrm[pick, 2] * st
-            nz = -nrm[pick, 0] * st + nrm[pick, 2] * ct
-            ny = nrm[pick, 1]
-            cam = np.stack([nx, ny * ce - nz * se, ny * se + nz * ce], 1)
-            lam = np.abs(cam @ light_dir)            # meshes may have flipped normals
-            c = c * ((1 - light) + light * lam)[:, None]
-        rgb[lin[order[first]]] = c
-        alpha[lin[order[first]]] = 1
-        rgb, alpha = rgb.reshape(size, size, 3), alpha.reshape(size, size)
-        _fill_holes(rgb, alpha)
-        out = np.zeros((size, size, 4), np.uint8)
-        out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
-        out[..., 3] = alpha * 255
-        views.append(out)
+        views.append([_splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir)
+                      for pts, nrm in poses])
     return views
+
+
+def _splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir) -> np.ndarray:
+    """One view: turn the points, project orthographically, keep the nearest per pixel."""
+    x = pts[:, 0] * ct + pts[:, 2] * st
+    z = -pts[:, 0] * st + pts[:, 2] * ct
+    y = pts[:, 1]
+    sy = y * ce - z * se                         # up on screen
+    depth = -y * se - z * ce                     # smaller = nearer the camera
+    ix = np.floor(ox + x * scale).astype(np.int64)
+    iy = np.floor(oy - sy * scale).astype(np.int64)
+    ok = (ix >= 0) & (ix < size) & (iy >= 0) & (iy < size)
+    lin = iy[ok] * size + ix[ok]
+    zbuf = np.full(size * size, np.inf, depth.dtype)
+    np.minimum.at(zbuf, lin, depth[ok])            # nearest depth per pixel
+    near = depth[ok] <= zbuf[lin]
+    pick, lin = np.nonzero(ok)[0][near], lin[near]
+    rgb = np.zeros((size * size, 3), np.float32)
+    alpha = np.zeros(size * size, np.uint8)
+    c = base[pick]
+    if light > 0:
+        nx = nrm[pick, 0] * ct + nrm[pick, 2] * st
+        nz = -nrm[pick, 0] * st + nrm[pick, 2] * ct
+        ny = nrm[pick, 1]
+        cam = np.stack([nx, ny * ce - nz * se, ny * se + nz * ce], 1)
+        lam = np.abs(cam @ light_dir)            # meshes may have flipped normals
+        c = c * ((1 - light) + light * lam)[:, None]
+    rgb[lin] = c
+    alpha[lin] = 1
+    rgb, alpha = rgb.reshape(size, size, 3), alpha.reshape(size, size)
+    _fill_holes(rgb, alpha)
+    out = np.zeros((size, size, 4), np.uint8)
+    out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    out[..., 3] = alpha * 255
+    return out
 
 
 def union_crop(views: list[np.ndarray], margin: float = 0.04, threshold: int = 128) -> list[np.ndarray]:

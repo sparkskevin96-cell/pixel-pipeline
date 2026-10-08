@@ -80,3 +80,26 @@ def test_model_studio_makes_saves_and_updates(app, tmp_path, monkeypatch):
     win.directions.setCurrentText("4")
     win.update_sprites()
     assert len(win.sprites) == 4
+    assert not win.animate.isEnabled()                      # a still model: nothing to play
+
+
+def test_model_studio_plays_a_rigged_model(app, tmp_path):
+    from test_anim3d import write_robot
+    from pixel_pipeline.ui.model_studio import ModelStudio
+    robot = write_robot(tmp_path / "robot.glb")
+    win = ModelStudio()
+    win.sync = True
+    win.directions.setCurrentText("4")
+    win.width_.setValue(24)
+    win.height_.setValue(24)
+    win.load_model(robot)
+    assert win.animate.isEnabled() and win.anim is None and win.anim_names == ["wave", "slide", "fall"]
+    win.animate.setChecked(True)
+    win.frames.setValue(3)
+    win.update_sprites()
+    assert win.anim is not None and win.anim.frames == 3 and len(win.anim.actions) == 3
+    for _ in range(4):
+        win._next_anim_frame()
+    assert win._anim_i == 4 and "wave" in win.sprite_view.toolTip()
+    names = {p.name for p in win.save_all(str(tmp_path / "out" / "robot.glb"))}
+    assert {"robot_dirs.tres", "robot_dirs_facing.gd", "robot_dirs_anim.gif"} <= names

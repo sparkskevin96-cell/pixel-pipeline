@@ -627,6 +627,20 @@ def turnaround(
                     "(directions/2 + 1 views); mirror the other side.")] = False,
     start: Annotated[float | None, Field(ge=0, description="Video: start time, seconds.")] = None,
     end: Annotated[float | None, Field(ge=0, description="Video: end time, seconds.")] = None,
+    animate: Annotated[bool, Field(
+        description="3D model: play its animations (a rigged, animated .glb/.gltf, e.g. from "
+                    "Mixamo). Extra .glb files in `source` add their animations to the first "
+                    "model's bones by name. Godot animations are named action_direction "
+                    "(walk_SE) and the script has face(velocity) + act(&\"walk\").")] = False,
+    frames: Annotated[int, Field(ge=1, le=64, description="animate: frames per animation.")] = 8,
+    animations: Annotated[list[str] | None, Field(
+        description="animate: which animations, in order (default all); rename with "
+                    "'new=old'.")] = None,
+    in_place: Annotated[bool, Field(
+        description="animate: remove steady root motion so walks stay on the spot.")] = True,
+    colours_from: Annotated[str | None, Field(
+        description="animate: the original coloured model, when rigging it (Mixamo) dropped "
+                    "its colours. Colours are matched by shape.")] = None,
     aseprite: Annotated[bool, Field(description="Also write .aseprite with a tag per direction.")] = True,
     godot: Annotated[bool, Field(
         description="Also write Godot SpriteFrames (an animation per direction, E ESE SE ... "
@@ -643,6 +657,25 @@ def turnaround(
     out = _output_png(out_png)
     explicit = {"width": width, "height": height, "colors": colors, "system": system, "look": look}
     settings = _build_settings(subject, explicit, extra_settings)
+    if animate or animations:
+        from .anim3d import animated_turnaround, write_animated
+        with _work_lock:
+            anim, what = animated_turnaround(srcs, settings, directions, frames, animations,
+                                             elevation=elevation, yaw=yaw, light=light,
+                                             in_place=in_place,
+                                             colours_from=_input_files([colours_from])[0]
+                                             if colours_from else None)
+        written = write_animated(anim, out, aseprite, godot)
+        first = anim.sprites[0][0][0]
+        w, h = first.size
+        text = (f"{what} -> {len(anim.actions)} animations x {len(anim.directions)} directions x "
+                f"{anim.frames} frames, {w}x{h} px, palette ({len(first.palette)}): "
+                f"{_hex_list(first.palette)}\n" + "\n".join(f"  {p}" for p in written))
+        d = anim.directions.index("SE" if "SE" in anim.directions else "S")
+        preview = _contact_sheet([s.rgba for a in anim.sprites for s in a[d]],
+                                 [f"{act.name} {i}" for act in anim.actions for i in range(anim.frames)])
+        return [text + f"\nPreview: every frame of each animation facing {anim.directions[d]}.",
+                _png(preview)]
     with _work_lock:
         sprites, what = turnaround_from(srcs, settings, directions, elevation=elevation, up=up,
                                         yaw=yaw, light=light, reverse=reverse, mirror=mirror,

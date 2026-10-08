@@ -7,6 +7,7 @@ palette across every frame (consistent colours for animations / sprite sets).
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -199,13 +200,22 @@ def convert(src: ImageSource, settings: Settings, palette: np.ndarray | None = N
 def sprites_from_rgba(images: list[np.ndarray], settings: Settings,
                       shared_palette: bool = True) -> list[Sprite]:
     """Already-isolated RGBA images -> sprites (optionally sharing one palette)."""
-    preps = [prepare(rgba, settings) for rgba in images]
+    preps = _map(lambda rgba: prepare(rgba, settings), images)
     palette = None
     if shared_palette and preps:
         pixels = np.concatenate([p.rgb[p.mask] if p.mask.any() else p.rgb.reshape(-1, 3)
                                  for p in preps])
         palette = resolve_palette(settings, pixels)
-    return [finish(p, settings, palette) for p in preps]
+    return _map(lambda p: finish(p, settings, palette), preps)
+
+
+def _map(fn, items: list) -> list:
+    """fn over items, on threads for big batches (OpenCV and numpy release the GIL)."""
+    if len(items) < 8:
+        return [fn(x) for x in items]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+        return list(pool.map(fn, items))
 
 
 def convert_batch(sources: list[ImageSource], settings: Settings,

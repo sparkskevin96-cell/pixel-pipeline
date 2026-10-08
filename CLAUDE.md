@@ -48,6 +48,16 @@ wants terse answers and fixes over polish.
   (`views_from_capture`: start in front, walk right; `mirror` for half captures).
   Directions follow Godot's Vector2.angle (E, ESE, SE ... clockwise); `--godot` writes an
   animation per direction plus `_facing.gd`.
+- **Animated directions** (`anim3d.py`, `turnaround --animate`, MCP `turnaround(animate=)`,
+  Model Studio "Animate"): own dependency-free glTF reader (skins = linear blend skinning,
+  LINEAR/STEP/CUBICSPLINE TRS animations, baseColorTexture/Factor/COLOR_0 in linear space,
+  uv origin top-left, alpha MASK/BLEND cut). Points are sampled once on the rest pose and
+  re-posed per frame (no colour flicker); `render_points` frames all poses alike. Loop =
+  start/end vertices match after removing mean offset; in-place removes the linear centroid
+  drift. Later files add animations by node name (Mixamo per-animation downloads); generic
+  names (mixamo.com, Take 001) take the file stem. `--colours-from` re-colours by shape
+  (voxel grid) since Mixamo drops vertex colours; `model --obj` / Save all writes the .obj
+  to upload. Verified on Khronos Fox/CesiumMan/RiggedSimple and in Godot 4.7 headless.
 - **Prompt to Model** (`model3d.py`, CLI `model`, MCP `prompt_to_model`, Qt
   `ui/model_studio.py` = `pixel-pipeline-model` / Ctrl+M / `--model`): prompt -> SDXL front
   picture (no pixel LoRA) -> ComfyUI native Hunyuan3D 2.1 shape (workflow mirrors ComfyUI's

@@ -3,6 +3,7 @@
 Prompt -> front picture -> 3D shape (Hunyuan3D in ComfyUI on this PC) -> painted from the
 picture -> spinning preview + 4/8/16-direction sprites -> Save all (.glb, picture, sprite
 sheet, .json, .aseprite, Godot SpriteFrames + facing script, spinning GIF).
+A rigged, animated model (Open a 3D model…) can also be played: tick Animate.
 
 Run with:  pixel-pipeline-model   (or File -> Prompt to 3D model in pixel-pipeline-ui)
 """
@@ -16,7 +17,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -79,11 +80,16 @@ class ModelStudio(QMainWindow):
         self.work = Path(tempfile.mkdtemp(prefix="pixel-pipeline-model-"))
         self.result = None                # ModelResult
         self.sprites = None
+        self.anim = None                  # AnimatedSet when Animate is ticked
+        self.anim_names: list[str] = []
+        self._anim_i = 0
         self.spin: list[np.ndarray] = []
         self._spin_i = 0
         self._thread = None
         self._spin_timer = QTimer(self)
         self._spin_timer.timeout.connect(self._next_spin)
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._next_anim_frame)
         self._build()
         self.statusBar().showMessage("Type what you want and press Make model. Needs ComfyUI "
                                      "running with Hunyuan3D (see docs/LOCAL_AI.md).")
@@ -137,6 +143,14 @@ class ModelStudio(QMainWindow):
         self.elevation.setRange(0, 89)
         self.elevation.setValue(30)
         self.elevation.setSuffix("°")
+        self.animate = QCheckBox("Animate")
+        self.animate.setEnabled(False)
+        self.animate.setToolTip("Open a rigged, animated .glb/.gltf (e.g. from Mixamo) to play "
+                                "its animations from every direction")
+        self.frames = QSpinBox()
+        self.frames.setRange(1, 32)
+        self.frames.setValue(8)
+        self.frames.setToolTip("Frames per animation")
         self.redo_btn = QPushButton("Update sprites")
         self.redo_btn.clicked.connect(self.update_sprites)
         self.save_btn = QPushButton("Save all…")
@@ -150,6 +164,8 @@ class ModelStudio(QMainWindow):
                          ("Camera tilt", self.elevation)):
             row.addWidget(QLabel(label))
             row.addWidget(w)
+        row.addWidget(self.animate)
+        row.addWidget(self.frames)
         row.addStretch(1)
         row.addWidget(self.redo_btn)
         row.addWidget(self.save_btn)
@@ -212,17 +228,24 @@ class ModelStudio(QMainWindow):
                                   client=self.client, seed=seed,
                                   progress=lambda step, text: say(text))
             say("Rendering the model from every side…")
-            return res, *self._sprite_job_body(res.model)
+            return res, *self._sprite_job_body(res.model, say)
         return job
 
-    def _sprite_job_body(self, model: Path):
+    def _sprite_job_body(self, model: Path, say=lambda text: None):
         n = int(self.directions.currentText())
         s = settings_for(self.subject.currentText(), width=self.width_.value(),
                          height=self.height_.value(), colors=self.colors.value())
         views = render_model(model, n, self.elevation.value(), size=320)
         spin = union_crop(views)
         sprites = turnaround_sprites(union_crop(views, s.margin, s.alpha_threshold), s)
-        return spin, sprites
+        names = animation_names(model)
+        anim = None
+        if names and self.animate.isChecked():
+            from ..anim3d import animated_turnaround
+            say(f"Playing {len(names)} animations from every side…")
+            anim, _ = animated_turnaround([model], s, n, self.frames.value(),
+                                          elevation=self.elevation.value())
+        return spin, sprites, anim, names
 
     def make(self):
         prompt = self.prompt.text().strip()
@@ -248,19 +271,23 @@ class ModelStudio(QMainWindow):
 
         def job(say):
             say("Rendering the model from every side…")
-            return ModelResult(path, path, None, None), *self._sprite_job_body(path)
+            return ModelResult(path, path, None, None), *self._sprite_job_body(path, say)
         self._run(job, self._show)
 
     def update_sprites(self):
         if self.result is None:
             return
         model = self.result.model
-        self._run(lambda say: (self.result, *self._sprite_job_body(model)), self._show)
+        self._run(lambda say: (self.result, *self._sprite_job_body(model, say)), self._show)
 
     # ---- results --------------------------------------------------------------
     def _show(self, payload):
-        self.result, self.spin, self.sprites = payload
+        self.result, self.spin, self.sprites, self.anim, self.anim_names = payload
         res = self.result
+        self.animate.setEnabled(bool(self.anim_names))
+        if self.anim_names:
+            self.animate.setText(f"Animate ({len(self.anim_names)})")
+            self.animate.setToolTip("Animations: " + ", ".join(self.anim_names))
         if res.picture and Path(res.picture).suffix.lower() == ".png":
             from ..pipeline import load_image
             self.picture_view.setPixmap(to_pixmap(checkerboard(_fit(load_image(res.picture)))))
@@ -270,6 +297,8 @@ class ModelStudio(QMainWindow):
         self._show_sprites()
         self._busy(False)
         seed = f" Seed {res.seed}." if res.seed is not None else ""
+        if self.anim_names and not self.anim:
+            seed += " It has animations: tick Animate and press Update sprites."
         self.statusBar().showMessage(f"Done: {len(self.sprites)} directions.{seed} "
                                      "Change the sprite settings and press Update sprites, "
                                      "or Save all.")
@@ -281,16 +310,36 @@ class ModelStudio(QMainWindow):
         self.model_view.setPixmap(to_pixmap(checkerboard(_fit(frame))))
         self._spin_i += 1
 
-    def _show_sprites(self):
-        n = len(self.sprites)
+    def _show_sprites(self, sprites=None):
+        sprites = sprites or self.sprites
+        n = len(sprites)
         cols = 4 if n > 4 else n
-        h, w = self.sprites[0].rgba.shape[:2]
+        h, w = sprites[0].rgba.shape[:2]
         sheet = np.zeros((h * ((n + cols - 1) // cols), w * cols, 4), np.uint8)
-        for i, s in enumerate(self.sprites):
+        for i, s in enumerate(sprites):
             r, c = divmod(i, cols)
             sheet[r * h:(r + 1) * h, c * w:(c + 1) * w] = s.rgba
         self.sprite_view.setPixmap(to_pixmap(checkerboard(_fit(sheet), cell=6)))
         self.sprite_view.setToolTip("Clockwise from facing right: " + " ".join(direction_names(n)))
+        if sprites is self.sprites:          # a new result: restart the animation
+            self._anim_i = 0
+            if self.anim is not None:
+                self._anim_timer.start(self.anim.actions[0].frame_ms)
+            else:
+                self._anim_timer.stop()
+
+    def _next_anim_frame(self):
+        """Every direction playing one action; each action twice, then the next."""
+        a = self.anim
+        if a is None:
+            return
+        per = 2 * a.frames
+        k = self._anim_i % (per * len(a.actions))
+        act, f = divmod(k, per)
+        self._show_sprites([d[f % a.frames] for d in a.sprites[act]])
+        self._anim_i = k + 1
+        self._anim_timer.setInterval(a.actions[act].frame_ms)
+        self.sprite_view.setToolTip(f"{a.actions[act].name}, clockwise from facing right")
 
     def save_all(self, target: str | None = None):
         if self.sprites is None:
@@ -304,6 +353,7 @@ class ModelStudio(QMainWindow):
         out = Path(target).with_suffix(".glb")
         try:
             written = []
+            out.parent.mkdir(parents=True, exist_ok=True)
             if Path(self.result.model).resolve() != out.resolve():
                 shutil.copyfile(self.result.model, out)
             written.append(out)
@@ -313,13 +363,32 @@ class ModelStudio(QMainWindow):
                 shutil.copyfile(self.result.picture, pic)
                 written.append(pic)
             sheet = out.with_name(out.stem + "_dirs.png")
-            written += write_turnaround(self.sprites, sheet, aseprite=True, godot=True)
-            written.append(write_preview(self.sprites, sheet.with_name(sheet.stem + "_spin.gif")))
+            if self.anim is not None:
+                from ..anim3d import write_animated, write_animated_preview
+                written += write_animated(self.anim, sheet, aseprite=True, godot=True)
+                written.append(write_animated_preview(self.anim,
+                                                      sheet.with_name(sheet.stem + "_anim.gif")))
+            else:
+                from ..model3d import export_for_rigging
+                written += write_turnaround(self.sprites, sheet, aseprite=True, godot=True)
+                written.append(write_preview(self.sprites, sheet.with_name(sheet.stem + "_spin.gif")))
+                written.append(export_for_rigging(out, out.with_suffix(".obj")))   # for Mixamo
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Save failed", str(e))
             return []
         self.statusBar().showMessage("Saved " + ", ".join(p.name for p in written))
         return written
+
+
+def animation_names(model: Path) -> list[str]:
+    """Animation names in a .glb/.gltf (empty for other formats or unreadable files)."""
+    if Path(model).suffix.lower() not in (".glb", ".gltf"):
+        return []
+    try:
+        from ..anim3d import load_rig
+        return [c.name for c in load_rig([model]).clips]
+    except (ValueError, KeyError, OSError):
+        return []
 
 
 def main(argv: list[str] | None = None) -> int:

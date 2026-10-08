@@ -475,3 +475,13 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
             say("colour", f"Warning: the shape only matches the picture {match:.0%}.")
         mesh.export(out)
     return ModelResult(out, pic_path, raw_path, used_seed)
+
+
+def export_for_rigging(model, out_obj) -> Path:
+    """The model as .obj (y up, facing +z) to upload to Mixamo for a skeleton and animations.
+    Mixamo drops the colours: give the original back with turnaround --colours-from."""
+    trimesh = _trimesh()
+    mesh = trimesh.load(str(model), force="mesh", process=False)
+    out_obj = Path(out_obj)
+    mesh.export(str(out_obj))
+    return out_obj

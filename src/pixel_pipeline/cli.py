@@ -250,6 +250,19 @@ def _add_turnaround(sub):
                    help="photos/video: only the front-to-back half, mirror the other side")
     p.add_argument("--start", type=float, help="video: start time, seconds")
     p.add_argument("--end", type=float, help="video: end time, seconds")
+    p.add_argument("--animate", action="store_true",
+                   help="3D: play the model's animations (rigged .glb/.gltf): a row per animation "
+                        "and direction, Godot animations like walk_SE. More .glb files can add "
+                        "animations (e.g. one Mixamo download each)")
+    p.add_argument("--animations", type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+                   help="--animate: which ones, comma-separated, in order; rename with new=old "
+                        "(default: all)")
+    p.add_argument("--frames", type=int, default=8, help="--animate: frames per animation (default 8)")
+    p.add_argument("--no-in-place", dest="in_place", action="store_false",
+                   help="--animate: keep root motion (default: walks stay on the spot)")
+    p.add_argument("--colours-from", type=Path, metavar="MODEL",
+                   help="--animate: take colours from this model (the original, when rigging "
+                        "on Mixamo dropped them)")
     p.add_argument("--columns", type=int, help="sheet columns (default 8)")
     p.add_argument("--aseprite", action="store_true", help="also write .aseprite (a tag per direction)")
     p.add_argument("--godot", action="store_true",
@@ -265,6 +278,8 @@ def _cmd_turnaround(a) -> int:
     for path in a.source:
         if not path.exists():
             raise SystemExit(f"error: {path} not found")
+    if a.animate or a.animations:
+        return _animated_turnaround(a)
     sprites, what = turnaround_from(a.source, _settings(a), a.directions, elevation=a.elevation,
                                     up=a.up, yaw=a.yaw, light=a.light, reverse=a.reverse,
                                     mirror=a.mirror, start=a.start, end=a.end)
@@ -275,6 +290,23 @@ def _cmd_turnaround(a) -> int:
     w, h = sprites[0].size
     _print_written(f"{what} -> {len(sprites)} directions {w}x{h}, "
                    f"{len(sprites[0].palette)} colours", written)
+    return 0
+
+
+def _animated_turnaround(a) -> int:
+    from .anim3d import animated_turnaround, write_animated, write_animated_preview
+    anim, what = animated_turnaround(a.source, _settings(a), a.directions, a.frames, a.animations,
+                                     elevation=a.elevation, yaw=a.yaw, light=a.light,
+                                     in_place=a.in_place, colours_from=a.colours_from)
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    written = write_animated(anim, a.out, a.aseprite, a.godot)
+    if a.preview:
+        written.append(write_animated_preview(anim, a.out.with_name(a.out.stem + "_anim.gif"),
+                                              a.preview))
+    first = anim.sprites[0][0][0]
+    w, h = first.size
+    _print_written(f"{what} -> {len(anim.actions)} animations x {len(anim.directions)} directions x "
+                   f"{anim.frames} frames, {w}x{h}, {len(first.palette)} colours", written)
     return 0
 
 
@@ -300,6 +332,9 @@ def _add_model(sub):
                    help="your own 3D workflow (API format, {{image}} in, SaveGLB out)")
     p.add_argument("--comfyui", help="ComfyUI address (default $COMFYUI_URL or http://127.0.0.1:8188)")
     p.add_argument("--cutout", default="isnet-general-use", help="background-removal model")
+    p.add_argument("--obj", action="store_true",
+                   help="also write <out>.obj to upload to Mixamo (skeleton + animations); then "
+                        "turnaround --animate <download>.glb --colours-from <out>.glb")
     g = p.add_argument_group("direction sprites")
     g.add_argument("--directions", type=int, choices=DIRECTION_COUNTS,
                    help="also render 4/8/16 facing sprites")
@@ -330,6 +365,9 @@ def _cmd_model(a) -> int:
                           shape=a.shape, client=client, seed=a.seed, shape_options=opts,
                           cutout_model=a.cutout, progress=lambda step, text: print(text))
     written = [res.model, res.picture] + ([res.raw] if res.raw else [])
+    if a.obj:
+        from .model3d import export_for_rigging
+        written.append(export_for_rigging(res.model, res.model.with_suffix(".obj")))
     if a.directions:
         from .turnaround import render_model, turnaround_sprites, union_crop, write_preview, write_turnaround
         s = settings_for(a.subject, width=a.width, height=a.height, colors=a.colors)
