@@ -3,7 +3,6 @@ import io
 import json
 import os
 import shutil
-import struct
 import subprocess
 
 import numpy as np
@@ -11,50 +10,12 @@ import pytest
 from PIL import Image
 
 from pixel_pipeline import settings_for
-from pixel_pipeline.anim3d import (Channel, Gltf, animated_turnaround, clip_name, clip_times,
-                                   load_rig, select_clips, write_animated, write_animated_preview)
+from pixel_pipeline.anim3d import (Channel, GlbWriter, Gltf, animated_turnaround, clip_name,
+                                   clip_times, load_rig, select_clips, write_animated,
+                                   write_animated_preview)
 from pixel_pipeline.cli import main
 
 RED, BLUE = (220, 40, 40), (40, 60, 220)
-
-
-class GlbWriter:
-    """Just enough of a glTF writer to make test models."""
-
-    def __init__(self):
-        self.doc = {"asset": {"version": "2.0"}, "buffers": [{}], "bufferViews": [], "accessors": []}
-        self.bin = bytearray()
-
-    def view(self, data: bytes, stride=None) -> int:
-        while len(self.bin) % 4:
-            self.bin.append(0)
-        v = {"buffer": 0, "byteOffset": len(self.bin), "byteLength": len(data)}
-        if stride:
-            v["byteStride"] = stride
-        self.bin += data
-        self.doc["bufferViews"].append(v)
-        return len(self.doc["bufferViews"]) - 1
-
-    def accessor(self, arr, kind, ctype=5126, normalized=False) -> int:
-        dt = {5126: "<f4", 5121: "u1", 5123: "<u2", 5125: "<u4"}[ctype]
-        arr = np.ascontiguousarray(arr, dt)
-        a = {"bufferView": self.view(arr.tobytes()), "componentType": ctype,
-             "count": len(arr), "type": kind}
-        if normalized:
-            a["normalized"] = True
-        if kind == "VEC3" and ctype == 5126:
-            a["min"], a["max"] = arr.min(0).tolist(), arr.max(0).tolist()
-        self.doc["accessors"].append(a)
-        return len(self.doc["accessors"]) - 1
-
-    def save(self, path):
-        self.doc["buffers"][0]["byteLength"] = len(self.bin)
-        js = json.dumps(self.doc).encode()
-        js += b" " * (-len(js) % 4)
-        binary = bytes(self.bin) + b"\0" * (-len(self.bin) % 4)
-        body = (struct.pack("<II", len(js), 0x4E4F534A) + js
-                + struct.pack("<II", len(binary), 0x004E4942) + binary)
-        path.write_bytes(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
 
 
 def box(lo, hi):

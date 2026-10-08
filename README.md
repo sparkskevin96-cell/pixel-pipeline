@@ -122,6 +122,10 @@ pixel-pipeline turnaround knight_rigged.glb -o knight_anim.png --animate --frame
 # ...animations from separate Mixamo downloads, colours from the original Prompt to Model .glb
 pixel-pipeline turnaround knight_idle.glb knight_walk.glb --animate --colours-from knight.glb -o knight_anim.png --godot
 
+# A ready-to-open Godot 4 project using it all: map + units that walk where you click
+pixel-pipeline demo -o MyDemo --preview                       # built-in knight
+pixel-pipeline demo -o MyDemo --unit knight_idle.glb knight_walk.glb --colours-from knight.glb --directions 16
+
 pixel-pipeline palettes                      # list built-ins
 pixel-pipeline convert me.jpg -s person --palette lospec:resurrect-64 --outline-style selout
 pixel-pipeline <command> --help              # every option
@@ -182,6 +186,19 @@ Getting a rigged model, free:
 
 Tripo and Meshy can also auto-rig and animate their models (paid). Rendering is about 0.1 s
 per frame, so 3 animations x 16 directions x 8 frames takes under a minute.
+
+### Godot demo project
+
+`pixel-pipeline demo -o MyDemo` writes a Godot 4 project that shows the outputs working
+together: 640x360 scaled x3 to 1080p (integer scaling, nearest filtering, pixel snap), a map
+from the map tiles, and four units in 8 (or 16) directions with team colours, two blue
+players and two red enemies sharing one sprite sheet through the palette shader. Open
+`project.godot` and press F5: click your unit, then a tile. It walks there along an A* path
+around the water, turning and playing its walk, then greys out (spent); Space starts the
+next turn. With no `--unit` it uses a built-in rigged knight (idle + walk), so it works
+with no files; `--unit` takes the same sources as `turnaround` (a rigged .glb plays the
+animations whose names contain idle and walk). The scripts (`main.gd`, `unit.gd`) are short
+and meant to be copied into your game.
 
 ### Video tips
 
@@ -267,7 +284,7 @@ Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`), then restart it:
 Tools: `convert_photos`, `generate_sprite` (local GPU), `draw_sprite` (Claude draws it
 pixel by pixel), `video_to_animation`, `idle_animation`, `parallax_layers`,
 `make_sprite_sheet`, `make_tileset`, `turnaround` (also animated), `prompt_to_model` (local
-GPU), `team_colours`, `portrait`, `map_tiles`, `preview_image`, `list_palettes`.
+GPU), `team_colours`, `portrait`, `map_tiles`, `godot_demo`, `preview_image`, `list_palettes`.
 
 **Claude + your PC:** Claude can sketch a sprite with `draw_sprite`, pass it to
 `generate_sprite` as `init_image` so your GPU renders the detail, and then check the

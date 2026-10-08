@@ -58,6 +58,13 @@ wants terse answers and fixes over polish.
   names (mixamo.com, Take 001) take the file stem. `--colours-from` re-colours by shape
   (voxel grid) since Mixamo drops vertex colours; `model --obj` / Save all writes the .obj
   to upload. Verified on Khronos Fox/CesiumMan/RiggedSimple and in Godot 4.7 headless.
+- **Godot demo** (`demo.py`, CLI `demo`, MCP `godot_demo`): writes a Godot 4 project
+  (640x360 x3, integer scale, gl_compatibility): terrain map (cells set at runtime from
+  map/map.json; water + half-visible edge rows blocked), units created in code (`DemoUnit`
+  in unit.gd: AnimatedSprite2D + generated facing script + duplicated team material), A*
+  click-to-move, spent/next turn. Default unit = `mannequin()`, a rigged knight built in
+  code with `GlbWriter` (idle + walk). Verified in Godot 4.7 headless (logic) and under
+  xvfb (screenshots). `make_demo` returns (files, start-screen preview).
 - **Prompt to Model** (`model3d.py`, CLI `model`, MCP `prompt_to_model`, Qt
   `ui/model_studio.py` = `pixel-pipeline-model` / Ctrl+M / `--model`): prompt -> SDXL front
   picture (no pixel LoRA) -> ComfyUI native Hunyuan3D 2.1 shape (workflow mirrors ComfyUI's

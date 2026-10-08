@@ -849,6 +849,54 @@ def map_tiles(
             + "\n".join(f"  {p}" for p in written) + "\nPreview: the example map.", _png(example)]
 
 
+@tool(title="Godot demo project", open_world=True, extra_doc=_presets_doc())
+def godot_demo(
+    out_dir: Annotated[str, Field(description="Folder for the Godot project (new, or an earlier demo).")],
+    unit: Annotated[list[str] | None, Field(
+        description="The unit, as for turnaround: a 3D model (a rigged + animated .glb plays its "
+                    "animations, idle and walk), more .glb files with animations, or photos/a "
+                    "video around a subject. null = a built-in knight with idle and walk.")] = None,
+    animate: Annotated[bool | None, Field(
+        description="Play the model's animations. null = when it has some.")] = None,
+    animations: Annotated[list[str] | None, Field(description="Which animations (default all).")] = None,
+    colours_from: Annotated[str | None, Field(description="As for turnaround.")] = None,
+    directions: Annotated[Literal[4, 8, 16], Field(description="Facing directions.")] = 8,
+    frames: Annotated[int, Field(ge=1, le=32, description="Frames per animation.")] = 6,
+    elevation: Annotated[float, Field(ge=0, le=90, description="Camera tilt, degrees.")] = 30.0,
+    yaw: Annotated[float, Field(description="Degrees to turn the model so S faces the viewer.")] = 0.0,
+    subject: Annotated[Subject, Field(description="Preset (colours, outline).")] = "person",
+    width: Annotated[int, Field(ge=8, le=256, description="Unit sprite width.")] = 40,
+    height: Annotated[int, Field(ge=8, le=256, description="Unit sprite height.")] = 40,
+    colors: Annotated[int | None, Field(ge=2, le=256, description="Palette size. null = preset.")] = None,
+    terrains: Annotated[list[str], Field(
+        description="As for map_tiles: base first; 'water' blocks walking.")] = ["grass", "water", "sand", "road"],  # noqa: B006
+    tile: Annotated[int, Field(ge=8, le=128, description="Tile size; 32 suits 640x360.")] = 32,
+    seed: Annotated[int, Field(description="Map seed.")] = 0,
+) -> ToolOutput:
+    """Write a ready-to-open Godot 4 project that uses the outputs together: 640x360 (x3 =
+    1080p, integer scaling, nearest filtering), a terrain map from map tiles, and units in 8/16
+    directions with team colours (2 player, 2 enemy). In Godot: click your unit, then a tile:
+    it walks there (A* around water) facing where it goes, then greys out; Space = next turn.
+    The preview is the start screen drawn here."""
+    from .demo import make_demo, parse_terrains
+    out = Path(out_dir).expanduser()
+    if not out.is_absolute():
+        raise ToolError("Use an absolute folder path")
+    explicit = {"width": width, "height": height, "colors": colors}
+    settings = _build_settings(subject, explicit, None)
+    names, sources = parse_terrains(terrains)
+    with _work_lock:
+        written, preview = make_demo(
+            out, _input_files(unit) if unit else None, settings, animate=animate,
+            animations=animations, colours_from=_input_files([colours_from])[0] if colours_from else None,
+            directions=directions, frames=frames, elevation=elevation, yaw=yaw, terrains=names,
+            terrain_sources=sources, tile=tile, seed=seed, progress=lambda text: None)
+    text = (f"Godot project in {out} ({len(written)} files): open project.godot in Godot 4.3+ "
+            "and press F5.\n" + (out / "README.txt").read_text(encoding="utf-8").splitlines()[-1]
+            + "\nPreview: the start screen (player units blue on the left, enemies red).")
+    return [text, _png(Image.fromarray(preview, "RGBA"))]
+
+
 @tool(title="Idle animation from a sprite")
 def idle_animation(
     sprite_path: Annotated[str, Field(

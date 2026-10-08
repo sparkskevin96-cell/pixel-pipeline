@@ -556,6 +556,49 @@ def transfer_colours(dst: np.ndarray, src: np.ndarray, src_colours: np.ndarray,
     return np.clip(mean.reshape(-1, 3)[voxel(a)] + 0.5, 0, 255).astype(np.uint8)
 
 
+# --------------------------------------------------------------------------- writing
+
+class GlbWriter:
+    """Just enough of a glTF writer to build models in code (tests, the demo mannequin)."""
+
+    def __init__(self):
+        self.doc = {"asset": {"version": "2.0"}, "buffers": [{}], "bufferViews": [], "accessors": []}
+        self.bin = bytearray()
+
+    def view(self, data: bytes, stride=None) -> int:
+        while len(self.bin) % 4:
+            self.bin.append(0)
+        v = {"buffer": 0, "byteOffset": len(self.bin), "byteLength": len(data)}
+        if stride:
+            v["byteStride"] = stride
+        self.bin += data
+        self.doc["bufferViews"].append(v)
+        return len(self.doc["bufferViews"]) - 1
+
+    def accessor(self, arr, kind, ctype=5126, normalized=False) -> int:
+        dt = {5126: "<f4", 5121: "u1", 5123: "<u2", 5125: "<u4"}[ctype]
+        arr = np.ascontiguousarray(arr, dt)
+        a = {"bufferView": self.view(arr.tobytes()), "componentType": ctype,
+             "count": len(arr), "type": kind}
+        if normalized:
+            a["normalized"] = True
+        if kind in ("SCALAR", "VEC3") and ctype == 5126:      # required for POSITION and times
+            flat = arr.reshape(len(arr), -1)
+            a["min"], a["max"] = flat.min(0).tolist(), flat.max(0).tolist()
+        self.doc["accessors"].append(a)
+        return len(self.doc["accessors"]) - 1
+
+    def save(self, path):
+        self.doc["buffers"][0]["byteLength"] = len(self.bin)
+        js = json.dumps(self.doc).encode()
+        js += b" " * (-len(js) % 4)
+        binary = bytes(self.bin) + b"\0" * (-len(self.bin) % 4)
+        body = (struct.pack("<II", len(js), 0x4E4F534A) + js
+                + struct.pack("<II", len(binary), 0x004E4942) + binary)
+        Path(path).write_bytes(struct.pack("<III", 0x46546C67, 2, 12 + len(body)) + body)
+        return Path(path)
+
+
 # --------------------------------------------------------------------------- animations
 
 @dataclass

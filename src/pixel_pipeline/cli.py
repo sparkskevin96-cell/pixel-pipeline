@@ -310,6 +310,63 @@ def _animated_turnaround(a) -> int:
     return 0
 
 
+# ---- demo ----------------------------------------------------------------------------------
+
+def _add_demo(sub):
+    p = sub.add_parser(
+        "demo", help="a ready-to-open Godot 4 project: terrain map + units that walk where you click",
+        description="Writes a Godot 4 project (640x360, x3 = 1080p, integer scaling): a map from map "
+                    "tiles and units in 8/16 directions with team colours. Click your unit, then "
+                    "a tile: it walks there (A* around water), then greys out; Space = next turn. "
+                    "With no --unit, a built-in knight with idle and walk animations is used.")
+    p.add_argument("-o", "--out", type=Path, required=True, help="project folder (new or a demo)")
+    p.add_argument("--unit", nargs="+", type=Path,
+                   help="3D model(s) (rigged + animated .glb plays its animations), or photos/a "
+                        "video around a subject, as for turnaround")
+    p.add_argument("--still", dest="animate", action="store_false", default=None,
+                   help="don't play the model's animations")
+    p.add_argument("--animations", type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+                   help="which animations (default all); the demo uses the ones named idle and walk")
+    p.add_argument("--colours-from", type=Path, metavar="MODEL", help="as for turnaround")
+    p.add_argument("--directions", type=int, choices=DIRECTION_COUNTS, default=8)
+    p.add_argument("--frames", type=int, default=6, help="frames per animation")
+    p.add_argument("--elevation", type=float, default=30.0)
+    p.add_argument("--yaw", type=float, default=0.0)
+    p.add_argument("--terrains", default="grass,water,sand,road",
+                   help="base first; built-ins: grass water sand road dirt stone snow; or "
+                        "name=photo.jpg / name=prompt:<text> as for maptiles. Water blocks walking")
+    p.add_argument("--tile", type=int, default=32, help="tile size in px (default 32)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--preview", action="store_true",
+                   help="also save <out>_preview.png next to the folder: the start screen")
+    _add_setting_args(p, default_subject="person")
+    p.set_defaults(func=_cmd_demo)
+
+
+def _cmd_demo(a) -> int:
+    from PIL import Image
+
+    from .demo import make_demo, parse_terrains
+    for path in [*(a.unit or []), *([a.colours_from] if a.colours_from else [])]:
+        if not path.exists():
+            raise SystemExit(f"error: {path} not found")
+    if a.width is None and a.height is None and not a.system:
+        a.width = a.height = 40                   # a bit over one 32 px tile
+    s = _settings(a)
+    names, sources = parse_terrains(t for t in a.terrains.split(",") if t.strip())
+    written, preview = make_demo(a.out, a.unit, s, animate=a.animate, animations=a.animations,
+                                 colours_from=a.colours_from, directions=a.directions,
+                                 frames=a.frames, elevation=a.elevation, yaw=a.yaw,
+                                 terrains=names, terrain_sources=sources, tile=a.tile, seed=a.seed)
+    if a.preview:
+        shot = a.out.parent / f"{a.out.name}_preview.png"
+        Image.fromarray(preview, "RGBA").save(shot)
+        print(f"Preview of the start screen -> {shot}")
+    print(f"Godot project -> {a.out} ({len(written)} files). Open {a.out / 'project.godot'} "
+          "in Godot 4.3+ and press F5.")
+    return 0
+
+
 # ---- model ---------------------------------------------------------------------------------
 
 def _add_model(sub):
@@ -637,6 +694,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_generate(sub)
     _add_video(sub)
     _add_turnaround(sub)
+    _add_demo(sub)
     _add_model(sub)
     _add_teams(sub)
     _add_portrait(sub)
