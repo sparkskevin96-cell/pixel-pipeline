@@ -28,11 +28,12 @@ class Clip:
 
 def read_frames(path, count: int | None = 8, start: float | None = None,
                 end: float | None = None, fps: float | None = None,
-                max_side: int = 1280) -> Clip:
+                max_side: int = 1280, inclusive: bool = False) -> Clip:
     """Sample frames between start and end (seconds).
 
     fps given: take frames at that rate (count caps how many).
-    otherwise: `count` frames spread evenly (end exclusive, so the clip loops).
+    otherwise: `count` frames spread evenly (end exclusive, so the clip loops; inclusive=True
+    puts the last frame at the end instead, e.g. for a half-circle turnaround).
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -54,7 +55,10 @@ def read_frames(path, count: int | None = 8, start: float | None = None,
             duration = int(round(1000 / fps))
         else:
             n = count or 8
-            wanted = sorted({int(first + i * (last - first) / n) for i in range(n)})
+            if inclusive and n > 1:
+                wanted = sorted({int(round(first + i * (last - 1 - first) / (n - 1))) for i in range(n)})
+            else:
+                wanted = sorted({int(first + i * (last - first) / n) for i in range(n)})
             duration = int(round(1000 * (last - first) / src_fps / n))
         want = set(wanted)
         frames, pos = [], 0

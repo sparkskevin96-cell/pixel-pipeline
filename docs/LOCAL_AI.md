@@ -133,6 +133,29 @@ palette.
 | Several characters / a sprite sheet instead of one | Re-roll (new seed), simplify the prompt, or use `--init` with a sketch. |
 | Background not cut out cleanly | Try `--model birefnet-general`, or a plainer prompt ("on a plain white background"). |
 
+## Image to 3D (for 8- and 16-direction sprites)
+
+`pixel-pipeline turnaround model.glb` turns any 3D model into 4, 8 or 16 facing sprites. To
+get a model from a picture (a `generate` result, a drawing, a photo), an image-to-3D AI makes
+up the back and sides. None of these have been tested on your laptop yet; numbers are from
+their own docs and community reports.
+
+| Option | Runs on | VRAM | Colours | Notes |
+|---|---|---|---|---|
+| **Stable Fast 3D** (Stability AI) | your 4080 | ~6 GB | textured | Under a second per model. Free licence under $1M yearly revenue. Gated download on Hugging Face (accept the terms first). |
+| **TripoSR** | your 4080 | ~6 GB | vertex colours | MIT licence. Lowest detail, fine at sprite sizes. |
+| **Hunyuan3D 2.1** | your 4080 for shape only | ~10 GB shape, ~21 GB texture | shape: none | Best shapes. Native ComfyUI nodes do the shape; texturing needs a bigger GPU or a low-VRAM fork. An untextured model still renders (grey, shaded), useful for a silhouette you recolour. |
+| **TRELLIS.2** (Microsoft) | 16–24 GB GPU or cloud | 16 GB+ | PBR | Top quality, too big for 12 GB without heavy offloading. |
+| **Tripo, Meshy, Hunyuan3D web demo** | online | none | textured | Free tiers; upload the picture, download the `.glb`. Quickest way to try the pipeline today. |
+
+Tips:
+- Give the AI a clean picture: the whole subject, side or three-quarter view, plain
+  background. `generate` with "full body, plain white background" works well.
+- Sprite sizes hide a lot: a rough model is fine at 48–80 px. Pick the size with the
+  [sprite scale table](SPRITE_SCALE.md).
+- The tool lights the model from the upper left (`--light 0.35`). Models whose texture
+  already has shading baked in look better with `--light 0.15`.
+
 ## Your own ComfyUI workflows (Flux, Qwen-Image, …)
 
 pixel-pipeline can run any ComfyUI workflow you build, so you can swap models without code

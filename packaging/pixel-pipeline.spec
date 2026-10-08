@@ -3,14 +3,14 @@
 #   PixelPipeline(.exe)    desktop app, no console window
 #   pixel-pipeline(.exe)   command line
 #
-# Build (from the repo root, with pip install -e ".[ui,cutout,build]"):
+# Build (from the repo root, with pip install -e ".[ui,cutout,3d,build]"):
 #   pyinstaller packaging/pixel-pipeline.spec --noconfirm
 # Output: dist/PixelPipeline/. Background-removal models are not bundled; they download
 # on first use (see pixel_pipeline/cutout.py).
 import re
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 HERE = Path(SPECPATH)
 SRC = HERE.parent / "src"
@@ -18,6 +18,9 @@ SRC = HERE.parent / "src"
 # Our own modules, including ones only imported lazily. The MCP server needs the `mcp`
 # extra and runs from a normal Python install, so it stays out.
 HIDDEN = collect_submodules("pixel_pipeline", filter=lambda name: name != "pixel_pipeline.mcp_server")
+# trimesh (3D models for turnarounds) loads its file formats lazily and reads its own resources.
+HIDDEN += collect_submodules("trimesh.exchange") + collect_submodules("trimesh.visual")
+DATAS = collect_data_files("trimesh")
 
 # Qt ships nearly everything; the app only uses QtCore / QtGui / QtWidgets (QtDBus stays:
 # QtGui and QtWidgets import it).
@@ -61,6 +64,7 @@ def analysis(script):
         [str(HERE / script)],
         pathex=[str(SRC)],
         hiddenimports=HIDDEN,
+        datas=DATAS,
         excludes=EXCLUDES,
         noarchive=False,
     )

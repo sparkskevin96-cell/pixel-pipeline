@@ -103,10 +103,35 @@ pixel-pipeline generate "a blue wizard" -s person --init sketch.png --denoise 0.
 # Scenery photo -> far/mid/near parallax layers + Godot 4 Parallax2D scene
 pixel-pipeline parallax lake.jpg -o bg/ -W 320 -H 180 --scale 3
 
+# 16 facing directions from a 3D model (e.g. an image-to-3D AI's .glb), Godot-ready
+pixel-pipeline turnaround knight.glb -o knight_dirs.png --directions 16 -W 48 -H 48 --godot --aseprite --preview 6
+# ...or from a video walking all the way around a still subject (start in front, walk to your right)
+pixel-pipeline turnaround walkaround.mp4 -o rex_dirs.png -s animal --directions 8
+
 pixel-pipeline palettes                      # list built-ins
 pixel-pipeline convert me.jpg -s person --palette lospec:resurrect-64 --outline-style selout
 pixel-pipeline <command> --help              # every option
 ```
+
+### Any sprite in 16 directions
+
+A photo or a generated picture only shows one side, so the other directions have to be
+made up. The tool does it the way pre-rendered games did (Diablo, StarCraft): through a 3D
+model.
+
+1. **Front view**: `generate` on your GPU, Draw mode, or any picture of the thing.
+2. **Image → 3D model (.glb)**: an image-to-3D AI invents the back and sides. On your
+   4080 (12 GB): Stable Fast 3D or TripoSR make coloured models in about 6 GB; Hunyuan3D
+   2.1 makes better shapes, but its texture step needs about 21 GB. Online: Tripo, Meshy or
+   the Hunyuan3D demo. See [docs/LOCAL_AI.md](docs/LOCAL_AI.md#image-to-3d-for-8-and-16-direction-sprites).
+3. **`turnaround model.glb`**: renders every direction with one camera angle
+   (`--elevation 30` top-down/isometric, `0` side view), one scale and one palette.
+
+Directions run clockwise from facing right, the way Godot measures angles: E, ESE, SE,
+SSE, S (facing the viewer) ... N (away). With `--godot` you get SpriteFrames with one
+animation per direction and `<name>_facing.gd`: attach it to an AnimatedSprite2D and call
+`face(velocity)`. If S doesn't face the viewer, turn the model with `--yaw 90` (or 180, -90);
+a model lying on its back needs `--up z`.
 
 ### Video tips
 
@@ -154,6 +179,9 @@ pixel-pipeline <command> --help              # every option
   `.tres`. For crisp pixels set Project Settings → Rendering → Textures → Default
   Texture Filter = **Nearest**.
 - **Tileset + .tmj**: unique tiles plus a Tiled map that rebuilds the image.
+- **Turnaround** (`turnaround`): one sheet with a frame per direction (8 per row), JSON with
+  a tag per direction, `.aseprite` with the same tags, Godot SpriteFrames with an animation
+  per direction plus a `_facing.gd` script, and `--preview` a spinning GIF.
 - **Parallax** (`parallax`): one PNG per depth layer (far one opaque, nearer ones
   transparent, with hidden areas filled so scrolling never shows holes), sharing one
   palette, and `<name>_parallax.tscn` with Parallax2D nodes (scroll 0.2 / 0.5 / 0.85,

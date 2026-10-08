@@ -41,6 +41,7 @@ from .pipeline import convert_batch
 from .quantize import DITHER_MODES
 from .settings import PRESETS, SUBJECTS, Settings, settings_for
 from .systems import LOOKS, READABLE_SIZES, SYSTEM_NAMES, SYSTEMS
+from .turnaround import ModelUnavailable, direction_names, turnaround_from, write_turnaround
 from .video import ALIGN_MODES, video_to_sprites
 
 log = logging.getLogger("pixel_pipeline.mcp")
@@ -98,6 +99,8 @@ def _guarded(fn: Callable[..., Any]) -> Callable[..., Any]:
             return fn(*args, **kwargs)
         except ToolError:
             raise
+        except ModelUnavailable as e:
+            raise ToolError(str(e)) from e
         except CutoutUnavailable as e:
             raise ToolError(f"{e}. Pass remove_background=false for photos that already have "
                             "a transparent background, or for scenes.") from e
@@ -593,6 +596,63 @@ def video_to_animation(
     if any(not f[..., 3].any() for f in rgbas):
         head += "\nWARNING: some frames are empty; try remove_background=false or another cutout_model."
     return _animation_result(head, rgbas, written)
+
+
+@tool(title="Turnaround: 4, 8 or 16 facing directions", open_world=True, extra_doc=_presets_doc())
+def turnaround(
+    source: Annotated[list[str], Field(
+        description="ONE 3D model (.glb .gltf .obj .ply .stl, e.g. from an image-to-3D AI like "
+                    "Hunyuan3D / Stable Fast 3D / TripoSR / Tripo / Meshy), OR one video of walking "
+                    "all the way around a still subject (start in front, walk to your right), OR "
+                    "one photo per direction in that order (files, a folder or a glob).")],
+    out_png: Annotated[str, Field(description="Sprite sheet .png to write (.json etc. go next to it).")],
+    directions: Annotated[Literal[4, 8, 16], Field(description="Facing directions.")] = 16,
+    subject: Annotated[Subject, Field(description="Preset (size, colours, outline).")] = "person",
+    system: Annotated[RetroSystem, Field(description=SYSTEM_DOC)] = "off",
+    look: Annotated[Look, Field(description=LOOK_DOC)] = "readable",
+    width: Annotated[int | None, Field(ge=4, le=1024, description="Sprite width. null = preset.")] = None,
+    height: Annotated[int | None, Field(ge=4, le=1024, description="Sprite height. null = preset.")] = None,
+    colors: Annotated[int | None, Field(ge=2, le=256, description="Palette size. null = preset.")] = None,
+    elevation: Annotated[float, Field(
+        ge=0, le=90, description="3D model: camera tilt in degrees. 0 = side view, 30 = classic "
+                                 "top-down / isometric, 60+ = nearly overhead.")] = 30.0,
+    up: Annotated[Literal["y", "z"], Field(description="3D model: its up axis (glTF = y).")] = "y",
+    yaw: Annotated[float, Field(
+        description="3D model: degrees to turn it if its front doesn't face +z (check the S view: "
+                    "it should face the viewer).")] = 0.0,
+    light: Annotated[float, Field(ge=0, le=1, description="3D model: shading, 0 = flat.")] = 0.35,
+    reverse: Annotated[bool, Field(description="Photos/video: walked around to the left.")] = False,
+    mirror: Annotated[bool, Field(
+        description="Photos/video: only the front-to-back half was captured "
+                    "(directions/2 + 1 views); mirror the other side.")] = False,
+    start: Annotated[float | None, Field(ge=0, description="Video: start time, seconds.")] = None,
+    end: Annotated[float | None, Field(ge=0, description="Video: end time, seconds.")] = None,
+    aseprite: Annotated[bool, Field(description="Also write .aseprite with a tag per direction.")] = True,
+    godot: Annotated[bool, Field(
+        description="Also write Godot SpriteFrames (an animation per direction, E ESE SE ... "
+                    "clockwise like Vector2.angle()) and a facing script.")] = True,
+    extra_settings: Annotated[dict[str, str | int | float | bool] | None, Field(
+        description="Any other setting, as in convert_photos.")] = None,
+) -> ToolOutput:
+    """Make one sprite per facing direction (4, 8 or 16), all with one palette and one scale:
+    from a 3D model (rendered from every direction, like Diablo/StarCraft pre-rendered sprites)
+    or from photos/a video taken while walking around a still subject. To go from a prompt:
+    generate or draw a front view, turn it into a 3D model with an image-to-3D AI, then pass the
+    .glb here. Look at the preview: if S doesn't face the viewer, fix `yaw` (3D) or `reverse`."""
+    srcs = _input_files(source)
+    out = _output_png(out_png)
+    explicit = {"width": width, "height": height, "colors": colors, "system": system, "look": look}
+    settings = _build_settings(subject, explicit, extra_settings)
+    with _work_lock:
+        sprites, what = turnaround_from(srcs, settings, directions, elevation=elevation, up=up,
+                                        yaw=yaw, light=light, reverse=reverse, mirror=mirror,
+                                        start=start, end=end)
+    written = write_turnaround(sprites, out, aseprite, godot)
+    w, h = sprites[0].size
+    text = (f"{what} -> {len(sprites)} directions, {w}x{h} px, palette ({len(sprites[0].palette)}): "
+            f"{_hex_list(sprites[0].palette)}\n" + "\n".join(f"  {p}" for p in written))
+    preview = _contact_sheet([s.rgba for s in sprites], direction_names(directions))
+    return [text + "\nPreview: every direction, clockwise from facing right (E).", _png(preview)]
 
 
 @tool(title="Idle animation from a sprite")

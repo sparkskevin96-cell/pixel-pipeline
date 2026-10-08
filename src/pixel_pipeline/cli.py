@@ -18,6 +18,7 @@ from .pixelize import DOWNSCALE_MODES
 from .quantize import DITHER_MODES
 from .settings import ANCHORS, FITS, OUTLINE_STYLES, SUBJECTS, settings_for
 from .systems import LOOKS, SYSTEM_NAMES
+from .turnaround import DIRECTION_COUNTS, ModelUnavailable
 from .video import ALIGN_MODES, video_to_sprites
 
 BOOL = argparse.BooleanOptionalAction
@@ -224,6 +225,59 @@ def _cmd_video(a) -> int:
     return 0
 
 
+# ---- turnaround ----------------------------------------------------------------------------
+
+def _add_turnaround(sub):
+    p = sub.add_parser(
+        "turnaround", help="3D model, or photos/video around a subject -> 4/8/16-direction sprites",
+        description="One sprite per facing direction (E, ESE, SE ... clockwise, as Godot measures "
+                    "angles), all with one palette and one scale. Give a 3D model (.glb .gltf .obj "
+                    ".ply .stl, e.g. from an image-to-3D AI), a video of you walking all the way "
+                    "around a still subject (start in front, walk to your right), or one photo per "
+                    "direction in that order.")
+    p.add_argument("source", nargs="+", type=Path,
+                   help="3D model, video, or photos/folder (one photo per direction, in order)")
+    p.add_argument("-o", "--out", type=Path, required=True, help="sprite sheet .png")
+    p.add_argument("--directions", type=int, choices=DIRECTION_COUNTS, default=16)
+    p.add_argument("--elevation", type=float, default=30.0,
+                   help="3D: camera tilt in degrees (0 = side view, 30 = top-down/isometric)")
+    p.add_argument("--up", choices=("y", "z"), default="y", help="3D: the model's up axis (glTF = y)")
+    p.add_argument("--yaw", type=float, default=0.0,
+                   help="3D: degrees to turn the model if its front doesn't face +z")
+    p.add_argument("--light", type=float, default=0.35, help="3D: shading 0 (flat) to 1")
+    p.add_argument("--reverse", action="store_true", help="photos/video: you walked to your left")
+    p.add_argument("--mirror", action="store_true",
+                   help="photos/video: only the front-to-back half, mirror the other side")
+    p.add_argument("--start", type=float, help="video: start time, seconds")
+    p.add_argument("--end", type=float, help="video: end time, seconds")
+    p.add_argument("--columns", type=int, help="sheet columns (default 8)")
+    p.add_argument("--aseprite", action="store_true", help="also write .aseprite (a tag per direction)")
+    p.add_argument("--godot", action="store_true",
+                   help="also write Godot SpriteFrames (an animation per direction) + facing script")
+    p.add_argument("--preview", type=int, metavar="SCALE",
+                   help="also write a spinning preview GIF enlarged by SCALE")
+    _add_setting_args(p, default_subject="person")
+    p.set_defaults(func=_cmd_turnaround)
+
+
+def _cmd_turnaround(a) -> int:
+    from .turnaround import turnaround_from, write_preview, write_turnaround
+    for path in a.source:
+        if not path.exists():
+            raise SystemExit(f"error: {path} not found")
+    sprites, what = turnaround_from(a.source, _settings(a), a.directions, elevation=a.elevation,
+                                    up=a.up, yaw=a.yaw, light=a.light, reverse=a.reverse,
+                                    mirror=a.mirror, start=a.start, end=a.end)
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    written = write_turnaround(sprites, a.out, a.aseprite, a.godot, a.columns)
+    if a.preview:
+        written.append(write_preview(sprites, a.out.with_name(a.out.stem + "_spin.gif"), a.preview))
+    w, h = sprites[0].size
+    _print_written(f"{what} -> {len(sprites)} directions {w}x{h}, "
+                   f"{len(sprites[0].palette)} colours", written)
+    return 0
+
+
 # ---- idle ----------------------------------------------------------------------------------
 
 def _add_idle(sub):
@@ -348,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_convert(sub)
     _add_generate(sub)
     _add_video(sub)
+    _add_turnaround(sub)
     _add_idle(sub)
     _add_parallax(sub)
     _add_sheet(sub)
@@ -356,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (CutoutUnavailable, ComfyUIError, ValueError, FileNotFoundError) as e:
+    except (CutoutUnavailable, ComfyUIError, ModelUnavailable, ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 

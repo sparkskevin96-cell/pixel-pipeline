@@ -45,7 +45,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
       - name: Install
-        run: python -m pip install -e ".[dev,ui,cutout,mcp]"
+        run: python -m pip install -e ".[dev,ui,cutout,mcp,3d]"
       - name: Test
         run: python -m pytest -q
 
@@ -65,7 +65,7 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
-        run: python -m pip install ".[ui,cutout,build]"
+        run: python -m pip install ".[ui,cutout,3d,build]"
       - name: Build (PyInstaller)
         run: pyinstaller packaging/pixel-pipeline.spec --noconfirm
       - name: Smoke test

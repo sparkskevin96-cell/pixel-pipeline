@@ -42,6 +42,13 @@ wants terse answers and fixes over polish.
   authentic sizes unrecognizable for photos, hence readable as the default. Game Boy
   (`mono`) maps photos by brightness (`tone_map`) onto 4 evenly spread DMG shades. The
   JS port in `web/index.html` must stay in sync.
+- **Turnarounds** (`turnaround.py`, CLI `turnaround`, MCP `turnaround`): 4/8/16 facing
+  directions. 3D models (trimesh, `3d` extra) are point-splat rendered with an orthographic
+  camera (`elevation`), one scale/palette; or photos/video walking around a subject
+  (`views_from_capture`: start in front, walk right; `mirror` for half captures).
+  Directions follow Godot's Vector2.angle (E, ESE, SE ... clockwise); `--godot` writes an
+  animation per direction plus `_facing.gd`. Kevin's plan: prompt -> front image ->
+  image-to-3D AI (not wired yet; docs/LOCAL_AI.md lists options for 12 GB) -> turnaround.
 - **Sprite scale research** (`docs/SPRITE_SCALE.md`, interactive page artifact
   Jv1VrzgNjgmiH4LgAQg1SR): character height as a share of screen height for 41 classic
   games by genre, and the matching sprite heights. Kevin decided all his games render at
