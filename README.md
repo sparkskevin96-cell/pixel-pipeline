@@ -103,6 +103,12 @@ pixel-pipeline generate "a blue wizard" -s person --init sketch.png --denoise 0.
 # Scenery photo -> far/mid/near parallax layers + Godot 4 Parallax2D scene
 pixel-pipeline parallax lake.jpg -o bg/ -W 320 -H 180 --scale 3
 
+# Team colours (Fire Emblem style): blue player, red enemy, green ally, purple other, grey spent
+pixel-pipeline teams knight_dirs.png --godot          # + palette strip, shader, a material per team
+# Dialogue portrait (head and shoulders) from a photo, a picture, or a prompt on your GPU
+pixel-pipeline portrait me.jpg -o me_portrait.png -W 96 -H 96 --scale 4
+pixel-pipeline portrait --prompt "a young knight with red hair" -o knight_face.png
+
 # 16 facing directions from a 3D model (e.g. an image-to-3D AI's .glb), Godot-ready
 pixel-pipeline turnaround knight.glb -o knight_dirs.png --directions 16 -W 48 -H 48 --godot --aseprite --preview 6
 # ...or from a video walking all the way around a still subject (start in front, walk to your right)
@@ -186,6 +192,10 @@ a model lying on its back needs `--up z`.
   `.tres`. For crisp pixels set Project Settings → Rendering → Textures → Default
   Texture Filter = **Nearest**.
 - **Tileset + .tmj**: unique tiles plus a Tiled map that rebuilds the image.
+- **Team colours** (`teams`): a PNG per team, and with `--godot` a palette strip
+  (`<name>_teams.png`, row 0 = colours as drawn, then player, enemy, ally, other, spent), the
+  `team_colours.gdshader` palette-swap shader and a ShaderMaterial per team: put one on the
+  AnimatedSprite2D and set `team` / `spent` in code, so one sheet serves every side.
 - **Turnaround** (`turnaround`): one sheet with a frame per direction (8 per row), JSON with
   a tag per direction, `.aseprite` with the same tags, Godot SpriteFrames with an animation
   per direction plus a `_facing.gd` script, and `--preview` a spinning GIF.

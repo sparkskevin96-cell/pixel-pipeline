@@ -716,6 +716,77 @@ def prompt_to_model(
     return blocks
 
 
+@tool(title="Team colours (Fire Emblem style)")
+def team_colours(
+    sprite_path: Annotated[str, Field(description="Sprite or sprite sheet PNG (1x), absolute path.")],
+    out_dir: Annotated[str | None, Field(description="Folder for the results (default: next to it).")] = None,
+    colour: Annotated[str | None, Field(
+        description="The colour to swap, #rrggbb (default: the main saturated colour, "
+                    "e.g. the armour).")] = None,
+    godot: Annotated[bool, Field(
+        description="Also write the palette strip, team_colours.gdshader and a ShaderMaterial per "
+                    "team, so one sprite sheet serves every team in Godot.")] = True,
+) -> ToolOutput:
+    """Recolour a sprite for every side: player blue, enemy red, ally green, other purple and a
+    greyed 'spent' (already moved) version. Only the team colour family changes; skin, gold
+    trim and outlines stay. Check the preview: if the wrong colour moved, pass `colour`."""
+    from .teams import team_variants, write_godot_teams
+    src = _input_files([sprite_path])[0]
+    rgba = load_sprite(src)
+    variants, colours, pals = team_variants(rgba, colour)
+    out = _path(out_dir) if out_dir else src.parent
+    out.mkdir(parents=True, exist_ok=True)
+    written = []
+    for team, img in variants.items():
+        path = out / f"{src.stem}_{team}.png"
+        Image.fromarray(img).save(path)
+        written.append(path)
+    if godot:
+        written += write_godot_teams(colours, pals, out, src.stem)
+    changed = int((pals["player"] != colours).any(1).sum())
+    text = (f"{changed} of {len(colours)} colours are team colours"
+            + ("" if changed else " (none found: pass `colour`)") + "\n"
+            + "\n".join(f"  {p}" for p in written))
+    return [text, _png(_contact_sheet([rgba, *variants.values()], ["drawn", *variants]))]
+
+
+@tool(title="Portrait (dialogue bust)", open_world=True)
+def portrait(
+    out_png: Annotated[str, Field(description="Portrait .png to write.")],
+    source: Annotated[str | None, Field(description="Photo or picture, absolute path.")] = None,
+    prompt: Annotated[str | None, Field(
+        description="Make the picture on the user's GPU (ComfyUI) instead, e.g. 'a young knight "
+                    "with red hair'.")] = None,
+    width: Annotated[int, Field(ge=16, le=512)] = 96,
+    height: Annotated[int, Field(ge=16, le=512)] = 96,
+    colors: Annotated[int, Field(ge=2, le=64)] = 32,
+    flip: Annotated[bool, Field(description="Face the other way (dialogue partner).")] = False,
+    seed: Annotated[int | None, Field(description="Re-make a specific prompt result.")] = None,
+) -> ToolOutput:
+    """Head-and-shoulders dialogue portrait: finds the face (or the top of the subject), cuts
+    out the background and pixelizes with a sel-out outline."""
+    from .teams import PORTRAIT_PROMPT, make_portrait
+    out = _output_png(out_png)
+    if source:
+        picture = _input_files([source])[0]
+    elif prompt:
+        from .generate import generate_images
+        from .model3d import MODEL_NEGATIVE
+        with _work_lock:
+            (picture, seed), = generate_images(PORTRAIT_PROMPT.format(prompt=prompt), MODEL_NEGATIVE,
+                                               seed=seed, aspect=1.0, lora="none")
+        picture.save(out.with_suffix(".picture.png"))
+    else:
+        raise ToolError("Give a source picture or a prompt.")
+    s = settings_for("person", width=width, height=height, colors=colors, outline_style="selout")
+    with _work_lock:
+        sprite = make_portrait(picture, s, flip)
+    sprite.save(out, 1)
+    preview, factor = _enlarge(Image.fromarray(sprite.rgba, "RGBA"))
+    return [f"Portrait {width}x{height}, {len(sprite.palette)} colours"
+            + (f", seed {seed}" if prompt else "") + f"\n  {out}\nPreview x{factor}.", _png(preview)]
+
+
 @tool(title="Idle animation from a sprite")
 def idle_animation(
     sprite_path: Annotated[str, Field(

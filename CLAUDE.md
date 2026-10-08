@@ -56,6 +56,11 @@ wants terse answers and fixes over polish.
   through-projection behind, optional back picture) -> turnaround. Untested on a real GPU;
   the fake ComfyUI in tests/test_generate.py knows the 3D nodes. ComfyUI source for node
   names: github.com/Comfy-Org/ComfyUI comfy_extras/nodes_hunyuan3d.py, nodes_save_3d.py.
+- **Teams + portraits** (`teams.py`, CLI `teams` / `portrait`, MCP `team_colours` /
+  `portrait`): team family = dominant saturated hue (yellows 45-110 weighted down: trim),
+  recoloured in LCh keeping lightness; Godot palette-swap shader + material per team (verified
+  by rendering in Godot under xvfb-run + Mesa: `xvfb-run -a godot --rendering-driver opengl3`).
+  Portraits: YuNet face box (downloaded on first use), else the subject's top.
 - **Sprite scale research** (`docs/SPRITE_SCALE.md`, interactive page artifact
   Jv1VrzgNjgmiH4LgAQg1SR): character height as a share of screen height for 41 classic
   games by genre, and the matching sprite heights. Kevin decided all his games render at

@@ -28,3 +28,9 @@ ONNX for parallax layers. Only the Small model is used; Base/Large are CC-BY-NC.
   pre/post-processing in `cutout.py` mirrors rembg's.
 - PySide6 (LGPLv3): desktop UI.
 - mcp (MIT): MCP server.
+
+## YuNet face detector (portraits)
+
+`face_detection_yunet_2023mar.onnx` from OpenCV Zoo (https://github.com/opencv/opencv_zoo),
+MIT License, Copyright (c) 2023 Shiqi Yu. Downloaded on first use of `portrait` to
+~/.cache/pixel-pipeline/models/; without it portraits frame the top of the subject.

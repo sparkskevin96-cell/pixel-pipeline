@@ -344,6 +344,95 @@ def _cmd_model(a) -> int:
     return 0
 
 
+# ---- teams / portrait ----------------------------------------------------------------------
+
+def _add_teams(sub):
+    p = sub.add_parser("teams", help="sprite/sheet -> team colour versions (+ Godot palette-swap shader)",
+                       description="Fire Emblem style team colours: the sprite's main saturated "
+                                   "colour becomes blue (player), red (enemy), green (ally), "
+                                   "purple (other), plus a greyed 'spent' version.")
+    p.add_argument("sprite", type=Path, help="sprite or sprite sheet PNG (1x)")
+    p.add_argument("-o", "--out", type=Path, help="output folder (default: next to the sprite)")
+    p.add_argument("--colour", "--color", dest="colour",
+                   help="the team colour to swap, #rrggbb (default: the main saturated colour)")
+    p.add_argument("--godot", action="store_true",
+                   help="also write the palette strip, team_colours.gdshader and a material per team")
+    p.add_argument("--no-png", action="store_true", help="only the Godot files, no PNG per team")
+    p.set_defaults(func=_cmd_teams)
+
+
+def _cmd_teams(a) -> int:
+    from PIL import Image
+
+    from .teams import team_variants, write_godot_teams
+    if not a.sprite.exists():
+        raise SystemExit(f"error: {a.sprite} not found")
+    rgba = load_sprite(a.sprite)
+    variants, colours, pals = team_variants(rgba, a.colour)
+    out = a.out or a.sprite.parent
+    out.mkdir(parents=True, exist_ok=True)
+    written = []
+    if not a.no_png:
+        for team, img in variants.items():
+            path = out / f"{a.sprite.stem}_{team}.png"
+            Image.fromarray(img).save(path)
+            written.append(path)
+    if a.godot:
+        written += write_godot_teams(colours, pals, out, a.sprite.stem)
+    changed = int((pals["player"] != colours).any(1).sum()) if "player" in pals else 0
+    _print_written(f"{a.sprite.name}: {changed} of {len(colours)} colours are team colours", written)
+    if not changed:
+        print("No strong team colour found; pass --colour #rrggbb to choose one.")
+    return 0
+
+
+def _add_portrait(sub):
+    p = sub.add_parser("portrait", help="photo / picture / prompt -> head-and-shoulders portrait sprite",
+                       description="Dialogue portrait: finds the face (or the top of the subject), "
+                                   "crops head and shoulders, cuts out the background and pixelizes.")
+    p.add_argument("source", nargs="?", type=Path, help="photo or picture (omit with --prompt)")
+    p.add_argument("-o", "--out", type=Path, required=True, help="portrait .png")
+    p.add_argument("--prompt", help="make the picture on your GPU (ComfyUI) instead")
+    p.add_argument("-W", "--width", type=int, default=96)
+    p.add_argument("-H", "--height", type=int, default=96)
+    p.add_argument("--colors", type=int, default=32)
+    p.add_argument("--flip", action="store_true", help="face the other way")
+    p.add_argument("--scale", type=int, default=1, help="also save an enlarged copy")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--comfyui", help="ComfyUI address")
+    p.set_defaults(func=_cmd_portrait)
+
+
+def _cmd_portrait(a) -> int:
+    from .teams import PORTRAIT_PROMPT, make_portrait
+    if not a.source and not a.prompt:
+        raise SystemExit("error: give a picture or --prompt")
+    picture = a.source
+    if picture is not None and not picture.exists():
+        raise SystemExit(f"error: {picture} not found")
+    if picture is None:
+        from .generate import ComfyClient, generate_images
+        from .model3d import MODEL_NEGATIVE
+        (img, seed), = generate_images(PORTRAIT_PROMPT.format(prompt=a.prompt), MODEL_NEGATIVE,
+                                       client=ComfyClient(a.comfyui), seed=a.seed, aspect=1.0,
+                                       lora="none")
+        picture = img
+        a.out.parent.mkdir(parents=True, exist_ok=True)
+        img.save(a.out.with_suffix(".picture.png"))
+    s = settings_for("person", width=a.width, height=a.height, colors=a.colors,
+                     outline_style="selout")
+    sprite = make_portrait(picture, s, a.flip)
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    sprite.save(a.out, 1)
+    written = [a.out]
+    if a.scale > 1:
+        big = a.out.with_name(f"{a.out.stem}@{a.scale}x.png")
+        sprite.save(big, a.scale)
+        written.append(big)
+    _print_written(f"portrait {a.width}x{a.height}", written)
+    return 0
+
+
 # ---- idle ----------------------------------------------------------------------------------
 
 def _add_idle(sub):
@@ -470,6 +559,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_video(sub)
     _add_turnaround(sub)
     _add_model(sub)
+    _add_teams(sub)
+    _add_portrait(sub)
     _add_idle(sub)
     _add_parallax(sub)
     _add_sheet(sub)
