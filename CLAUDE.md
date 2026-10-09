@@ -58,6 +58,11 @@ wants terse answers and fixes over polish.
   names (mixamo.com, Take 001) take the file stem. `--colours-from` re-colours by shape
   (voxel grid) since Mixamo drops vertex colours; `model --obj` / Save all writes the .obj
   to upload. Verified on Khronos Fox/CesiumMan/RiggedSimple and in Godot 4.7 headless.
+- **Desktop app** (`ui/app.py` MainWindow = QTabWidget): Sprite (the original live
+  converter), Directions / Teams / Portrait / Map tiles / Godot demo (`ui/tools.py`, each a
+  `ToolTab` from `ui/common.py`: slow work on a QThread via `run(job, on_done)`, `sync=True`
+  in tests), Prompt to Model (`ModelStudio` embedded). Icon: the demo knight
+  (`ui/icon.png`, `packaging/icon.ico`). Windows exe = PyInstaller `packaging/pixel-pipeline.spec`.
 - **Godot demo** (`demo.py`, CLI `demo`, MCP `godot_demo`): writes a Godot 4 project
   (640x360 x3, integer scale, gl_compatibility): terrain map (cells set at runtime from
   map/map.json; water + half-visible edge rows blocked), units created in code (`DemoUnit`

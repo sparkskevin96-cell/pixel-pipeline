@@ -61,7 +61,19 @@ iPhone `.heic` photos work out of the box.
 pixel-pipeline-ui            # or: pixel-pipeline-ui path\to\photo.jpg
 ```
 
-Drop a photo on the window. Pick a subject type (it loads that preset), then
+One window, a tab per tool:
+
+| Tab | What it does |
+|---|---|
+| **Sprite** | Photo or picture → sprite, live. Video → walk cycle. Idle loops. |
+| **Directions** | 3D model, photos or a video → 4/8/16 facing directions. A rigged `.glb` plays its animations from every side. Save writes sheet, `.json`, `.aseprite`, Godot SpriteFrames + facing script, GIF. |
+| **Teams** | Sprite or sheet → player / enemy / ally / other / spent colours + the Godot palette shader. |
+| **Portrait** | Photo, picture or prompt (GPU) → head-and-shoulders dialogue portrait. |
+| **Map tiles** | Built-in, photo or prompt terrains → tiles with shores and edges + Godot TileSet. |
+| **Godot demo** | A ready-to-open Godot project: map + units that walk where you click. |
+| **Prompt to Model** | Prompt → 3D model on your GPU → direction sprites. |
+
+Sprite tab: drop a photo on the window. Pick a subject type (it loads that preset), then
 tweak anything on the left; the sprite re-renders live.
 
 - File → Export PNG (Ctrl+E) / Export .aseprite (Ctrl+Shift+E)

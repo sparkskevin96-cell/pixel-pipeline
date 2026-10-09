@@ -81,6 +81,10 @@ jobs:
           & "$app/pixel-pipeline.exe" convert smoke.png --no-bg-removal -o smoke-plain.png; Check "convert"
           # Background removal with the 5 MB u2netp model proves onnxruntime is bundled.
           & "$app/pixel-pipeline.exe" convert smoke.png --bg-removal --model u2netp -o smoke-cutout.png; Check "convert --bg-removal"
+          # 3D: trimesh (still model) and the glTF animation reader, map tiles and teams (demo).
+          python -c "import trimesh; trimesh.creation.box(extents=[0.5, 1, 0.3]).export('box.glb')"
+          & "$app/pixel-pipeline.exe" turnaround box.glb -o smoke-dirs.png --directions 4 -W 24 -H 24 --godot; Check "turnaround"
+          & "$app/pixel-pipeline.exe" demo -o smoke-demo --directions 4 --frames 2 -W 24 -H 24; Check "demo"
 
           # Desktop app: opens the main window, quits after 3 s (see packaging/gui_main.py).
           $env:PIXEL_PIPELINE_SMOKE_TEST = "3"

@@ -21,6 +21,9 @@ HIDDEN = collect_submodules("pixel_pipeline", filter=lambda name: name != "pixel
 # trimesh (3D models for turnarounds) loads its file formats lazily and reads its own resources.
 HIDDEN += collect_submodules("trimesh.exchange") + collect_submodules("trimesh.visual")
 DATAS = collect_data_files("trimesh")
+# The window/taskbar icon the app loads at runtime.
+DATAS += [(str(SRC / "pixel_pipeline" / "ui" / "icon.png"), "pixel_pipeline/ui")]
+ICON = str(HERE / "icon.ico")
 
 # Qt ships nearly everything; the app only uses QtCore / QtGui / QtWidgets (QtDBus stays:
 # QtGui and QtWidgets import it).
@@ -82,6 +85,7 @@ gui_exe = EXE(
     exclude_binaries=True,
     name="PixelPipeline",
     console=False,
+    icon=ICON,
     upx=False,
 )
 cli_exe = EXE(
@@ -90,6 +94,7 @@ cli_exe = EXE(
     exclude_binaries=True,
     name="pixel-pipeline",
     console=True,
+    icon=ICON,
     upx=False,
 )
 COLLECT(

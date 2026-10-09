@@ -1,4 +1,8 @@
-"""Desktop app: drop in a photo, tweak settings, watch the sprite update live.
+"""Desktop app: every tool in one window, one tab each.
+
+Sprite: drop in a photo, tweak settings, watch the sprite update live (plus video and idle
+animations). Directions, Teams, Portrait, Map tiles, Godot demo and Prompt to Model are in
+ui/tools.py and ui/model_studio.py.
 
 Run with:  pixel-pipeline-ui [photo]
 """
@@ -9,11 +13,11 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGroupBox, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QScrollArea, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..animate import IDLE_MS, IDLE_STYLES, SUBJECT_IDLE, idle_frames
@@ -27,6 +31,7 @@ from ..quantize import DITHER_MODES
 from ..settings import ANCHORS, FITS, OUTLINE_STYLES, SUBJECTS, Settings, settings_for
 from ..systems import SYSTEMS
 from ..video import ALIGN_MODES, video_to_sprites
+from .common import checkerboard, to_pixmap
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.heic *.heif *.webp *.bmp *.tif *.tiff *.gif)"
 VIDEO_FILTER = "Videos (*.mp4 *.mov *.m4v *.avi *.webm *.mkv)"
@@ -34,22 +39,7 @@ CUTOUT_MODELS = ["isnet-general-use", "u2net_human_seg", "birefnet-general-lite"
                  "birefnet-portrait", "isnet-anime", "u2netp"]
 LOAD_FILE, LOSPEC = "Load file…", "Lospec…"
 ORIGINAL_MAX = 420
-
-
-def checkerboard(rgba: np.ndarray, cell: int = 8) -> np.ndarray:
-    """Composite RGBA over a grey checkerboard so transparency is visible."""
-    h, w = rgba.shape[:2]
-    yy, xx = np.mgrid[0:h, 0:w]
-    bg = np.where(((yy // cell + xx // cell) % 2 == 0)[..., None], 205.0, 165.0)
-    a = rgba[..., 3:4].astype(np.float32) / 255
-    rgb = rgba[..., :3].astype(np.float32) * a + bg * (1 - a)
-    return np.concatenate([np.rint(rgb).astype(np.uint8), np.full((h, w, 1), 255, np.uint8)], -1)
-
-
-def to_pixmap(rgba: np.ndarray) -> QPixmap:
-    rgba = np.ascontiguousarray(rgba)
-    h, w = rgba.shape[:2]
-    return QPixmap.fromImage(QImage(rgba.data, w, h, w * 4, QImage.Format_RGBA8888).copy())
+ICON = Path(__file__).with_name("icon.png")
 
 
 def _spin(lo, hi, step=1, decimals=None):
@@ -71,8 +61,8 @@ def _combo(items, editable=False):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("pixel-pipeline")
-        self.resize(1240, 780)
+        self.setWindowTitle("Pixel Pipeline")
+        self.resize(1280, 820)
         self.setAcceptDrops(True)
         self.source: np.ndarray | None = None
         self.source_path: Path | None = None
@@ -192,7 +182,32 @@ class MainWindow(QMainWindow):
         split.addWidget(self.original_view)
         split.addWidget(sprite_scroll)
         split.setSizes([320, 420, 500])
-        self.setCentralWidget(split)
+
+        from .model_studio import ModelStudio
+        from .tools import DemoTab, DirectionsTab, MapTab, PortraitTab, TeamsTab
+        say = self.statusBar().showMessage
+        self.directions_tab = DirectionsTab(say)
+        self.teams_tab = TeamsTab(say, current_sprite=lambda: self.sprite)
+        self.portrait_tab = PortraitTab(say)
+        self.map_tab = MapTab(say)
+        self.demo_tab = DemoTab(say)
+        self.studio = ModelStudio()
+        self.studio.setWindowFlags(Qt.Widget)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        for widget, title, tip in (
+            (split, "Sprite", "Photo, picture or video -> sprite, idle and walk animations"),
+            (self.directions_tab, "Directions", "3D model, photos or video -> 4/8/16 facing "
+                                                "directions, animated for rigged models"),
+            (self.teams_tab, "Teams", "Player / enemy / ally colours + Godot palette shader"),
+            (self.portrait_tab, "Portrait", "Head-and-shoulders dialogue portrait"),
+            (self.map_tab, "Map tiles", "Terrain tiles with transitions + Godot TileSet"),
+            (self.demo_tab, "Godot demo", "A Godot project using it all"),
+            (self.studio, "Prompt to Model", "Prompt -> 3D model on your GPU -> direction sprites"),
+        ):
+            self.tabs.addTab(widget, title)
+            self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
+        self.setCentralWidget(self.tabs)
 
     def _build_menu(self):
         menu = self.menuBar().addMenu("&File")
@@ -204,7 +219,7 @@ class MainWindow(QMainWindow):
             (None, None, None),
             ("Open &video…", "Ctrl+Shift+O", self.open_video),
             ("&Generate from prompt (local GPU)…", "Ctrl+G", self.generate_dialog),
-            ("Prompt to 3D &model + directions (local GPU)…", "Ctrl+M", self.open_model_studio),
+            ("Prompt to 3D &model + directions (local GPU)", "Ctrl+M", self.open_model_studio),
             ("Export video a&nimation…", "Ctrl+Shift+A", self.export_video_animation),
             (None, None, None),
             ("&Quit", QKeySequence.Quit, self.close),
@@ -479,9 +494,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Generated “{prompt}” (seed {seed}). Tweak anything on the left.")
 
     def open_model_studio(self):
-        from .model_studio import ModelStudio
-        self._studio = ModelStudio()
-        self._studio.show()
+        self.tabs.setCurrentWidget(self.studio)
 
     def set_source(self, rgba, path: Path):
         self.source = rgba
@@ -551,15 +564,15 @@ class MainWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv if argv is None else argv)
+    app.setApplicationName("Pixel Pipeline")
+    if ICON.exists():
+        app.setWindowIcon(QIcon(str(ICON)))
     args = app.arguments()[1:]
-    if "--model" in args:  # straight into Prompt to Model
-        from .model_studio import ModelStudio
-        win = ModelStudio()
-        win.show()
-        return app.exec()
     win = MainWindow()
     win.show()
-    if args:
+    if "--model" in args:  # straight into Prompt to Model
+        win.open_model_studio()
+    elif args:
         win.open_path(Path(args[0]))
     return app.exec()
 

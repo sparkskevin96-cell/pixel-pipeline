@@ -1,5 +1,6 @@
 import os
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -103,3 +104,75 @@ def test_model_studio_plays_a_rigged_model(app, tmp_path):
     assert win._anim_i == 4 and "wave" in win.sprite_view.toolTip()
     names = {p.name for p in win.save_all(str(tmp_path / "out" / "robot.glb"))}
     assert {"robot_dirs.tres", "robot_dirs_facing.gd", "robot_dirs_anim.gif"} <= names
+
+
+def test_main_window_has_every_tool(app):
+    win = MainWindow()
+    titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+    assert titles == ["Sprite", "Directions", "Teams", "Portrait", "Map tiles", "Godot demo",
+                      "Prompt to Model"]
+    win.open_model_studio()
+    assert win.tabs.currentWidget() is win.studio
+
+
+def test_directions_tab_animated_and_still(app, tmp_path):
+    from test_anim3d import write_robot
+    from pixel_pipeline.ui.tools import DirectionsTab
+    tab = DirectionsTab()
+    tab.sync = True
+    tab.add_sources([write_robot(tmp_path / "robot.glb")])
+    assert tab.animate.isChecked() and "wave" in tab.animate.text()
+    tab.directions.setCurrentText("4")
+    tab.frames.setValue(2)
+    tab.animations.setText("wave,fall")
+    tab.options.width_.setValue(24)
+    tab.options.height_.setValue(24)
+    tab.make()
+    assert tab.anim is not None and [a.name for a in tab.anim.actions] == ["wave", "fall"]
+    assert tab.view.pixmap() is not None and not tab.view.pixmap().isNull()
+    names = {p.name for p in tab.save(tmp_path / "out" / "robot_dirs.png")}
+    assert {"robot_dirs.png", "robot_dirs.tres", "robot_dirs_facing.gd", "robot_dirs_anim.gif"} <= names
+    tab.animate.setChecked(False)
+    tab.make()
+    assert tab.anim is None and len(tab.sprites) == 4
+    assert "robot_dirs_spin.gif" in {p.name for p in tab.save(tmp_path / "still" / "robot_dirs.png")}
+
+
+def test_teams_portrait_map_and_demo_tabs(app, tmp_path):
+    from PIL import Image
+    from test_teams import unit
+    from pixel_pipeline.ui.tools import DemoTab, MapTab, PortraitTab, TeamsTab
+    Image.fromarray(unit()).save(tmp_path / "unit.png")
+    teams = TeamsTab()
+    teams.open_path(tmp_path / "unit.png")
+    assert teams.save_btn.isEnabled()
+    assert (tmp_path / "t" / "unit_enemy.png") in teams.save(tmp_path / "t")
+
+    fig = np.zeros((240, 100, 4), np.uint8)
+    fig[10:60, 30:70] = (240, 190, 150, 255)
+    fig[60:240, 15:85] = (200, 40, 40, 255)
+    Image.fromarray(fig).save(tmp_path / "hero.png")
+    portrait = PortraitTab()
+    portrait.sync = True
+    portrait.width_.setValue(48)
+    portrait.height_.setValue(48)
+    portrait.open_path(tmp_path / "hero.png")
+    assert portrait.sprite.size == (48, 48)
+    assert len(portrait.save(tmp_path / "p.png")) == 2
+
+    tiles = MapTab()
+    tiles.sync = True
+    tiles.tile.setValue(16)
+    tiles.make()
+    assert tiles.ts.names == ["grass", "water", "sand", "road"]
+    assert (tmp_path / "terrain.tres") in tiles.save(tmp_path / "terrain.png")
+
+    demo = DemoTab()
+    demo.sync = True
+    demo.directions.setCurrentText("4")
+    demo.frames.setValue(2)
+    demo.options.width_.setValue(24)
+    demo.options.height_.setValue(24)
+    demo.make(tmp_path / "Demo")
+    assert (tmp_path / "Demo" / "project.godot").exists() and demo.open_btn.isEnabled()
+    assert demo.view.rgba.shape == (360, 640, 4)

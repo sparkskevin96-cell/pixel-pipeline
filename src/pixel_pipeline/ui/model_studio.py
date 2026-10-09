@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 from ..settings import settings_for
 from ..turnaround import (direction_names, render_model, turnaround_sprites, union_crop,
                           write_preview, write_turnaround)
-from .app import checkerboard, to_pixmap
+from .common import checkerboard, to_pixmap
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
 MODEL_FILTER = "3D models (*.glb *.gltf *.obj *.ply *.stl)"
