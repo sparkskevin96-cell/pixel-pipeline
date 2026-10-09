@@ -134,8 +134,11 @@ wants terse answers and fixes over polish.
 Kevin couldn't log in to GitHub on 2026-10-07, so (with his OK) the Android APK was built
 by pushing local branch `pawgress-build` (main + a workflow tweak) to
 `sparkskevin96-cell/pawgress` branch `ccr-15172514-6ugcr0`, which published the
-pre-release `pixel-pipeline-android-temp` there. Once `sparkskevin96-cell/pixel-pipeline`
-exists: push `main` there, then delete that Pawgress branch, release and tag.
+pre-release `pixel-pipeline-android-temp` there. Since 2026-10-09 the branch also has
+`.github/workflows/windows-temp.yml`, which builds the Windows desktop app and publishes the
+pre-release `pixel-pipeline-windows-temp` (PixelPipeline-windows.zip). Once
+`sparkskevin96-cell/pixel-pipeline` exists: push `main` there, then delete that Pawgress
+branch, both releases and both tags.
 
 ## Next up
 
