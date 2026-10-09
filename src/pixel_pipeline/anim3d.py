@@ -380,7 +380,8 @@ class Rig:
             base, k = clip.name, 2
             while clip.name in taken:
                 clip.name, k = f"{base}_{k}", k + 1
-            clip.loop = self._loops(clip)
+            loop = a.get("extras", {}).get("loop") if isinstance(a.get("extras"), dict) else None
+            clip.loop = bool(loop) if isinstance(loop, bool) else self._loops(clip)
             self.clips.append(clip)
             added.append(clip)
         return added

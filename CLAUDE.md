@@ -58,6 +58,17 @@ wants terse answers and fixes over polish.
   names (mixamo.com, Take 001) take the file stem. `--colours-from` re-colours by shape
   (voxel grid) since Mixamo drops vertex colours; `model --obj` / Save all writes the .obj
   to upload. Verified on Khronos Fox/CesiumMan/RiggedSimple and in Godot 4.7 headless.
+- **Auto-rig** (`autorig.py`, CLI `rig` / `turnaround --auto-rig`, MCP turnaround(auto_rig=),
+  Directions tab checkbox, Prompt to Model "Animate"), 2026-10-09, toward "build PixelLab"
+  locally: front silhouette grid (points -> mask, z range per cell) -> Zhang-Suen thinning ->
+  crossing-number ends/junctions (8-neighbour staircases fooled plain degree counts) -> head
+  / feet / hands from ends, pelvis from the crotch row (the skeleton forks too high), shoulders
+  where arm paths leave the spine past the chest half-width; fallbacks = standard proportions
+  (notes say which). Separate silhouette pieces are bridged. Skin = inverse distance^4 to bone
+  segments, top 4. 17 joints, world-aligned rest, animations sampled 25 keys/clip; extras.loop
+  marks one-shots (anim3d honours it). Verified on Khronos CesiumMan / RiggedFigure /
+  BrainStem and box figures; Godot imports 17 bones + 6 animations (it doesn't loop "walk"
+  for 3D use unless set in import settings; sprite exports carry loop flags).
 - **Online AIs** (`online.py`, CLI `ai`, MCP `online_sprites`, desktop Prompt tab), 2026-10-09:
   Kevin wants NEW sprites from prompts and does NOT want his photos sent to any service, so
   the online providers are prompt-only. PixelLab REST v2 (Bearer; create-image-pixen /

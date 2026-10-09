@@ -39,8 +39,9 @@ log = logging.getLogger(__name__)
 SHAPE_CHECKPOINTS = ("hunyuan_3d_v2.1.safetensors", "hunyuan3d-dit-v2-0.safetensors",
                      "hunyuan3d-dit-v2-mini.safetensors", "hunyuan3d-dit-v2-mv.safetensors")
 MODEL_PROMPTS = {
-    "person": "{prompt}, single character, full body from head to feet, standing, facing the "
-              "viewer, front view, arms slightly away from the body, centered, plain white "
+    "person": "{prompt}, single character, full body from head to feet, standing in an A-pose, "
+              "facing the viewer, front view, arms held down and out away from the body, legs "
+              "slightly apart, centered, plain white "
               "background, soft even lighting, no shadows, clean shapes, game character concept art",
     "animal": "{prompt}, single animal, whole body in frame, three-quarter front view, standing, "
               "centered, plain white background, soft even lighting, no shadows, clean shapes, "

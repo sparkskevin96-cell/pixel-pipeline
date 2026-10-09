@@ -81,7 +81,7 @@ def test_model_studio_makes_saves_and_updates(app, tmp_path, monkeypatch):
     win.directions.setCurrentText("4")
     win.update_sprites()
     assert len(win.sprites) == 4
-    assert not win.animate.isEnabled()                      # a still model: nothing to play
+    assert win.animate.isEnabled() and "skeleton" in win.animate.text()   # can be auto-rigged
 
 
 def test_model_studio_plays_a_rigged_model(app, tmp_path):

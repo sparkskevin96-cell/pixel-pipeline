@@ -260,6 +260,9 @@ def _add_turnaround(sub):
     p.add_argument("--frames", type=int, default=8, help="--animate: frames per animation (default 8)")
     p.add_argument("--no-in-place", dest="in_place", action="store_false",
                    help="--animate: keep root motion (default: walks stay on the spot)")
+    p.add_argument("--auto-rig", action="store_true",
+                   help="3D humanoid without animations: give it a skeleton and idle/walk/run/"
+                        "attack/hurt/death first (implies --animate)")
     p.add_argument("--colours-from", type=Path, metavar="MODEL",
                    help="--animate: take colours from this model (the original, when rigging "
                         "on Mixamo dropped them)")
@@ -278,6 +281,15 @@ def _cmd_turnaround(a) -> int:
     for path in a.source:
         if not path.exists():
             raise SystemExit(f"error: {path} not found")
+    if a.auto_rig:
+        from .autorig import ACTIONS, auto_rig
+        wanted = [x for x in (a.animations or ACTIONS) if x in ACTIONS] or list(ACTIONS)
+        a.out.parent.mkdir(parents=True, exist_ok=True)
+        rigged = auto_rig(a.source[0], a.out.with_name(a.out.stem + ".rigged.glb"), actions=wanted,
+                          up=a.up, yaw=a.yaw)
+        notes = "".join(f"\n  note: {n}" for n in rigged.skeleton.notes)
+        print(f"Rigged {a.source[0].name} -> {rigged.path}{notes}")
+        a.source, a.animate, a.yaw = [rigged.path], True, 0.0
     if a.animate or a.animations:
         return _animated_turnaround(a)
     sprites, what = turnaround_from(a.source, _settings(a), a.directions, elevation=a.elevation,
@@ -307,6 +319,44 @@ def _animated_turnaround(a) -> int:
     w, h = first.size
     _print_written(f"{what} -> {len(anim.actions)} animations x {len(anim.directions)} directions x "
                    f"{anim.frames} frames, {w}x{h}, {len(first.palette)} colours", written)
+    return 0
+
+
+# ---- rig -------------------------------------------------------------------------------------
+
+def _add_rig(sub):
+    from .autorig import ACTIONS
+    p = sub.add_parser(
+        "rig", help="humanoid 3D model -> skeleton + idle/walk/run/attack/hurt/death animations",
+        description="Finds the joints from the model's shape (standing, facing +z, A- or T-pose "
+                    "works best), skins it and adds animations, as a rigged .glb that "
+                    "turnaround --animate, Godot and Blender can use. No Mixamo needed.")
+    p.add_argument("model", type=Path)
+    p.add_argument("-o", "--out", type=Path, help="rigged .glb (default <model>.rigged.glb)")
+    p.add_argument("--animations", type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+                   default=list(ACTIONS), help=f"comma-separated, from: {','.join(ACTIONS)}")
+    p.add_argument("--weapon-hand", choices=("right", "left"), default="right",
+                   help="which hand swings in the attack")
+    p.add_argument("--up", choices=("y", "z"), default="y")
+    p.add_argument("--yaw", type=float, default=0.0, help="degrees to turn it so it faces +z")
+    p.add_argument("--preview", type=Path, help="also save the found skeleton as a .png")
+    p.set_defaults(func=_cmd_rig)
+
+
+def _cmd_rig(a) -> int:
+    from PIL import Image
+
+    from .autorig import auto_rig
+    if not a.model.exists():
+        raise SystemExit(f"error: {a.model} not found")
+    res = auto_rig(a.model, a.out, actions=a.animations, weapon_hand=a.weapon_hand, up=a.up, yaw=a.yaw)
+    written = [res.path]
+    if a.preview:
+        Image.fromarray(res.preview).save(a.preview)
+        written.append(a.preview)
+    for note in res.skeleton.notes:
+        print(f"  note: {note}")
+    _print_written(f"{a.model.name}: skeleton + {', '.join(res.clips)}", written)
     return 0
 
 
@@ -767,6 +817,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_turnaround(sub)
     _add_demo(sub)
     _add_ai(sub)
+    _add_rig(sub)
     _add_model(sub)
     _add_teams(sub)
     _add_portrait(sub)

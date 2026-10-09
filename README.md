@@ -191,6 +191,24 @@ retrodiffusion=...`, or the `PIXELLAB_API_KEY` / `RETRO_DIFFUSION_API_KEY` varia
 `pixel-pipeline ai --balance` shows what's left. "Open in the Sprite tab" sends a result
 on, to retro looks, team colours and so on.
 
+### Characters that walk, run and attack (no Mixamo)
+
+Any standing humanoid model gets a skeleton and six animations: **idle, walk, run, attack,
+hurt, death**. The joints are found from the model's own shape (its front silhouette), the
+mesh is skinned to them, and the animations are made to fit. Arms come down from a T/A
+pose and the feet stay on the ground.
+
+- App: **Prompt to Model** tab → make a character → tick **Animate** → **Update sprites**.
+  Or **Directions** tab → add a model → tick **Add a skeleton + animations**. "Show the
+  skeleton" shows the joints it found.
+- Command line: `pixel-pipeline turnaround knight.glb --auto-rig --directions 8 --godot`, or
+  `pixel-pipeline rig knight.glb --preview rig.png` for just the rigged `.glb` (Godot and
+  Blender open it: 17 bones, 6 animations).
+
+Works best on a character standing in an A- or T-pose facing the front, arms clear of the
+body (Prompt to Model now asks for that pose). Long robes get standard leg proportions; the
+attack swings the right hand (`--weapon-hand left`).
+
 ### Animated directions (walk, attack ... in 16 directions)
 
 `turnaround --animate` plays a rigged, animated model (.glb/.gltf with a skeleton) and

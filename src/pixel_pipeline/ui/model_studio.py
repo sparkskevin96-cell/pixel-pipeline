@@ -3,7 +3,8 @@
 Prompt -> front picture -> 3D shape (Hunyuan3D in ComfyUI on this PC) -> painted from the
 picture -> spinning preview + 4/8/16-direction sprites -> Save all (.glb, picture, sprite
 sheet, .json, .aseprite, Godot SpriteFrames + facing script, spinning GIF).
-A rigged, animated model (Open a 3D model…) can also be played: tick Animate.
+Tick Animate to play the model's animations; a model without any (a Prompt to Model
+character, say) first gets a skeleton and idle/walk/run/attack/hurt/death (autorig.py).
 
 Run with:  pixel-pipeline-model   (or File -> Prompt to 3D model in pixel-pipeline-ui)
 """
@@ -82,6 +83,7 @@ class ModelStudio(QMainWindow):
         self.sprites = None
         self.anim = None                  # AnimatedSet when Animate is ticked
         self.anim_names: list[str] = []
+        self.rigged: Path | None = None   # skeleton + animations added by Animate
         self._anim_i = 0
         self.spin: list[np.ndarray] = []
         self._spin_i = 0
@@ -145,7 +147,9 @@ class ModelStudio(QMainWindow):
         self.elevation.setSuffix("°")
         self.animate = QCheckBox("Animate")
         self.animate.setEnabled(False)
-        self.animate.setToolTip("Open a rigged, animated .glb/.gltf (e.g. from Mixamo) to play "
+        self.animate.setToolTip("Play the model's animations. A model without any gets a skeleton "
+                                "and idle, walk, run, attack, hurt, death (humanoids). Or open a "
+                                "rigged .glb (Mixamo) to play its own. "
                                 "its animations from every direction")
         self.frames = QSpinBox()
         self.frames.setRange(1, 32)
@@ -239,13 +243,19 @@ class ModelStudio(QMainWindow):
         spin = union_crop(views)
         sprites = turnaround_sprites(union_crop(views, s.margin, s.alpha_threshold), s)
         names = animation_names(model)
-        anim = None
-        if names and self.animate.isChecked():
+        anim, rigged = None, None
+        if self.animate.isChecked():
             from ..anim3d import animated_turnaround
+            target = model
+            if not names:
+                from ..autorig import auto_rig
+                say("Adding a skeleton and animations…")
+                rig = auto_rig(model, self.work / (Path(model).stem + ".rigged.glb"))
+                target, rigged, names = rig.path, rig.path, rig.clips
             say(f"Playing {len(names)} animations from every side…")
-            anim, _ = animated_turnaround([model], s, n, self.frames.value(),
+            anim, _ = animated_turnaround([target], s, n, self.frames.value(),
                                           elevation=self.elevation.value())
-        return spin, sprites, anim, names
+        return spin, sprites, anim, names, rigged
 
     def make(self):
         prompt = self.prompt.text().strip()
@@ -282,12 +292,11 @@ class ModelStudio(QMainWindow):
 
     # ---- results --------------------------------------------------------------
     def _show(self, payload):
-        self.result, self.spin, self.sprites, self.anim, self.anim_names = payload
+        self.result, self.spin, self.sprites, self.anim, self.anim_names, self.rigged = payload
         res = self.result
-        self.animate.setEnabled(bool(self.anim_names))
-        if self.anim_names:
-            self.animate.setText(f"Animate ({len(self.anim_names)})")
-            self.animate.setToolTip("Animations: " + ", ".join(self.anim_names))
+        self.animate.setEnabled(True)
+        self.animate.setText(f"Animate ({len(self.anim_names)})" if self.anim_names
+                             else "Animate (adds a skeleton)")
         if res.picture and Path(res.picture).suffix.lower() == ".png":
             from ..pipeline import load_image
             self.picture_view.setPixmap(to_pixmap(checkerboard(_fit(load_image(res.picture)))))
@@ -297,8 +306,9 @@ class ModelStudio(QMainWindow):
         self._show_sprites()
         self._busy(False)
         seed = f" Seed {res.seed}." if res.seed is not None else ""
-        if self.anim_names and not self.anim:
-            seed += " It has animations: tick Animate and press Update sprites."
+        if not self.anim:
+            seed += (" It has animations: tick Animate and press Update sprites." if self.anim_names
+                     else " Tick Animate and press Update sprites to make it walk, run, attack…")
         self.statusBar().showMessage(f"Done: {len(self.sprites)} directions.{seed} "
                                      "Change the sprite settings and press Update sprites, "
                                      "or Save all.")
@@ -363,6 +373,10 @@ class ModelStudio(QMainWindow):
                 shutil.copyfile(self.result.picture, pic)
                 written.append(pic)
             sheet = out.with_name(out.stem + "_dirs.png")
+            if self.rigged is not None:
+                rigged = out.with_suffix(".rigged.glb")
+                shutil.copyfile(self.rigged, rigged)
+                written.append(rigged)
             if self.anim is not None:
                 from ..anim3d import write_animated, write_animated_preview
                 written += write_animated(self.anim, sheet, aseprite=True, godot=True)

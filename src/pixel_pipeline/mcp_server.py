@@ -627,6 +627,10 @@ def turnaround(
                     "(directions/2 + 1 views); mirror the other side.")] = False,
     start: Annotated[float | None, Field(ge=0, description="Video: start time, seconds.")] = None,
     end: Annotated[float | None, Field(ge=0, description="Video: end time, seconds.")] = None,
+    auto_rig: Annotated[bool, Field(
+        description="3D humanoid without animations (e.g. from prompt_to_model): give it a "
+                    "skeleton and idle/walk/run/attack/hurt/death first, then animate. `animations` "
+                    "picks which.")] = False,
     animate: Annotated[bool, Field(
         description="3D model: play its animations (a rigged, animated .glb/.gltf, e.g. from "
                     "Mixamo). Extra .glb files in `source` add their animations to the first "
@@ -657,6 +661,14 @@ def turnaround(
     out = _output_png(out_png)
     explicit = {"width": width, "height": height, "colors": colors, "system": system, "look": look}
     settings = _build_settings(subject, explicit, extra_settings)
+    if auto_rig:
+        from .autorig import ACTIONS
+        from .autorig import auto_rig as rig_model
+        wanted = [a for a in (animations or ACTIONS) if a in ACTIONS] or list(ACTIONS)
+        with _work_lock:
+            rigged = rig_model(srcs[0], out.with_name(out.stem + ".rigged.glb"), actions=wanted, up=up,
+                               yaw=yaw)
+        srcs, animate, animations, yaw = [rigged.path], True, None, 0.0
     if animate or animations:
         from .anim3d import animated_turnaround, write_animated
         with _work_lock:

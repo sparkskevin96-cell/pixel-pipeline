@@ -139,6 +139,12 @@ class DirectionsTab(ToolTab):
         self.light.setValue(0.35)
         self.animate = QCheckBox("Play its animations")
         self.animate.setEnabled(False)
+        self.autorig = QCheckBox("Add a skeleton + animations (humanoid)")
+        self.autorig.setEnabled(False)
+        self.autorig.setToolTip("For a standing character without animations (e.g. from Prompt to "
+                                "Model): finds the joints and adds idle, walk, run, attack, hurt "
+                                "and death. Best in an A- or T-pose.")
+        self.rig = None
         self.frames = spin(1, 32, 8)
         self.animations = QLineEdit()
         self.animations.setPlaceholderText("all (or e.g. idle,walk)")
@@ -158,6 +164,7 @@ class DirectionsTab(ToolTab):
         tl.addRow("Turn", self.yaw)
         tl.addRow("Shading", self.light)
         tl.addRow(self.animate)
+        tl.addRow(self.autorig)
         tl.addRow("Frames each", self.frames)
         tl.addRow("Animations", self.animations)
         tl.addRow(self.colours_btn)
@@ -170,11 +177,14 @@ class DirectionsTab(ToolTab):
         self.player = _Player(self.view)
         self.make_btn = QPushButton("Make sprites")
         self.make_btn.clicked.connect(self.make)
+        self.skel_btn = QPushButton("Show the skeleton")
+        self.skel_btn.setEnabled(False)
+        self.skel_btn.clicked.connect(self.show_skeleton)
         self.save_btn = QPushButton("Save sheet + Aseprite + Godot…")
         self.save_btn.clicked.connect(self.save_dialog)
         self.save_btn.setEnabled(False)
         self.busy_widgets = [self.make_btn, self.save_btn]
-        _layout(self, [src, look, three, photos], self.view, [self.make_btn, self.save_btn])
+        _layout(self, [src, look, three, photos], self.view, [self.make_btn, self.skel_btn, self.save_btn])
 
     # ---- sources
     def add_dialog(self):
@@ -212,6 +222,11 @@ class DirectionsTab(ToolTab):
                 pass
         self.animate.setEnabled(bool(self.clip_names))
         self.animate.setChecked(bool(self.clip_names))
+        one_model = len(self.sources) == 1 and self.sources[0].suffix.lower() in (
+            ".glb", ".gltf", ".obj", ".ply", ".stl")
+        self.autorig.setEnabled(one_model and not self.clip_names)
+        if not self.autorig.isEnabled():
+            self.autorig.setChecked(False)
         self.animate.setText(f"Play its animations ({', '.join(self.clip_names)})"
                              if self.clip_names else "Play its animations")
 
@@ -231,12 +246,26 @@ class DirectionsTab(ToolTab):
         s = self.options.settings()
         sources = list(self.sources)
         animate = self.animate.isChecked() and self.animate.isEnabled()
+        autorig = self.autorig.isChecked() and self.autorig.isEnabled()
         names = [x.strip() for x in self.animations.text().split(",") if x.strip()] or None
         el, yaw, light = self.elevation.value(), self.yaw.value(), self.light.value()
         frames, colours_from = self.frames.value(), self.colours_from
         reverse, mirror = self.reverse.isChecked(), self.mirror.isChecked()
 
         def job(say):
+            if autorig:
+                import tempfile
+
+                from ..anim3d import animated_turnaround
+                from ..autorig import ACTIONS, auto_rig
+                say("Finding the joints and adding animations…")
+                wanted = [x for x in (names or ACTIONS) if x in ACTIONS] or list(ACTIONS)
+                tmp = Path(tempfile.mkdtemp(prefix="pixel-pipeline-rig-"))
+                rig = auto_rig(sources[0], tmp / (sources[0].stem + ".rigged.glb"), actions=wanted, yaw=yaw)
+                say(f"Playing {len(wanted)} animations from {n} directions…")
+                made = animated_turnaround([rig.path], s, n, frames, None, elevation=el, light=light,
+                                           colours_from=colours_from)
+                return (*made, rig)
             if animate:
                 from ..anim3d import animated_turnaround
                 say(f"Playing the animations from {n} directions…")
@@ -249,7 +278,9 @@ class DirectionsTab(ToolTab):
         self.run(job, self._made, "Working…")
 
     def _made(self, result):
-        made, what = result
+        made, what = result[:2]
+        self.rig = result[2] if len(result) > 2 else None
+        self.skel_btn.setEnabled(self.rig is not None)
         self.player.stop()
         if isinstance(made, list):
             self.sprites, self.anim = made, None
@@ -267,6 +298,14 @@ class DirectionsTab(ToolTab):
         self.save_btn.setEnabled(True)
         self.say(f"{what} -> {count}, {w}x{h}, {len(first.palette)} colours. Save when it looks right.")
 
+    def show_skeleton(self):
+        if self.rig is not None:
+            self.player.stop()
+            self.view.show_rgba(self.rig.preview)
+            notes = "; ".join(self.rig.skeleton.notes)
+            self.say("The joints found (green = left side, red = right)." + (f" Note: {notes}" if notes else "")
+                     + " Make sprites again to play the animations.")
+
     def save_dialog(self):
         stem = self.sources[0].stem if self.sources else "sprite"
         default = str((self.sources[0].parent if self.sources else Path.cwd()) / f"{stem}_dirs.png")
@@ -278,8 +317,14 @@ class DirectionsTab(ToolTab):
         sheet.parent.mkdir(parents=True, exist_ok=True)
         try:
             if self.anim is not None:
+                import shutil
+
                 from ..anim3d import write_animated, write_animated_preview
                 written = write_animated(self.anim, sheet, aseprite=True, godot=True)
+                if self.rig is not None:     # the rigged model too, for Godot 3D / Blender
+                    glb = sheet.with_name(sheet.stem + ".rigged.glb")
+                    shutil.copyfile(self.rig.path, glb)
+                    written.append(glb)
                 written.append(write_animated_preview(self.anim, sheet.with_name(sheet.stem + "_anim.gif")))
             else:
                 from ..turnaround import write_preview, write_turnaround
