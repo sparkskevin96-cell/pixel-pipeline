@@ -66,6 +66,7 @@ One window, a tab per tool:
 | Tab | What it does |
 |---|---|
 | **Sprite** | Photo or picture → sprite, live. Video → walk cycle. Idle loops. |
+| **Prompt** | Words → sprite from PixelLab, Retro Diffusion and your GPU, side by side. |
 | **Directions** | 3D model, photos or a video → 4/8/16 facing directions. A rigged `.glb` plays its animations from every side. Save writes sheet, `.json`, `.aseprite`, Godot SpriteFrames + facing script, GIF. |
 | **Teams** | Sprite or sheet → player / enemy / ally / other / spent colours + the Godot palette shader. |
 | **Portrait** | Photo, picture or prompt (GPU) → head-and-shoulders dialogue portrait. |
@@ -169,6 +170,26 @@ SSE, S (facing the viewer) ... N (away). With `--godot` you get SpriteFrames wit
 animation per direction and `<name>_facing.gd`: attach it to an AnimatedSprite2D and call
 `face(velocity)`. If S doesn't face the viewer, turn the model with `--yaw 90` (or 180, -90);
 a model lying on its back needs `--up z`.
+
+### Prompt → sprite: PixelLab vs Retro Diffusion vs your GPU
+
+The **Prompt** tab (or `pixel-pipeline ai "a knight with a red cape" -o knight.png`) makes the
+same words with each service, side by side: what it drew, and the sprite on your settings.
+Only the text is sent; none of your pictures. The services draw real pixel art at your
+sprite's size, so their pixels are kept and only snapped to your palette (Retro Diffusion's
+fast/plus styles draw at 64 px or more, so small sprites are made at 2x and shrunk back).
+
+- **PixelLab** (pixellab.ai): `pixen` fast, `pixflux` / `bitforge` classic, `pro` best;
+  camera (side / low top-down / high top-down) and facing.
+- **Retro Diffusion** (retrodiffusion.ai): `rd_fast__default` $0.03, `rd_plus__default`
+  $0.06, `rd_pro__default` $0.18 per image, plus retro / isometric / fantasy styles.
+- **Your GPU**: ComfyUI + SDXL + Pixel Art XL (free, see docs/LOCAL_AI.md).
+
+Keys: Prompt tab → Keys… (saved in `%USERPROFILE%\.pixel-pipeline\keys.json`, only sent to
+their own service), or `pixel-pipeline ai --save-key pixellab=... --save-key
+retrodiffusion=...`, or the `PIXELLAB_API_KEY` / `RETRO_DIFFUSION_API_KEY` variables.
+`pixel-pipeline ai --balance` shows what's left. "Open in the Sprite tab" sends a result
+on, to retro looks, team colours and so on.
 
 ### Animated directions (walk, attack ... in 16 directions)
 
@@ -296,7 +317,8 @@ Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`), then restart it:
 Tools: `convert_photos`, `generate_sprite` (local GPU), `draw_sprite` (Claude draws it
 pixel by pixel), `video_to_animation`, `idle_animation`, `parallax_layers`,
 `make_sprite_sheet`, `make_tileset`, `turnaround` (also animated), `prompt_to_model` (local
-GPU), `team_colours`, `portrait`, `map_tiles`, `godot_demo`, `preview_image`, `list_palettes`.
+GPU), `online_sprites` (PixelLab / Retro Diffusion / GPU side by side), `team_colours`,
+`portrait`, `map_tiles`, `godot_demo`, `preview_image`, `list_palettes`.
 
 **Claude + your PC:** Claude can sketch a sprite with `draw_sprite`, pass it to
 `generate_sprite` as `init_image` so your GPU renders the detail, and then check the

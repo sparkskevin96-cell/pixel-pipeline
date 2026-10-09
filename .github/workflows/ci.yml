@@ -85,6 +85,8 @@ jobs:
           python -c "import trimesh; trimesh.creation.box(extents=[0.5, 1, 0.3]).export('box.glb')"
           & "$app/pixel-pipeline.exe" turnaround box.glb -o smoke-dirs.png --directions 4 -W 24 -H 24 --godot; Check "turnaround"
           & "$app/pixel-pipeline.exe" demo -o smoke-demo --directions 4 --frames 2 -W 24 -H 24; Check "demo"
+          # Online providers load (no keys here, so it only reports that).
+          & "$app/pixel-pipeline.exe" ai --balance --providers pixellab,retrodiffusion; Check "ai --balance"
 
           # Desktop app: opens the main window, quits after 3 s (see packaging/gui_main.py).
           $env:PIXEL_PIPELINE_SMOKE_TEST = "3"

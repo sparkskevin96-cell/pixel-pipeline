@@ -310,6 +310,77 @@ def _animated_turnaround(a) -> int:
     return 0
 
 
+# ---- ai (online providers) -----------------------------------------------------------------
+
+def _add_ai(sub):
+    from .online import PIXELLAB_DIRECTIONS, PIXELLAB_MODELS, PIXELLAB_VIEWS, PROVIDERS
+    p = sub.add_parser(
+        "ai", help="prompt -> sprite from PixelLab, Retro Diffusion and your GPU, side by side",
+        description="Makes the same prompt with each provider and writes <name>_<provider>.png (on "
+                    "your settings' palette), the raw <name>_<provider>.raw.png and "
+                    "<name>_compare.png. Only the prompt is sent. Keys: PIXELLAB_API_KEY / "
+                    "RETRO_DIFFUSION_API_KEY, or --save-key, or the desktop app's Keys button.")
+    p.add_argument("prompt", nargs="?", help="what to make, e.g. 'a knight with a red cape'")
+    p.add_argument("-o", "--out", type=Path, help="base .png name")
+    p.add_argument("--providers", default="pixellab,retrodiffusion,gpu",
+                   help=f"comma-separated: {', '.join(PROVIDERS)}")
+    p.add_argument("--pixellab-model", choices=list(PIXELLAB_MODELS), default="pixen")
+    p.add_argument("--rd-style", default="rd_fast__default",
+                   help="Retro Diffusion style: rd_fast__default ($0.03), rd_plus__default ($0.06), "
+                        "rd_pro__default ($0.18), ...")
+    p.add_argument("--view", choices=PIXELLAB_VIEWS, help="PixelLab camera")
+    p.add_argument("--direction", choices=PIXELLAB_DIRECTIONS, help="PixelLab: which way it faces")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--balance", action="store_true", help="show what's left on each account and stop")
+    p.add_argument("--save-key", action="append", default=[], metavar="PROVIDER=KEY",
+                   help="remember a key for this user (pixellab=..., retrodiffusion=...)")
+    p.add_argument("--comfyui", help="ComfyUI address for the gpu provider")
+    _add_setting_args(p, default_subject="person")
+    p.set_defaults(func=_cmd_ai)
+
+
+def _cmd_ai(a) -> int:
+    from . import online
+    if a.save_key:
+        keys = online.load_keys()
+        for item in a.save_key:
+            prov, _, key = item.partition("=")
+            if prov not in ("pixellab", "retrodiffusion") or not key:
+                raise SystemExit("error: --save-key pixellab=KEY or retrodiffusion=KEY")
+            keys[prov] = key
+        print(f"Keys saved to {online.save_keys(keys)}")
+        if not a.prompt and not a.balance:
+            return 0
+    providers = [x.strip() for x in a.providers.split(",") if x.strip()]
+    if a.balance:
+        for prov in providers:
+            if prov == "gpu":
+                continue
+            check = online.pixellab_balance if prov == "pixellab" else online.retrodiffusion_balance
+            try:
+                print(f"{online.PROVIDERS[prov]['name']}: {check()}")
+            except online.OnlineError as e:
+                print(f"{online.PROVIDERS[prov]['name']}: {e}")
+        return 0
+    if not a.prompt or not a.out:
+        raise SystemExit("error: give a prompt and -o")
+    client = None
+    if "gpu" in providers and a.comfyui:
+        from .generate import ComfyClient
+        client = ComfyClient(a.comfyui)
+    cands = online.prompt_candidates(a.prompt, _settings(a), providers, seed=a.seed,
+                                     pixellab_model=a.pixellab_model, rd_style=a.rd_style,
+                                     view=a.view, direction=a.direction, comfy_client=client,
+                                     progress=print)
+    for c in cands:
+        name = online.PROVIDERS[c.provider]["name"]
+        print(f"  {name}: " + (f"failed: {c.error}" if c.error
+                                else f"{c.seconds:.0f} s {c.cost}".rstrip()))
+    written = online.write_candidates(cands, a.out)
+    _print_written(f"“{a.prompt}”", written)
+    return 0 if any(c.sprite is not None for c in cands) else 1
+
+
 # ---- demo ----------------------------------------------------------------------------------
 
 def _add_demo(sub):
@@ -695,6 +766,7 @@ def main(argv: list[str] | None = None) -> int:
     _add_video(sub)
     _add_turnaround(sub)
     _add_demo(sub)
+    _add_ai(sub)
     _add_model(sub)
     _add_teams(sub)
     _add_portrait(sub)

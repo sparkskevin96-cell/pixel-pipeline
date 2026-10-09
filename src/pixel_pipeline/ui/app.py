@@ -184,8 +184,9 @@ class MainWindow(QMainWindow):
         split.setSizes([320, 420, 500])
 
         from .model_studio import ModelStudio
-        from .tools import DemoTab, DirectionsTab, MapTab, PortraitTab, TeamsTab
+        from .tools import DemoTab, DirectionsTab, MapTab, PortraitTab, PromptTab, TeamsTab
         say = self.statusBar().showMessage
+        self.prompt_tab = PromptTab(say, send_to_sprite=self.use_candidate)
         self.directions_tab = DirectionsTab(say)
         self.teams_tab = TeamsTab(say, current_sprite=lambda: self.sprite)
         self.portrait_tab = PortraitTab(say)
@@ -197,6 +198,8 @@ class MainWindow(QMainWindow):
         self.tabs.setDocumentMode(True)
         for widget, title, tip in (
             (split, "Sprite", "Photo, picture or video -> sprite, idle and walk animations"),
+            (self.prompt_tab, "Prompt", "Words -> sprite from PixelLab, Retro Diffusion and your "
+                                        "GPU, side by side"),
             (self.directions_tab, "Directions", "3D model, photos or video -> 4/8/16 facing "
                                                 "directions, animated for rigged models"),
             (self.teams_tab, "Teams", "Player / enemy / ally colours + Godot palette shader"),
@@ -495,6 +498,14 @@ class MainWindow(QMainWindow):
 
     def open_model_studio(self):
         self.tabs.setCurrentWidget(self.studio)
+
+    def use_candidate(self, cand):
+        """A Prompt tab result -> Sprite tab source, so every setting there applies."""
+        slug = "-".join("".join(c if c.isalnum() else " " for c in self.prompt_tab.prompt.text().lower())
+                        .split())[:40]
+        self.remove_bg.setChecked(False)          # services already give a transparent background
+        self.set_source(load_image(cand.raw), Path.cwd() / f"{slug or 'sprite'}-{cand.provider}.png")
+        self.tabs.setCurrentIndex(0)
 
     def set_source(self, rgba, path: Path):
         self.source = rgba

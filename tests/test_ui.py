@@ -109,8 +109,8 @@ def test_model_studio_plays_a_rigged_model(app, tmp_path):
 def test_main_window_has_every_tool(app):
     win = MainWindow()
     titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-    assert titles == ["Sprite", "Directions", "Teams", "Portrait", "Map tiles", "Godot demo",
-                      "Prompt to Model"]
+    assert titles == ["Sprite", "Prompt", "Directions", "Teams", "Portrait", "Map tiles",
+                      "Godot demo", "Prompt to Model"]
     win.open_model_studio()
     assert win.tabs.currentWidget() is win.studio
 

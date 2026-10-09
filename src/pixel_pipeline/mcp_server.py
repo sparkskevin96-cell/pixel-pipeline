@@ -849,6 +849,47 @@ def map_tiles(
             + "\n".join(f"  {p}" for p in written) + "\nPreview: the example map.", _png(example)]
 
 
+@tool(title="Prompt to sprite: PixelLab vs Retro Diffusion vs your GPU", open_world=True,
+      extra_doc=_presets_doc())
+def online_sprites(
+    prompt: Annotated[str, Field(description="What to make, plain words (only this text is sent).")],
+    out_png: Annotated[str, Field(description="Base .png name; writes <name>_<provider>.png, "
+                                              ".raw.png and <name>_compare.png.")],
+    providers: Annotated[list[Literal["pixellab", "retrodiffusion", "gpu"]], Field(
+        description="Who makes it. pixellab / retrodiffusion need the user's API keys "
+                    "(env or ~/.pixel-pipeline/keys.json); gpu = ComfyUI on this PC.")] = ["pixellab", "retrodiffusion"],  # noqa: B006
+    subject: Annotated[Subject, Field(description="Preset (colours, outline).")] = "person",
+    width: Annotated[int, Field(ge=8, le=512, description="Sprite width.")] = 48,
+    height: Annotated[int, Field(ge=8, le=512, description="Sprite height.")] = 64,
+    colors: Annotated[int | None, Field(ge=2, le=256, description="Palette size. null = preset.")] = None,
+    pixellab_model: Annotated[Literal["pixen", "pixflux", "bitforge", "pro"], Field(
+        description="pixen = fast, pro = best (queued).")] = "pixen",
+    rd_style: Annotated[str, Field(
+        description="Retro Diffusion style id: rd_fast__default ($0.03), rd_plus__default ($0.06), "
+                    "rd_pro__default ($0.18), ...")] = "rd_fast__default",
+    view: Annotated[Literal["side", "low top-down", "high top-down"] | None, Field(
+        description="PixelLab camera.")] = None,
+    seed: Annotated[int | None, Field(description="Seed (null = random).")] = None,
+) -> ToolOutput:
+    """The same prompt made by each provider, side by side: what the service drew and the
+    sprite snapped to the settings' palette (service pixel art is kept, not resampled). Costs
+    the user's credits for pixellab / retrodiffusion. Look at the comparison and say which one
+    reads best at game size."""
+    from .online import prompt_candidates, write_candidates
+    out = _output_png(out_png)
+    settings = _build_settings(subject, {"width": width, "height": height, "colors": colors}, None)
+    with _work_lock:
+        cands = prompt_candidates(prompt, settings, list(providers), seed=seed,
+                                  pixellab_model=pixellab_model, rd_style=rd_style, view=view)
+    written = write_candidates(cands, out)
+    lines = [f"{c.provider}: " + (f"failed: {c.error}" if c.error else f"{c.seconds:.0f} s {c.cost}".strip())
+             for c in cands]
+    sheet = Image.open(out.with_name(f"{out.stem}_compare.png")).convert("RGB")
+    return ["\n".join(lines) + "\n" + "\n".join(f"  {p}" for p in written)
+            + "\nPreview: per provider, what it drew (left) and the sprite on your settings (right).",
+            _png(sheet)]
+
+
 @tool(title="Godot demo project", open_world=True, extra_doc=_presets_doc())
 def godot_demo(
     out_dir: Annotated[str, Field(description="Folder for the Godot project (new, or an earlier demo).")],

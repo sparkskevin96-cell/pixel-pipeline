@@ -8,10 +8,10 @@ wants terse answers and fixes over polish.
 
 ## Decisions (2026-10-07)
 
-- **Hybrid:** the free algorithmic converter is the core. AI is a later, optional,
-  pluggable "style" step, and its output always goes back through the converter so it
-  lands on the exact grid and palette. Next AI step: test PixelLab (40 free gens)
-  against Retro Diffusion API (~$0.01/img) on Kevin's photos. Local models
+- **Hybrid:** the free algorithmic converter is the core. AI is optional and pluggable,
+  and its output always goes back through the converter (or the palette snap) so it lands on
+  the exact grid and palette. PixelLab vs Retro Diffusion comparison is built (Prompt tab),
+  prompt-only by Kevin's choice; he runs it with his own keys. Local models
   (Qwen-Image-Edit / Flux Kontext via ComfyUI) fit his 12 GB GPU.
 - **Desktop app, Python + Qt (PySide6).** Windows first.
 - **No PyTorch in the core.** PixelOE's algorithm is reimplemented in numpy/OpenCV
@@ -58,6 +58,16 @@ wants terse answers and fixes over polish.
   names (mixamo.com, Take 001) take the file stem. `--colours-from` re-colours by shape
   (voxel grid) since Mixamo drops vertex colours; `model --obj` / Save all writes the .obj
   to upload. Verified on Khronos Fox/CesiumMan/RiggedSimple and in Godot 4.7 headless.
+- **Online AIs** (`online.py`, CLI `ai`, MCP `online_sprites`, desktop Prompt tab), 2026-10-09:
+  Kevin wants NEW sprites from prompts and does NOT want his photos sent to any service, so
+  the online providers are prompt-only. PixelLab REST v2 (Bearer; create-image-pixen /
+  pixflux / bitforge sync, generate-image-v2 queued via /background-jobs/{id}; base64 may be
+  raw RGBA) and Retro Diffusion v2 (X-RD-Token; POST /inferences -> poll
+  /inferences/tasks/{id} -> result.base64_images; styles rd_fast/rd_plus 64-384, rd_pro
+  16-256). Shapes from PixelLab's SDK, a recent v2 CLI (aviorstudio/pixellab-cli) and RD's
+  api-examples repo; the cloud container's network blocks both hosts, so they were only tested
+  against fakes (tests/test_online.py). Results at sprite size are snapped to the palette
+  (`to_sprite`, no resampling). Keys: env or ~/.pixel-pipeline/keys.json.
 - **Desktop app** (`ui/app.py` MainWindow = QTabWidget): Sprite (the original live
   converter), Directions / Teams / Portrait / Map tiles / Godot demo (`ui/tools.py`, each a
   `ToolTab` from `ui/common.py`: slow work on a QThread via `run(job, on_done)`, `sync=True`

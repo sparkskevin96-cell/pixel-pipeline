@@ -1,4 +1,4 @@
-"""The desktop app's tool tabs: Directions, Teams, Portrait, Map tiles and Godot demo.
+"""The desktop app's tool tabs: Prompt, Directions, Teams, Portrait, Map tiles, Godot demo.
 
 Each tab is a form on the left, a big pixel preview on the right, and Make / Save buttons;
 slow work runs off the UI thread (ToolTab.run)."""
@@ -10,9 +10,9 @@ import numpy as np
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QPushButton, QRadioButton,
-    QSplitter, QVBoxLayout, QWidget,
+    QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QPushButton,
+    QRadioButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from ..settings import settings_for
@@ -143,7 +143,8 @@ class DirectionsTab(ToolTab):
         self.animations = QLineEdit()
         self.animations.setPlaceholderText("all (or e.g. idle,walk)")
         self.colours_btn = QPushButton("Colours from…")
-        self.colours_btn.setToolTip("The original coloured model, when rigging it (Mixamo) dropped its colours")
+        self.colours_btn.setToolTip("The original coloured model, when rigging it (Mixamo) "
+                                    "dropped its colours")
         self.colours_btn.clicked.connect(self.pick_colours_from)
         self.reverse = QCheckBox("I walked to the left")
         self.mirror = QCheckBox("Only half way round (mirror the rest)")
@@ -711,3 +712,180 @@ def _new_folder(parent: Path, name: str) -> Path:
         k += 1
         out = parent / f"{name}-{k}"
     return out
+
+
+# --------------------------------------------------------------------------- prompt (online AIs)
+
+class KeysDialog(QDialog):
+    """API keys for the online services, stored for this Windows user only."""
+
+    def __init__(self, parent=None):
+        from ..online import PROVIDERS, load_keys
+        super().__init__(parent)
+        self.setWindowTitle("API keys")
+        keys = load_keys()
+        form = QFormLayout(self)
+        self.edits = {}
+        for prov in ("pixellab", "retrodiffusion"):
+            info = PROVIDERS[prov]
+            edit = QLineEdit(keys.get(prov, ""))
+            edit.setEchoMode(QLineEdit.Password)
+            edit.setPlaceholderText("paste your API key")
+            link = QLabel(f'<a href="{info["signup"]}">get a key</a>')
+            link.setOpenExternalLinks(True)
+            form.addRow(info["name"], _row(edit, link))
+            self.edits[prov] = edit
+        self.status = QLabel("Keys are saved in your user folder (.pixel-pipeline/keys.json) and "
+                             "only sent to their own service.")
+        self.status.setWordWrap(True)
+        form.addRow(self.status)
+        check = QPushButton("Check balances")
+        check.clicked.connect(self.check)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        form.addRow(check)
+        form.addRow(buttons)
+
+    def keys(self) -> dict:
+        return {p: e.text().strip() for p, e in self.edits.items() if e.text().strip()}
+
+    def check(self):
+        from ..online import OnlineError, pixellab_balance, retrodiffusion_balance
+        lines = []
+        for prov, fn in (("pixellab", pixellab_balance), ("retrodiffusion", retrodiffusion_balance)):
+            key = self.keys().get(prov)
+            if not key:
+                continue
+            try:
+                lines.append(f"{prov}: {fn(key)}")
+            except OnlineError as e:
+                lines.append(f"{prov}: {e}")
+        self.status.setText("\n".join(lines) or "Paste a key first.")
+
+    def save(self):
+        from ..online import save_keys
+        save_keys(self.keys())
+        self.accept()
+
+
+class PromptTab(ToolTab):
+    """Type what you want; PixelLab, Retro Diffusion and your GPU each make it, side by side.
+    Only the prompt text is sent, never your pictures."""
+    title = "Prompt"
+
+    def __init__(self, status=None, send_to_sprite=None):
+        from ..online import PIXELLAB_DIRECTIONS, PIXELLAB_MODELS, PIXELLAB_VIEWS, RD_STYLES
+        super().__init__(status)
+        self.send_to_sprite = send_to_sprite
+        self.cands = []
+        self.prompt = QLineEdit()
+        self.prompt.setPlaceholderText("e.g. a knight with a red cape and a big sword")
+        self.prompt.returnPressed.connect(self.make)
+        self.options = SpriteOptions("person", 48, 64, 24)
+        self.seed = spin(0, 2**31 - 1, 0, "random")
+        what = QGroupBox("What")
+        wl = QFormLayout(what)
+        note = QLabel("Each service draws it new from your words. Nothing from your PC is sent "
+                      "except the text.")
+        note.setWordWrap(True)
+        wl.addRow(note)
+        wl.addRow(self.prompt)
+        wl.addRow(self.options)
+        wl.addRow("Seed", self.seed)
+
+        self.use_pl = QCheckBox("PixelLab")
+        self.use_pl.setChecked(True)
+        self.pl_model = QComboBox()
+        self.pl_model.addItems(list(PIXELLAB_MODELS))
+        self.pl_model.setToolTip("pixen = fast, pixflux / bitforge = classic, pro = best (slower)")
+        self.pl_view = QComboBox()
+        self.pl_view.addItems(["any view", *PIXELLAB_VIEWS])
+        self.pl_dir = QComboBox()
+        self.pl_dir.addItems(["any direction", *PIXELLAB_DIRECTIONS])
+        self.use_rd = QCheckBox("Retro Diffusion")
+        self.use_rd.setChecked(True)
+        self.rd_style = QComboBox()
+        self.rd_style.setEditable(True)
+        self.rd_style.addItems(list(RD_STYLES))
+        self.rd_style.setToolTip("rd_fast $0.03, rd_plus $0.06, rd_pro $0.18 per image. "
+                                 "fast/plus draw at 64 px or more (small sprites are made 2x)")
+        self.use_gpu = QCheckBox("Your GPU (ComfyUI, free)")
+        keys_btn = QPushButton("Keys…")
+        keys_btn.clicked.connect(lambda: KeysDialog(self).exec())
+        who = QGroupBox("Who makes it")
+        gl = QFormLayout(who)
+        gl.addRow(self.use_pl, self.pl_model)
+        gl.addRow("   PixelLab camera", self.pl_view)
+        gl.addRow("   PixelLab facing", self.pl_dir)
+        gl.addRow(self.use_rd, self.rd_style)
+        gl.addRow(self.use_gpu)
+        gl.addRow(keys_btn)
+
+        self.view = PixelView("Results show here: what each service drew, and the sprite on "
+                              "your settings")
+        self.make_btn = QPushButton("Make")
+        self.make_btn.clicked.connect(self.make)
+        self.pick = QComboBox()
+        self.send_btn = QPushButton("Open in the Sprite tab")
+        self.send_btn.clicked.connect(self.send)
+        self.save_btn = QPushButton("Save all…")
+        self.save_btn.clicked.connect(self.save_dialog)
+        for b in (self.send_btn, self.save_btn):
+            b.setEnabled(False)
+        self.busy_widgets = [self.make_btn, self.save_btn, self.send_btn]
+        _layout(self, [what, who], self.view,
+                [self.make_btn, _row(self.pick, self.send_btn), self.save_btn])
+
+    def providers(self) -> list[str]:
+        return [p for p, box in (("pixellab", self.use_pl), ("retrodiffusion", self.use_rd),
+                                 ("gpu", self.use_gpu)) if box.isChecked()]
+
+    def make(self):
+        from ..online import prompt_candidates
+        text, providers = self.prompt.text().strip(), self.providers()
+        if not text or not providers:
+            self.say("Type what you want and tick at least one service.")
+            return
+        s = self.options.settings()
+        kw = dict(seed=self.seed.value() or None, pixellab_model=self.pl_model.currentText(),
+                  rd_style=self.rd_style.currentText().strip() or "rd_fast__default",
+                  view=None if self.pl_view.currentIndex() == 0 else self.pl_view.currentText(),
+                  direction=None if self.pl_dir.currentIndex() == 0 else self.pl_dir.currentText())
+        self.run(lambda say: prompt_candidates(text, s, providers, progress=say, **kw),
+                 self._made, "Asking…")
+
+    def _made(self, cands):
+        from ..online import PROVIDERS, compare_sheet
+        self.cands = cands
+        self.view.show_rgba(np.asarray(compare_sheet(cands, scale=1).convert("RGBA")))
+        self.pick.clear()
+        good = [c for c in cands if c.sprite is not None]
+        for c in good:
+            self.pick.addItem(PROVIDERS[c.provider]["name"], c.provider)
+        for b in (self.send_btn, self.save_btn):
+            b.setEnabled(bool(good))
+        bad = [f"{PROVIDERS[c.provider]['name']}: {c.error.splitlines()[0]}" for c in cands if c.error]
+        self.say(f"{len(good)} of {len(cands)} made it. " + " | ".join(bad))
+
+    def chosen(self):
+        prov = self.pick.currentData()
+        return next((c for c in self.cands if c.provider == prov), None)
+
+    def send(self):
+        c = self.chosen()
+        if c is not None and self.send_to_sprite:
+            self.send_to_sprite(c)
+
+    def save_dialog(self):
+        words = "".join(ch if ch.isalnum() else " " for ch in self.prompt.text().lower()).split()
+        default = str(Path.cwd() / f"{'-'.join(words)[:40] or 'sprite'}.png")
+        path, _ = QFileDialog.getSaveFileName(self, "Save results", default, "PNG (*.png)")
+        if path:
+            self.save(Path(path))
+
+    def save(self, out: Path) -> list[Path]:
+        from ..online import write_candidates
+        written = write_candidates(self.cands, out)
+        self.say("Saved " + ", ".join(p.name for p in written))
+        return written
