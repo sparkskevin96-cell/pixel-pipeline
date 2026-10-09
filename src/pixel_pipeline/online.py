@@ -35,10 +35,10 @@ from .settings import Settings
 
 PROVIDERS = {
     "pixellab": {"name": "PixelLab", "env": "PIXELLAB_API_KEY", "url_env": "PIXELLAB_BASE_URL",
-                 "url": "https://api.pixellab.ai/v2", "signup": "https://www.pixellab.ai/account"},
+                 "url": "https://api.pixellab.ai/v2", "signup": "https://www.pixellab.ai/pixellab-api"},
     "retrodiffusion": {"name": "Retro Diffusion", "env": "RETRO_DIFFUSION_API_KEY",
                        "url_env": "RETRO_DIFFUSION_BASE_URL", "url": "https://api.retrodiffusion.ai/v2",
-                       "signup": "https://www.retrodiffusion.ai/app/devtools"},
+                       "signup": "https://retrodiffusion.ai/app/devtools"},
     "gpu": {"name": "Your GPU (ComfyUI)"},
 }
 PIXELLAB_MODELS = {"pixen": "/create-image-pixen", "pixflux": "/create-image-pixflux",
