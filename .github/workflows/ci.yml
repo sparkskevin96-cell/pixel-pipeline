@@ -54,6 +54,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: windows-latest
     timeout-minutes: 30
+    permissions:
+      contents: write  # publishes the windows-latest pre-release
     defaults:
       run:
         shell: pwsh
@@ -98,10 +100,21 @@ jobs:
             throw "desktop app failed ($($p.ExitCode))"
           }
           "Bundle size: {0:N0} MB" -f ((Get-ChildItem $app -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
-      # upload-artifact zips the folder itself, so the download is one zip (no zip-in-zip).
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PixelPipeline-windows
-          path: dist/PixelPipeline/
-          if-no-files-found: error
-          retention-days: 7  # artifacts count against the private-repo storage quota
+      - name: Zip
+        run: 7z a -tzip -mx=5 PixelPipeline-windows.zip ./dist/PixelPipeline
+      # One fixed download link that always has the newest build:
+      #   https://github.com/<owner>/<repo>/releases/download/windows-latest/PixelPipeline-windows.zip
+      - name: Publish the windows-latest pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete windows-latest --yes --cleanup-tag || true
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/windows-latest" 2>/dev/null || true
+          gh release create windows-latest PixelPipeline-windows.zip \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Pixel Pipeline for Windows (latest)" \
+            --notes "Newest build of the desktop app, commit ${GITHUB_SHA::7}.
+
+          Download PixelPipeline-windows.zip, right-click > Extract All, open the PixelPipeline folder and run PixelPipeline.exe. It isn't signed, so SmartScreen warns: More info > Run anyway. Keep the exe inside its folder."

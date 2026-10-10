@@ -17,8 +17,8 @@ classical image processing, so results are predictable and free.
 
 ## Install (Windows)
 
-**Easiest:** download the ready-made app from GitHub. Repo → Actions → latest "CI" run on
-`main` → Artifacts → `PixelPipeline-windows`. Unzip the whole folder and run
+**Easiest:** download the ready-made app: repo → **Releases** → **windows-latest** →
+`PixelPipeline-windows.zip` (every push to `main` rebuilds it). Extract it and run
 `PixelPipeline.exe`. The exe is unsigned, so Windows SmartScreen will warn: More info →
 Run anyway. Keep the exe inside its folder. `pixel-pipeline.exe` in the same folder is
 the command line.
