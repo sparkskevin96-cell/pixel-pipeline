@@ -176,3 +176,23 @@ def test_teams_portrait_map_and_demo_tabs(app, tmp_path):
     demo.make(tmp_path / "Demo")
     assert (tmp_path / "Demo" / "project.godot").exists() and demo.open_btn.isEnabled()
     assert demo.view.rgba.shape == (360, 640, 4)
+
+
+def test_crash_reports_survive_to_the_next_start(app, tmp_path, monkeypatch):
+    import faulthandler
+    import sys
+    import threading
+    from pixel_pipeline.ui import crash
+    monkeypatch.setattr(crash, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    monkeypatch.setattr(threading, "excepthook", threading.excepthook)
+    (tmp_path / "running").write_text("x")                     # the last run never closed
+    (tmp_path / "faults.log").write_text("\n--- started 1 old\nok\n--- started 2 last\nFatal Python error: Aborted\n")
+    try:
+        crash.install()
+        assert crash._previous.startswith("2 last") and "Aborted" in crash._previous
+        assert sys.excepthook is crash._hook and (tmp_path / "running").exists()
+    finally:
+        faulthandler.disable()
+    log = crash.report("Traceback (most recent call last):\nValueError: boom")
+    assert "boom" in log.read_text() and "Pixel Pipeline" in log.read_text()

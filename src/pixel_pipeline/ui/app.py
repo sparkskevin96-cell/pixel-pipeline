@@ -574,6 +574,8 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import crash
+    crash.install()
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Pixel Pipeline")
     if ICON.exists():
@@ -581,6 +583,7 @@ def main(argv: list[str] | None = None) -> int:
     args = app.arguments()[1:]
     win = MainWindow()
     win.show()
+    crash.show_previous_crash(win)
     if "--model" in args:  # straight into Prompt to Model
         win.open_model_studio()
     elif args:

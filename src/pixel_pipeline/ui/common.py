@@ -53,7 +53,9 @@ class PixelView(QLabel):
         super().__init__(placeholder)
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(*minimum)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Ignored: the picture never makes the label (and the window) grow, so a resize can't
+        # feed back into a bigger picture and another resize.
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setStyleSheet("background:#1c2030;color:#9aa3b5;border-radius:6px;")
         self.setWordWrap(True)
         self.rgba: np.ndarray | None = None

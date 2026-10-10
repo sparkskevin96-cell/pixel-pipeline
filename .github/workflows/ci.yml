@@ -73,7 +73,8 @@ jobs:
       - name: Smoke test
         env:
           REMBG_HOME: ${{ runner.temp }}\rembg
-          QT_QPA_PLATFORM: offscreen
+          # no QT_QPA_PLATFORM=offscreen here: the app starts with the real Windows plugin,
+          # like on a laptop
         run: |
           $app = "./dist/PixelPipeline"
           function Check($what) { if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" } }
@@ -90,13 +91,15 @@ jobs:
           # Online providers load (no keys here, so it only reports that).
           & "$app/pixel-pipeline.exe" ai --balance --providers pixellab,retrodiffusion; Check "ai --balance"
 
-          # Desktop app: opens the main window, quits after 3 s (see packaging/gui_main.py).
+          # Desktop app: opens the window, visits every tab, makes tiles and a Godot demo, quits
+          # (see packaging/gui_main.py).
           $env:PIXEL_PIPELINE_SMOKE_TEST = "3"
           $p = Start-Process "$app/PixelPipeline.exe" -PassThru
           $null = $p.Handle  # keeps ExitCode readable after exit
           if (-not $p.WaitForExit(60000)) { $p | Stop-Process -Force; throw "desktop app hung" }
           if ($p.ExitCode -ne 0) {
             Get-Content smoke-test-error.txt -ErrorAction SilentlyContinue
+            Get-Content "$env:LOCALAPPDATA\PixelPipeline\logs\faults.log" -ErrorAction SilentlyContinue
             throw "desktop app failed ($($p.ExitCode))"
           }
           "Bundle size: {0:N0} MB" -f ((Get-ChildItem $app -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
