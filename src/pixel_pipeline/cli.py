@@ -654,17 +654,21 @@ def _cmd_portrait(a) -> int:
 def _add_maptiles(sub):
     from .maptiles import BUILTIN as TERRAINS
     p = sub.add_parser(
-        "maptiles", help="terrains -> seamless map tiles with corner transitions + Godot TileSet",
-        description="The first terrain is the base; each other terrain gets 15 corner tiles "
-                    "blending it into the base. Godot: paint with the TileMapLayer's Terrains tab. "
-                    f"Built-in terrains: {', '.join(TERRAINS)}.")
+        "maptiles", help="terrains -> map tiles (top-down, side-scroller or isometric) + Godot TileSet",
+        description="topdown (default): the first terrain is the base; each other terrain gets 15 "
+                    "corner tiles blending it into the base. sidescroller: ground, then its top "
+                    "(-t dirt -t grass): 16 edge tiles with collision + one-way platforms. "
+                    "isometric: a floor and a block per terrain. Godot: paint with the "
+                    f"TileMapLayer's Terrains tab. Built-in terrains: {', '.join(TERRAINS)}.")
     p.add_argument("-o", "--out", type=Path, required=True, help="atlas .png (TileSet .tres next to it)")
     p.add_argument("-t", "--terrain", action="append", metavar="NAME[=SOURCE]",
                    help="repeat, base first. SOURCE: built-in (default), a texture photo, or "
                         "prompt:<text> (made on your GPU). e.g. -t grass -t water "
                         "-t sand=beach.jpg -t 'road=prompt:cobblestone road'")
-    p.add_argument("--tile", type=int, default=32, help="tile size in pixels (default 32: 640x360 maps)")
-    p.add_argument("--variants", type=int, default=4, help="base tile variations (default 4)")
+    p.add_argument("--style", choices=("topdown", "sidescroller", "isometric"), default="topdown")
+    p.add_argument("--tile", type=int, default=32,
+                   help="tile size in pixels (default 32: 640x360 maps); isometric: tile width")
+    p.add_argument("--variants", type=int, default=4, help="topdown: base tile variations (default 4)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-godot", dest="godot", action="store_false")
     p.add_argument("--example", default="20x11", help="example map size COLSxROWS, or 'none'")
@@ -673,8 +677,9 @@ def _add_maptiles(sub):
 
 
 def _cmd_maptiles(a) -> int:
-    from .maptiles import build_terrain_set, terrain, write_terrain
-    specs = a.terrain or ["grass", "water", "sand", "road"]
+    from .maptiles import terrain
+    from .tilesets import DEFAULT_TERRAINS, build_style, write_style
+    specs = a.terrain or DEFAULT_TERRAINS[a.style]
     client = None
     if any("=prompt:" in t for t in specs):
         from .generate import ComfyClient
@@ -683,10 +688,15 @@ def _cmd_maptiles(a) -> int:
     for spec in specs:
         name, _, source = spec.partition("=")
         terrains.append(terrain(name.strip(), source.strip() or None, a.tile, seed=a.seed, client=client))
-    ts = build_terrain_set(terrains, a.variants, a.seed)
-    example = None if a.example == "none" else tuple(int(v) for v in a.example.lower().split("x"))
-    written = write_terrain(ts, a.out, a.godot, example, a.seed)
-    _print_written(f"{len(terrains)} terrains ({', '.join(ts.names)}), {a.tile}px tiles", written)
+    built = build_style(a.style, terrains, a.variants, a.seed)
+    if a.style == "topdown":
+        from .maptiles import write_terrain
+        example = None if a.example == "none" else tuple(int(v) for v in a.example.lower().split("x"))
+        written = write_terrain(built, a.out, a.godot, example, a.seed)
+    else:
+        written = write_style(a.style, built, a.out, a.godot, a.example != "none", a.seed)
+    names = ", ".join(t.name for t in terrains)
+    _print_written(f"{a.style}: {len(terrains)} terrains ({names}), {a.tile}px tiles", written)
     return 0
 
 

@@ -70,7 +70,7 @@ One window, a tab per tool:
 | **Directions** | 3D model, photos or a video → 4/8/16 facing directions. A rigged `.glb` plays its animations from every side. Save writes sheet, `.json`, `.aseprite`, Godot SpriteFrames + facing script, GIF. |
 | **Teams** | Sprite or sheet → player / enemy / ally / other / spent colours + the Godot palette shader. |
 | **Portrait** | Photo, picture or prompt (GPU) → head-and-shoulders dialogue portrait. |
-| **Map tiles** | Built-in, photo or prompt terrains → tiles with shores and edges + Godot TileSet. |
+| **Map tiles** | Built-in, photo or prompt terrains → top-down tiles with shores and edges, side-scroller ground (with collision) or isometric floors and blocks, + Godot TileSet. |
 | **Godot demo** | A ready-to-open Godot project: map + units that walk where you click. |
 | **Prompt to Model** | Prompt → 3D model on your GPU → direction sprites. |
 
@@ -120,6 +120,10 @@ pixel-pipeline parallax lake.jpg -o bg/ -W 320 -H 180 --scale 3
 pixel-pipeline maptiles -o maps/terrain.png -t grass -t water -t sand -t road
 pixel-pipeline maptiles -o maps/cave.png -t stone -t water=murky_water.jpg -t "lava=prompt:glowing lava cracks"
 
+# Platformer tiles: dirt with grass on every open top, collision + one-way platforms in Godot
+pixel-pipeline maptiles --style sidescroller -t dirt -t grass --tile 16 -o ground.png
+# Isometric: a floor diamond and a block per terrain, Godot isometric TileSet
+pixel-pipeline maptiles --style isometric -t grass -t water -t stone -o iso.png
 # Team colours (Fire Emblem style): blue player, red enemy, green ally, purple other, grey spent
 pixel-pipeline teams knight_dirs.png --godot          # + palette strip, shader, a material per team
 # Dialogue portrait (head and shoulders) from a photo, a picture, or a prompt on your GPU

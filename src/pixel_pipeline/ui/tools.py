@@ -585,24 +585,41 @@ class _TerrainRow(QWidget):
         return self.name.currentText().strip() + (f"={src}" if src else "")
 
 
+MAP_STYLES = (("Top-down (tactics, RPG)", "topdown"), ("Side-scroller (platformer)", "sidescroller"),
+              ("Isometric", "isometric"))
+MAP_NOTES = {
+    "topdown": ("Terrains (first = base)", "Each other terrain blends into the base with 15 corner "
+                "tiles (shores, edges)."),
+    "sidescroller": ("Ground, then its top", "The first terrain is the ground, the second grows on "
+                     "every open top (dirt + grass, stone + snow). 16 edge tiles with collision and "
+                     "one-way platforms."),
+    "isometric": ("Terrains", "Each terrain becomes a flat floor tile and a block."),
+}
+
+
 class MapTab(ToolTab):
-    """Terrains -> seamless tiles with corner transitions + a Godot TileSet."""
+    """Terrains -> top-down, side-scroller or isometric tiles + a Godot TileSet."""
     title = "Map tiles"
 
     def __init__(self, status=None):
         super().__init__(status)
         self.ts = None
+        self.built_style = "topdown"
+        self.style = QComboBox()
+        for label, key in MAP_STYLES:
+            self.style.addItem(label, key)
+        self.style.currentIndexChanged.connect(self._style_changed)
         self.rows = [_TerrainRow("grass"), _TerrainRow("water"), _TerrainRow("sand"),
                      _TerrainRow("road"), _TerrainRow("dirt", False)]
-        box = QGroupBox("Terrains (first = base)")
-        bl = QVBoxLayout(box)
-        note = QLabel("Each other terrain blends into the base with 15 corner tiles (shores, edges). "
-                      "Leave the source empty for the built-in look, pick a texture photo, or type "
-                      "prompt: ... to make it on your GPU.")
-        note.setWordWrap(True)
-        bl.addWidget(note)
+        self.box = QGroupBox("Terrains (first = base)")
+        bl = QVBoxLayout(self.box)
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        bl.addWidget(_row(QLabel("Style"), self.style))
+        bl.addWidget(self.note)
         for r in self.rows:
             bl.addWidget(r)
+        box = self.box
         self.tile = spin(8, 128, 32)
         self.variants = spin(1, 15, 4)
         self.seed = spin(0, 9999, 0)
@@ -619,6 +636,22 @@ class MapTab(ToolTab):
         self.save_btn.clicked.connect(self.save_dialog)
         self.busy_widgets = [self.make_btn, self.save_btn]
         _layout(self, [box, opts], self.view, [self.make_btn, self.save_btn])
+        self._style_changed()
+
+    def _style_changed(self, *_):
+        from ..tilesets import DEFAULT_TERRAINS
+        style = self.style.currentData()
+        title, text = MAP_NOTES[style]
+        self.box.setTitle(title)
+        self.note.setText(text + " Leave a source empty for the built-in look, pick a texture photo, "
+                          "or type prompt: ... to make it on your GPU.")
+        names = DEFAULT_TERRAINS[style]
+        for i, r in enumerate(self.rows):
+            r.on.setChecked(i < len(names))
+            if i < len(names):
+                r.name.setCurrentText(names[i])
+                r.source.clear()
+        self.variants.setEnabled(style == "topdown")
 
     def specs(self) -> list[str]:
         return [s for s in (r.spec() for r in self.rows) if s]
@@ -629,9 +662,11 @@ class MapTab(ToolTab):
             self.say("Tick at least one terrain.")
             return
         tile, variants, seed = self.tile.value(), self.variants.value(), self.seed.value()
+        style = self.style.currentData()
 
         def job(say):
-            from ..maptiles import build_terrain_set, terrain
+            from ..maptiles import terrain
+            from ..tilesets import build_style
             client = None
             if any("=prompt:" in s for s in specs):
                 from ..generate import ComfyClient
@@ -641,19 +676,16 @@ class MapTab(ToolTab):
                 name, _, source = spec.partition("=")
                 say(f"Making {name}…")
                 built.append(terrain(name, source or None, tile, seed=seed, client=client))
-            return build_terrain_set(built, variants, seed)
+            return style, build_style(style, built, variants, seed)
         self.run(job, self._made, "Making tiles…")
 
-    def _made(self, ts):
-        from ..maptiles import cells_from_vertices, example_vertex_grid, render_map
-        self.ts = ts
-        cols, rows = max(8, 640 // ts.tile), max(6, 352 // ts.tile)
-        cells = cells_from_vertices(example_vertex_grid(cols, rows, len(ts.names), self.seed.value()),
-                                    ts, self.seed.value())
-        self.view.show_rgba(render_map(cells, ts))
+    def _made(self, result):
+        from ..tilesets import style_preview
+        self.built_style, self.ts = result
+        self.view.show_rgba(style_preview(self.built_style, self.ts, self.seed.value()))
         self.save_btn.setEnabled(True)
-        self.say(f"{len(ts.names)} terrains ({', '.join(ts.names)}), {ts.tile}px tiles. "
-                 "Preview: an example map.")
+        names = ", ".join(self.ts.names) if isinstance(self.ts.names, (list, tuple)) else self.ts.names
+        self.say(f"{self.built_style}: {names}. Preview: an example map.")
 
     def save_dialog(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save tile atlas", str(Path.cwd() / "terrain.png"),
@@ -662,10 +694,13 @@ class MapTab(ToolTab):
             self.save(Path(path))
 
     def save(self, out: Path) -> list[Path]:
-        from ..maptiles import write_terrain
-        written = write_terrain(self.ts, out, True, (20, 11), self.seed.value())
-        self.say("Saved " + ", ".join(p.name for p in written)
-                 + ". In Godot: TileMapLayer, set the TileSet, paint in the Terrains tab.")
+        from ..tilesets import write_style
+        written = write_style(self.built_style, self.ts, out, True, True, self.seed.value())
+        how = {"topdown": "paint in the Terrains tab", "sidescroller": "paint the ground in the "
+               "Terrains tab (collision included)", "isometric": "floors from source 0, blocks from "
+               "source 1"}[self.built_style]
+        self.say("Saved " + ", ".join(p.name for p in written) + f". In Godot: TileMapLayer, set the "
+                 f"TileSet, {how}.")
         return written
 
 

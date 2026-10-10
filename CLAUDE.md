@@ -109,6 +109,16 @@ wants terse answers and fixes over polish.
   bilinear + shared periodic jitter so tiles agree on edges; base variants only add interior
   details (same edges). TileSet .tres format copied from Godot's own ResourceSaver output;
   alternatives 0:0/1-15 = grass next to empty cells (Godot treats empty as a terrain).
+- **Side-scroller + isometric tiles** (`tilesets.py`, `maptiles --style`, MCP map_tiles(style=),
+  Map tiles tab Style): side = ground texture + top texture capped on open tops (periodic cap
+  depth so neighbours line up), 16 tiles by open sides (bits top 1, right 2, bottom 4, left
+  8; mask m at atlas (m%4, m//4)) + 4 one-way platform pieces in row 4; Godot terrain mode 2
+  (Match Sides) with side peering bits, physics_layer_0 boxes from the grass top (lip rows of
+  air). Iso = W x W/2 diamonds sampled from the seamless texture (u=(a+b)/2, v=(b-a)/2),
+  blocks W x W (sides x0.72 / x0.55, grass/snow sides show dirt); TileSet tile_shape 1,
+  tile_layout 5 (diamond down: map (1,0) -> (W, H)), blocks in source 1 with
+  texture_origin (0, H/2). Godot verified: set_cells_terrain_connect picks the right side
+  tiles; xvfb render shows blocks on their cells.
 - **Sprite scale research** (`docs/SPRITE_SCALE.md`, interactive page artifact
   Jv1VrzgNjgmiH4LgAQg1SR): character height as a share of screen height for 41 classic
   games by genre, and the matching sprite heights. Kevin decided all his games render at
@@ -159,8 +169,9 @@ Claude GitHub app can't dispatch workflows (403), so trigger by pushing.
 
 Before the repo existed (2026-10-07..09), builds ran from branch `ccr-15172514-6ugcr0` of
 `sparkskevin96-cell/pawgress` (local branch `pawgress-build`), with pre-releases
-`pixel-pipeline-android-temp` and `pixel-pipeline-windows-temp` there. Clean those up once
-Kevin OKs it.
+`pixel-pipeline-android-temp` and `pixel-pipeline-windows-temp` there. Cleaned up
+2026-10-10 with Kevin's OK: both pre-releases and tags deleted, and that branch reset to
+Pawgress `main` (this session can't delete branches).
 
 ## Next up
 
