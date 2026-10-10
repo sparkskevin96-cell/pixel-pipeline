@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import os
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -357,26 +358,31 @@ def prompt_candidates(prompt: str, settings: Settings, providers: list[str], *,
 
 
 def compare_sheet(cands: list[Candidate], scale: int | None = None) -> Image.Image:
-    """One row per provider: what the service drew, and the sprite on your settings."""
+    """One row per provider: what the service drew, and the sprite on your settings. A row is as
+    tall as its pictures or its text, whichever is taller, so error messages never overlap."""
     sprites = [c.sprite for c in cands if c.sprite is not None]
     sw = max((s.rgba.shape[1] for s in sprites), default=48)
     sh = max((s.rgba.shape[0] for s in sprites), default=48)
     k = scale or max(2, min(8, 192 // max(sw, sh)))
-    cell_w, cell_h, text_w, gap = sw * k, sh * k, 230, 12
+    cell_w, cell_h, text_w, gap, line_h = sw * k, sh * k, 230, 12, 14
+    rows = []
+    for c in cands:
+        lines = [PROVIDERS[c.provider]["name"], c.label]
+        if c.error:
+            lines += textwrap.wrap(c.error, 36, break_long_words=True)[:8]
+        else:
+            lines.append(f"{c.seconds:.0f} s  {c.cost}".strip())
+        rows.append((c, lines, max(cell_h, 8 + line_h * len(lines))))
     width = text_w + 2 * (cell_w + gap) + gap
-    height = gap + len(cands) * (cell_h + gap)
+    height = gap + sum(h + gap for *_, h in rows)
     sheet = Image.new("RGB", (width, height), (34, 38, 52))
     draw = ImageDraw.Draw(sheet)
     font = ImageFont.load_default()
-    for i, c in enumerate(cands):
-        y = gap + i * (cell_h + gap)
-        name = PROVIDERS[c.provider]["name"]
-        lines = [name, c.label] + ([f"{c.seconds:.0f} s  {c.cost}".strip()] if not c.error else [])
-        if c.error:
-            lines += [c.error[j:j + 34] for j in range(0, min(len(c.error), 34 * 5), 34)]
+    y = gap
+    for c, lines, row_h in rows:
         for j, line in enumerate(lines):
-            draw.text((gap, y + 4 + 14 * j), line, fill=(235, 235, 235) if j == 0 else (170, 178, 196),
-                      font=font)
+            draw.text((gap, y + 4 + line_h * j), line,
+                      fill=(235, 235, 235) if j == 0 else (170, 178, 196), font=font)
         for col, img in enumerate((c.raw, c.sprite.rgba if c.sprite else None)):
             if img is None:
                 continue
@@ -388,6 +394,7 @@ def compare_sheet(cands: list[Candidate], scale: int | None = None) -> Image.Ima
             bg = Image.new("RGBA", (cell_w, cell_h), (52, 58, 76, 255))
             bg.alpha_composite(im, ((cell_w - size[0]) // 2, cell_h - size[1]))
             sheet.paste(bg.convert("RGB"), (x, y))
+        y += row_h + gap
     return sheet
 
 

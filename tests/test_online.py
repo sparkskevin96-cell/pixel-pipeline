@@ -173,6 +173,19 @@ def test_candidates_compare_and_files(services, tmp_path):
                      "knight_retrodiffusion.raw.png", "knight_compare.png"]
 
 
+def test_compare_sheet_rows_fit_error_text():
+    """The app shows the sheet at scale 1 (64 px rows); long errors must not run into the next row."""
+    s = settings_for("person", width=48, height=64)
+    cands = prompt_candidates("a knight", s, ["pixellab", "retrodiffusion"], keys={})
+    assert all(c.error for c in cands)
+    sheet = np.asarray(compare_sheet(cands, scale=1).convert("RGB"))
+    text = (np.abs(sheet[:, :230].astype(int) - (34, 38, 52)).sum(-1) > 0).any(1)
+    edges = np.flatnonzero(np.diff(text.astype(int)))
+    blocks = [(a, b) for a, b in zip(edges[::2], edges[1::2])]
+    gaps = [b2 - a1 for (_, a1), (b2, _) in zip(blocks, blocks[1:])]
+    assert max(gaps) >= 12                                   # a clear gap between the two rows
+
+
 def test_gpu_provider_uses_comfyui(tmp_path, comfy):
     fake, client = comfy
     s = settings_for("person", width=24, height=32)
