@@ -150,16 +150,17 @@ wants terse answers and fixes over polish.
 - Run `pytest` before pushing; the UI test runs headless (`QT_QPA_PLATFORM=offscreen`).
 - Private repo with limited Actions minutes: keep workflows lean.
 
-## Temporary: built in the Pawgress repo (clean up!)
+## Repo and builds
 
-Kevin couldn't log in to GitHub on 2026-10-07, so (with his OK) the Android APK was built
-by pushing local branch `pawgress-build` (main + a workflow tweak) to
-`sparkskevin96-cell/pawgress` branch `ccr-15172514-6ugcr0`, which published the
-pre-release `pixel-pipeline-android-temp` there. Since 2026-10-09 the branch also has
-`.github/workflows/windows-temp.yml`, which builds the Windows desktop app and publishes the
-pre-release `pixel-pipeline-windows-temp` (PixelPipeline-windows.zip). Once
-`sparkskevin96-cell/pixel-pipeline` exists: push `main` there, then delete that Pawgress
-branch, both releases and both tags.
+GitHub: `sparkskevin96-cell/pixel-pipeline` (private, created 2026-10-10). Pushes to `main`
+run CI (tests on Linux + Windows) and publish the Windows app as the `windows-latest`
+pre-release; changes under `mobile/` or `web/` publish the APK as `android-latest`. The
+Claude GitHub app can't dispatch workflows (403), so trigger by pushing.
+
+Before the repo existed (2026-10-07..09), builds ran from branch `ccr-15172514-6ugcr0` of
+`sparkskevin96-cell/pawgress` (local branch `pawgress-build`), with pre-releases
+`pixel-pipeline-android-temp` and `pixel-pipeline-windows-temp` there. Clean those up once
+Kevin OKs it.
 
 ## Next up
 

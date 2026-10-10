@@ -1,6 +1,7 @@
 # Android app (mobile/): the web app in a WebView + native bridge.
 # Builds an arm64 APK and publishes it as the "android-latest" pre-release, so Kevin can
-# download it on his phone from the repo's Releases page. Private repo with limited
+# download it on his phone from the repo's Releases page:
+#   https://github.com/sparkskevin96-cell/pixel-pipeline/releases/tag/android-latest Private repo with limited
 # minutes: only runs when mobile/ or web/ change (or by hand), a newer push cancels an
 # older run, and Flutter + Gradle are cached.
 name: Android
