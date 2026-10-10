@@ -844,8 +844,9 @@ class KeysDialog(QDialog):
         self.status.setText("\n".join(lines) or "Paste a key first.")
 
     def save(self):
-        from ..online import save_keys
-        save_keys(self.keys())
+        from ..online import load_keys, save_keys
+        keys = {k: v for k, v in load_keys(env=False).items() if k not in self.edits}
+        save_keys({**keys, **self.keys()})
         self.accept()
 
 

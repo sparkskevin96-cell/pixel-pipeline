@@ -196,3 +196,46 @@ def test_crash_reports_survive_to_the_next_start(app, tmp_path, monkeypatch):
         faulthandler.disable()
     log = crash.report("Traceback (most recent call last):\nValueError: boom")
     assert "boom" in log.read_text() and "Pixel Pipeline" in log.read_text()
+
+
+def test_updates_menu_prompts_and_tokens(app, tmp_path, monkeypatch):
+    import json
+    from PySide6.QtWidgets import QMessageBox
+    from pixel_pipeline import online
+    from pixel_pipeline.ui import update_ui, updater
+    from pixel_pipeline.ui.tools import KeysDialog
+    from pixel_pipeline.ui.updater import Build, Release
+    monkeypatch.setattr(online, "KEYS_FILE", tmp_path / "keys.json")
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a: shown.append(a[2]))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or 0)
+    win = MainWindow()
+    help_menu = [a.menu() for a in win.menuBar().actions() if a.text() == "&Help"][0]
+    assert "Check for &updates…" in [a.text() for a in help_menu.actions()]
+    assert not update_ui.offer_install()                            # running from source
+    win.updates.check(loud=True)
+    assert "from source" in shown[-1]
+    # A quiet check that needs a token only says so in the status bar.
+    win.updates.loud = False
+    win.updates._on_checked(("the repo is private", True))
+    assert "private" in win.statusBar().currentMessage()
+    # A newer build asks first ("Later" here: the stub clicks nothing).
+    monkeypatch.setattr(updater, "current_build", lambda: Build(3, "aaa", "2026-10-01"))
+    fetched = []
+    monkeypatch.setattr(win.updates, "fetch", fetched.append)
+    win.updates._on_checked(Release(Build(4, "bbb", "2026-10-10"), "http://x/zip", 1))
+    assert shown[-1] == "A new Pixel Pipeline is ready." and fetched == []
+    win.updates.loud = True
+    win.updates._on_checked(Release(Build(3), "http://x/zip", 1))
+    assert "newest" in shown[-1]
+    # The token and the AI keys share a file; saving one keeps the other.
+    online.save_keys({"pixellab": "pl-key"})
+    dlg = update_ui.TokenDialog(win)
+    dlg.edit.setText(" github_pat_x ")
+    dlg.save()
+    keys = KeysDialog(win)
+    keys.edits["retrodiffusion"].setText("rd-key")
+    keys.save()
+    assert json.loads((tmp_path / "keys.json").read_text()) == {
+        "pixellab": "pl-key", "retrodiffusion": "rd-key", "github": "github_pat_x"}
+    assert updater.github_token() == "github_pat_x"

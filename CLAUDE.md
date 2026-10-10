@@ -167,6 +167,17 @@ run CI (tests on Linux + Windows) and publish the Windows app as the `windows-la
 pre-release; changes under `mobile/` or `web/` publish the APK as `android-latest`. The
 Claude GitHub app can't dispatch workflows (403), so trigger by pushing.
 
+**Install + self-update** (`ui/updater.py`, windows in `ui/update_ui.py`), 2026-10-10, after
+Kevin opened an old copy: CI writes `build.json` (run number, sha, date) into the app and
+uploads it as `version.json` on the release. A downloaded copy offers to install itself to
+`%LOCALAPPDATA%\Programs\PixelPipeline` (+ desktop/Start menu shortcuts) or opens the
+installed copy if that's as new. Updating = download zip → unpack to
+`%LOCALAPPDATA%\PixelPipeline\update` → PowerShell script waits for the pid, robocopies
+(`_internal` mirrored) and restarts with `--updated`. Private repo => the check needs a
+fine-grained token (Contents: read) saved as "github" in keys.json; a public repo needs
+none. CI's "Update test" step updates a build-0 copy from the real zip; the publish step
+checks the release through the API.
+
 Before the repo existed (2026-10-07..09), builds ran from branch `ccr-15172514-6ugcr0` of
 `sparkskevin96-cell/pawgress` (local branch `pawgress-build`), with pre-releases
 `pixel-pipeline-android-temp` and `pixel-pipeline-windows-temp` there. Cleaned up

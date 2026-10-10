@@ -80,9 +80,17 @@ class MainWindow(QMainWindow):
         self._timer.setInterval(150)
         self._timer.timeout.connect(self.render)
 
+        from .update_ui import Updates
+        from .updater import current_build
+        build = current_build()
+        if build:
+            self.setWindowTitle(f"Pixel Pipeline (build {build.number})")
+        self.updates = Updates(self)
+
         self._build_controls()
         self._build_views()
         self._build_menu()
+        self.updates.add_menu(self.menuBar())
         self.apply_preset("object")
         self.statusBar().showMessage("Drop a photo onto the window, or File → Open (Ctrl+O)")
 
@@ -574,16 +582,21 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
-    from . import crash
+    from . import crash, updater
+    from .update_ui import offer_install
     crash.install()
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Pixel Pipeline")
     if ICON.exists():
         app.setWindowIcon(QIcon(str(ICON)))
-    args = app.arguments()[1:]
+    flags = [a for a in app.arguments()[1:] if a in updater.FLAGS]
+    args = [a for a in app.arguments()[1:] if a not in updater.FLAGS]
+    if not flags and offer_install():
+        return 0                      # the installed copy is starting instead
     win = MainWindow()
     win.show()
     crash.show_previous_crash(win)
+    win.updates.started(flags)
     if "--model" in args:  # straight into Prompt to Model
         win.open_model_studio()
     elif args:

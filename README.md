@@ -20,8 +20,15 @@ classical image processing, so results are predictable and free.
 **Easiest:** download the ready-made app: repo → **Releases** → **windows-latest** →
 `PixelPipeline-windows.zip` (every push to `main` rebuilds it). Extract it and run
 `PixelPipeline.exe`. The exe is unsigned, so Windows SmartScreen will warn: More info →
-Run anyway. Keep the exe inside its folder. `pixel-pipeline.exe` in the same folder is
-the command line.
+Run anyway. It offers to **install** itself (into `%LOCALAPPDATA%\Programs\PixelPipeline`,
+no admin, with a desktop icon and a Start menu entry); after that the downloaded folder can
+go. `pixel-pipeline.exe` in the same folder is the command line.
+
+**Updates:** a few seconds after it opens, the app checks the `windows-latest` release and
+asks to update when there's a newer build; it closes, swaps its files and opens again
+(Help → Check for updates does the same; the window title shows the build number). While
+the repo is private the check needs a read-only GitHub token: Help → Updates token walks
+through making one.
 
 **From source** (needed for GPU background removal and the MCP server). Install
 Python 3.11–3.13 from python.org, then in the repo folder:

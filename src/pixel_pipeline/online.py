@@ -62,15 +62,16 @@ class OnlineError(RuntimeError):
 
 # --------------------------------------------------------------------------- keys
 
-def load_keys(path: Path | None = None) -> dict[str, str]:
-    """{provider: key} from the keys file, overridden by environment variables."""
+def load_keys(path: Path | None = None, env: bool = True) -> dict[str, str]:
+    """{provider: key} from the keys file, overridden by environment variables (unless not env).
+    The file also holds "github", the token the desktop app checks for updates with."""
     keys: dict[str, str] = {}
     path = path or KEYS_FILE
     try:
         keys.update({k: v for k, v in json.loads(path.read_text(encoding="utf-8")).items() if v})
     except (OSError, ValueError):
         pass
-    for prov, info in PROVIDERS.items():
+    for prov, info in PROVIDERS.items() if env else ():
         if "env" in info and os.environ.get(info["env"]):
             keys[prov] = os.environ[info["env"]].strip()
     return keys

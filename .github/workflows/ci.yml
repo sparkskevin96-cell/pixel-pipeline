@@ -68,6 +68,14 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install
         run: python -m pip install ".[ui,cutout,3d,build]"
+      # The app compares this with version.json on the release to know when to update.
+      - name: Build number
+        run: |
+          [ordered]@{ number = [int]$env:GITHUB_RUN_NUMBER; sha = $env:GITHUB_SHA
+                      date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") } |
+            ConvertTo-Json | Set-Content src/pixel_pipeline/ui/build.json
+          Copy-Item src/pixel_pipeline/ui/build.json version.json
+          Get-Content version.json
       - name: Build (PyInstaller)
         run: pyinstaller packaging/pixel-pipeline.spec --noconfirm
       - name: Smoke test
@@ -105,6 +113,25 @@ jobs:
           "Bundle size: {0:N0} MB" -f ((Get-ChildItem $app -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
       - name: Zip
         run: 7z a -tzip -mx=5 PixelPipeline-windows.zip ./dist/PixelPipeline
+      # An older copy (build 0) updates itself from this zip like on a laptop, minus the
+      # download: unpack, quit, the script swaps the files and restarts it with --updated.
+      - name: Update test
+        run: |
+          $old = Join-Path $env:RUNNER_TEMP "OldCopy"
+          Copy-Item ./dist/PixelPipeline $old -Recurse
+          Set-Content "$old/_internal/pixel_pipeline/ui/build.json" '{"number": 0, "sha": "old", "date": ""}'
+          $zip = (Resolve-Path PixelPipeline-windows.zip).Path
+          $env:PIXEL_PIPELINE_UPDATE_TEST = $zip
+          $p = Start-Process "$old/PixelPipeline.exe" -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(60000)) { $p | Stop-Process -Force; throw "old copy hung" }
+          if ($p.ExitCode -ne 0) { Get-Content smoke-test-error.txt -EA SilentlyContinue; throw "old copy failed ($($p.ExitCode))" }
+          for ($i = 0; $i -lt 120 -and -not (Test-Path "$zip.done"); $i++) { Start-Sleep 1 }
+          Get-Content "$env:LOCALAPPDATA\PixelPipeline\logs\update.log" -EA SilentlyContinue | Select-Object -Last 15
+          if (-not (Test-Path "$zip.done")) { Get-Content "$old/smoke-test-error.txt" -EA SilentlyContinue; throw "the updated app never started" }
+          $said = (Get-Content "$zip.done").Trim()
+          "The restarted app says: $said"
+          if ($said -ne "--updated $env:GITHUB_RUN_NUMBER") { throw "expected --updated $env:GITHUB_RUN_NUMBER" }
       # One fixed download link that always has the newest build:
       #   https://github.com/<owner>/<repo>/releases/download/windows-latest/PixelPipeline-windows.zip
       - name: Publish the windows-latest pre-release
@@ -115,9 +142,11 @@ jobs:
         run: |
           gh release delete windows-latest --yes --cleanup-tag || true
           gh api -X DELETE "repos/$GH_REPO/git/refs/tags/windows-latest" 2>/dev/null || true
-          gh release create windows-latest PixelPipeline-windows.zip \
+          gh release create windows-latest PixelPipeline-windows.zip version.json \
             --prerelease --target "$GITHUB_SHA" \
             --title "Pixel Pipeline for Windows (latest)" \
             --notes "Newest build of the desktop app, commit ${GITHUB_SHA::7}.
 
-          Download PixelPipeline-windows.zip, right-click > Extract All, open the PixelPipeline folder and run PixelPipeline.exe. It isn't signed, so SmartScreen warns: More info > Run anyway. Keep the exe inside its folder."
+          Download PixelPipeline-windows.zip, right-click > Extract All, open the PixelPipeline folder and run PixelPipeline.exe. It isn't signed, so SmartScreen warns: More info > Run anyway. It offers to install itself (desktop icon) and then updates itself."
+          # What the app's update check sees (through the API, like with a token while private).
+          python -c "import os; from pixel_pipeline.ui.updater import latest; r = latest(os.environ['GH_TOKEN'], repo=os.environ['GH_REPO']); print('The app sees', r.build.label, r.zip_size, 'bytes'); assert r.build.number == int(os.environ['GITHUB_RUN_NUMBER'])"

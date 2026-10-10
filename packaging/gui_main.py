@@ -3,6 +3,9 @@
 PIXEL_PIPELINE_SMOKE_TEST=<seconds> opens the main window, quits after that long and
 exits 0 (1 on error, traceback in smoke-test-error.txt). CI uses it to prove the frozen
 app starts, since a windowed exe has no console to print to.
+
+PIXEL_PIPELINE_UPDATE_TEST=<zip> updates this copy from that zip the way a real update does
+(minus the download) and quits; the restarted copy writes "<flag> <build number>" to <zip>.done.
 """
 import os
 import sys
@@ -49,6 +52,28 @@ def smoke_test(seconds: float) -> int:
         return 1
 
 
+def update_test(zip_path: str) -> int:
+    try:
+        from pathlib import Path
+
+        from pixel_pipeline.ui import updater
+
+        flags = [a for a in sys.argv[1:] if a in updater.FLAGS]
+        if flags:                                   # the restarted, updated copy
+            build = updater.current_build()
+            Path(zip_path + ".done").write_text(f"{flags[0]} {build.number if build else 'none'}")
+            return 0
+        new = updater.unpack(Path(zip_path), updater.update_dir() / "new")
+        updater.start_update(new)
+        return 0
+    except Exception:  # noqa: BLE001
+        with open("smoke-test-error.txt", "w", encoding="utf-8") as f:
+            traceback.print_exc(file=f)
+        return 1
+
+
 if __name__ == "__main__":
     seconds = os.environ.get("PIXEL_PIPELINE_SMOKE_TEST")
-    sys.exit(smoke_test(float(seconds)) if seconds else main())
+    update_zip = os.environ.get("PIXEL_PIPELINE_UPDATE_TEST")
+    sys.exit(update_test(update_zip) if update_zip else
+             smoke_test(float(seconds)) if seconds else main())

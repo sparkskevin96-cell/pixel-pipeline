@@ -9,3 +9,5 @@ dist/
 out/
 *.sprite.png
 *.sprite.aseprite
+# written by CI for the Windows build
+src/pixel_pipeline/ui/build.json
