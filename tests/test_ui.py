@@ -239,3 +239,57 @@ def test_updates_menu_prompts_and_tokens(app, tmp_path, monkeypatch):
     assert json.loads((tmp_path / "keys.json").read_text()) == {
         "pixellab": "pl-key", "retrodiffusion": "rd-key", "github": "github_pat_x"}
     assert updater.github_token() == "github_pat_x"
+
+
+def test_drops_from_a_browser_or_a_folder(app, tmp_path, monkeypatch):
+    import time
+    from http.server import ThreadingHTTPServer
+    from threading import Thread
+    from PIL import Image
+    from PySide6.QtCore import QMimeData, QUrl
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QMessageBox
+    from pixel_pipeline.ui import app as app_module
+    from test_drops import Site, png_bytes
+    monkeypatch.setattr(app_module, "drop_folder", lambda: tmp_path / "dropped")
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: warnings.append(a[2]))
+    Site.pages = {"/knight.png": png_bytes((20, 30))}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+    Thread(target=server.serve_forever, daemon=True).start()
+    win = MainWindow()
+
+    def drop(mime):
+        win.source = None
+        win.handle_drop(mime)
+        for _ in range(200):
+            app.processEvents()
+            if win.source is not None or warnings:
+                return
+            time.sleep(0.02)
+
+    try:
+        win.tabs.setCurrentWidget(win.map_tab)            # any tab: pictures land on Sprite
+        web = QMimeData()
+        web.setUrls([QUrl(f"http://127.0.0.1:{server.server_port}/knight.png")])
+        web.setHtml(f'<img src="http://127.0.0.1:{server.server_port}/knight.png">')
+        drop(web)
+        assert win.source.shape == (30, 20, 4) and win.tabs.currentIndex() == 0
+        assert win.source_path == tmp_path / "dropped" / "knight.png"
+        raw = QMimeData()                                 # a browser that hands over the pixels
+        raw.setImageData(QImage(8, 6, QImage.Format_RGBA8888))
+        drop(raw)
+        assert win.source.shape == (6, 8, 4)
+        local = tmp_path / "photo.png"
+        Image.new("RGB", (9, 7), (10, 200, 10)).save(local)
+        files = QMimeData()
+        files.setUrls([QUrl.fromLocalFile(str(local))])
+        win.tabs.setCurrentWidget(win.directions_tab)     # a tool that takes files keeps them
+        win.handle_drop(files)
+        assert win.directions_tab.sources == [local]
+        gone = QMimeData()
+        gone.setUrls([QUrl(f"http://127.0.0.1:{server.server_port}/missing.png")])
+        drop(gone)
+        assert warnings and "wouldn't give the picture" in warnings[-1]
+    finally:
+        server.shutdown()

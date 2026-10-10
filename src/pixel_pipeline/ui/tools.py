@@ -102,8 +102,7 @@ class DirectionsTab(ToolTab):
         self.colours_from: Path | None = None
         self.sprites = None          # list[Sprite] (still) ...
         self.anim = None             # ... or AnimatedSet
-        self.clip_names: list[str] = []
-        self.setAcceptDrops(True)
+        self.clip_names: list[str] = []      # drops are handled by the main window (app.py)
 
         self.files = QListWidget()
         self.files.setMaximumHeight(110)
@@ -229,13 +228,6 @@ class DirectionsTab(ToolTab):
             self.autorig.setChecked(False)
         self.animate.setText(f"Play its animations ({', '.join(self.clip_names)})"
                              if self.clip_names else "Play its animations")
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        self.add_sources([Path(u.toLocalFile()) for u in event.mimeData().urls()])
 
     # ---- make / save
     def make(self):

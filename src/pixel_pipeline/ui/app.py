@@ -9,11 +9,12 @@ Run with:  pixel-pipeline-ui [photo]
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtCore import QBuffer, QIODevice, QStandardPaths, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QIcon, QImage, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGroupBox, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
@@ -33,6 +34,7 @@ from ..systems import SYSTEMS
 from ..video import ALIGN_MODES, video_to_sprites
 from .common import checkerboard, to_pixmap
 
+MODEL_EXTS = {".glb", ".gltf", ".obj", ".ply", ".stl"}
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.heic *.heif *.webp *.bmp *.tif *.tiff *.gif)"
 VIDEO_FILTER = "Videos (*.mp4 *.mov *.m4v *.avi *.webm *.mkv)"
 CUTOUT_MODELS = ["isnet-general-use", "u2net_human_seg", "birefnet-general-lite", "birefnet-general",
@@ -59,8 +61,11 @@ def _combo(items, editable=False):
 
 
 class MainWindow(QMainWindow):
+    _dropped = Signal(object)          # a picture fetched from a browser drop: Path, or an error
+
     def __init__(self):
         super().__init__()
+        self._dropped.connect(self._on_dropped)
         self.setWindowTitle("Pixel Pipeline")
         self.resize(1280, 820)
         self.setAcceptDrops(True)
@@ -92,7 +97,8 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self.updates.add_menu(self.menuBar())
         self.apply_preset("object")
-        self.statusBar().showMessage("Drop a photo onto the window, or File → Open (Ctrl+O)")
+        self.statusBar().showMessage("Drop a photo onto the window (from a folder or straight from "
+                                     "your browser), or File → Open (Ctrl+O)")
 
     # ---- layout ---------------------------------------------------------------
     def _build_controls(self):
@@ -177,7 +183,7 @@ class MainWindow(QMainWindow):
         self.palette.currentTextChanged.connect(self._palette_changed)
 
     def _build_views(self):
-        self.original_view = QLabel("Drop a photo here")
+        self.original_view = QLabel("Drop a photo here,\nfrom a folder or your browser")
         self.original_view.setAlignment(Qt.AlignCenter)
         self.original_view.setMinimumWidth(260)
         self.sprite_view = QLabel()
@@ -571,14 +577,109 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Export failed", str(e))
 
+    # ---- drops: files, or pictures straight from a web browser (ui/drops.py) -------------
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        mime = event.mimeData()
+        if mime.hasUrls() or mime.hasImage() or mime.hasHtml() or mime.hasText():
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        urls = event.mimeData().urls()
-        if urls:
-            self.open_path(Path(urls[0].toLocalFile()))
+        event.acceptProposedAction()
+        self.handle_drop(event.mimeData())
+
+    def handle_drop(self, mime):
+        from . import drops
+        files = [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
+        if files:
+            self.open_dropped(files)
+            return
+        dest = drop_folder()
+        data, name = _dropped_file(mime)
+        if data:                                  # the browser handed over the picture itself
+            try:
+                self.open_dropped([drops.save_picture(data, dest, name)])
+                return
+            except drops.DropError:
+                pass
+        sources = drops.web_sources([u.toString() for u in mime.urls()],
+                                    mime.html() if mime.hasHtml() else "",
+                                    mime.text() if mime.hasText() else "")
+        fallback = _dropped_image(mime)           # what the browser showed, as a last resort
+        if not sources and fallback is None:
+            self.statusBar().showMessage("Nothing to open there: drop a picture, a photo file or a 3D model.")
+            return
+        self.statusBar().showMessage("Getting the picture from the web…")
+
+        def work():
+            try:
+                result = drops.fetch(sources, dest)
+            except drops.DropError as e:
+                try:
+                    result = drops.save_picture(fallback, dest) if fallback else str(e)
+                except drops.DropError:
+                    result = str(e)
+            self._dropped.emit(result)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_dropped(self, result):
+        if isinstance(result, str):
+            self.statusBar().showMessage("")
+            QMessageBox.warning(self, "Couldn't get the picture", result)
+            return
+        self.open_dropped([result])
+        self.statusBar().showMessage(f"Saved the picture as {result}", 15000)
+
+    def open_dropped(self, paths: list[Path]):
+        """Dropped files go to the tool that's open (or the Sprite tab)."""
+        tab = self.tabs.currentWidget()
+        try:
+            if tab is self.directions_tab:
+                tab.add_sources(paths)
+            elif tab in (self.portrait_tab, self.teams_tab):
+                tab.open_path(paths[0])
+            elif tab is self.studio and paths[0].suffix.lower() in MODEL_EXTS:
+                self.studio.load_model(paths[0])
+            else:
+                self.tabs.setCurrentIndex(0)
+                self.open_path(paths[0])
+        except Exception as e:  # noqa: BLE001 - shown to the person
+            QMessageBox.warning(self, "Couldn't open that", f"{paths[0]}\n\n{e}")
+
+
+def drop_folder() -> Path:
+    """Where pictures dropped from a browser are saved: Pictures/Pixel Pipeline."""
+    pictures = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
+    return Path(pictures or Path.home()) / "Pixel Pipeline"
+
+
+def _dropped_file(mime) -> tuple[bytes, str]:
+    """The picture's own file, when the browser includes it: an image/* type, or on Windows the
+    "virtual file" Chrome and Edge attach to an image drag (name in FileGroupDescriptorW)."""
+    formats = mime.formats()
+    for fmt in formats:
+        if fmt in ("image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp") or \
+                fmt.endswith('"FileContents"'):
+            data = bytes(mime.data(fmt))
+            if data:
+                name = "web-picture"
+                desc = next((f for f in formats if f.endswith('"FileGroupDescriptorW"')), None)
+                if desc:
+                    raw = bytes(mime.data(desc))     # FILEGROUPDESCRIPTORW: the name is at byte 76
+                    name = Path(raw[76:596].decode("utf-16-le", "ignore").split("\0")[0]).stem or name
+                return data, name
+    return b"", ""
+
+
+def _dropped_image(mime) -> bytes | None:
+    if not mime.hasImage():
+        return None
+    image = mime.imageData()
+    if not isinstance(image, QImage) or image.isNull():
+        return None
+    buf = QBuffer()
+    buf.open(QIODevice.WriteOnly)
+    image.save(buf, "PNG")
+    return bytes(buf.data())
 
 
 def main(argv: list[str] | None = None) -> int:
