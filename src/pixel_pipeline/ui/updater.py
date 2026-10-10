@@ -69,7 +69,7 @@ class Build:
 
     @property
     def label(self) -> str:
-        return f"build {self.number} ({self.date[:10] or '?'}, {self.sha[:7] or '?'})"
+        return f"version {self.number} ({self.date[:10] or '?'}, {self.sha[:7] or '?'})"
 
 
 @dataclass

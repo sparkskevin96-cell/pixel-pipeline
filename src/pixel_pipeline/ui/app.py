@@ -88,8 +88,8 @@ class MainWindow(QMainWindow):
         from .update_ui import Updates
         from .updater import current_build
         build = current_build()
-        if build:
-            self.setWindowTitle(f"Pixel Pipeline (build {build.number})")
+        self.version = f"version {build.number}" if build else "from source"
+        self.setWindowTitle(f"Pixel Pipeline — {self.version}")
         self.updates = Updates(self)
 
         self._build_controls()
@@ -97,6 +97,11 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self.updates.add_menu(self.menuBar())
         self.apply_preset("object")
+        # Bottom-right corner: which version this is (the number in update messages).
+        self.version_label = QLabel(self.version[0].upper() + self.version[1:])
+        self.version_label.setToolTip(build.label if build else "Running from source")
+        self.version_label.setStyleSheet("padding:0 6px;font-weight:600;")
+        self.statusBar().addPermanentWidget(self.version_label)
         self.statusBar().showMessage("Drop a photo onto the window (from a folder or straight from "
                                      "your browser), or File → Open (Ctrl+O)")
 
@@ -525,7 +530,7 @@ class MainWindow(QMainWindow):
         self.source = rgba
         self.source_path = path
         self.alpha_cache = {}
-        self.setWindowTitle(f"pixel-pipeline — {path.name}")
+        self.setWindowTitle(f"Pixel Pipeline — {self.version} — {path.name}")
         self._show_original(self.source)
         self.render()
 

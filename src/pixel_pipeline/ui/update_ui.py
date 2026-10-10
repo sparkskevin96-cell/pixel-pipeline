@@ -137,14 +137,14 @@ class Updates(QObject):
         elif "--update-failed" in flags:
             from .crash import LOG_DIR
             QMessageBox.warning(self.win, TITLE, "The update didn't finish, so this is still the "
-                                f"old build. Details: {LOG_DIR / 'update.log'}")
+                                f"old version. Details: {LOG_DIR / 'update.log'}")
         if updater.can_update():
             QTimer.singleShot(3000, lambda: self.check(loud=False))
 
     def about(self):
         build = updater.current_build()
         QMessageBox.information(self.win, TITLE, f"Pixel Pipeline, {build.label}." if build else
-                                "Pixel Pipeline, running from source (no build number).")
+                                "Pixel Pipeline, running from source (no version number).")
 
     def ask_token(self, why: str = "") -> bool:
         if TokenDialog(self.win, why).exec() != QDialog.Accepted:

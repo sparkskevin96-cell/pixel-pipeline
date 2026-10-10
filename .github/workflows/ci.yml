@@ -144,8 +144,8 @@ jobs:
           gh api -X DELETE "repos/$GH_REPO/git/refs/tags/windows-latest" 2>/dev/null || true
           gh release create windows-latest PixelPipeline-windows.zip version.json \
             --prerelease --target "$GITHUB_SHA" \
-            --title "Pixel Pipeline for Windows (latest)" \
-            --notes "Newest build of the desktop app, commit ${GITHUB_SHA::7}.
+            --title "Pixel Pipeline for Windows, version $GITHUB_RUN_NUMBER" \
+            --notes "Version $GITHUB_RUN_NUMBER of the desktop app (shown in its bottom-right corner), commit ${GITHUB_SHA::7}.
 
           Download PixelPipeline-windows.zip, right-click > Extract All, open the PixelPipeline folder and run PixelPipeline.exe. It isn't signed, so SmartScreen warns: More info > Run anyway. It offers to install itself (desktop icon) and then updates itself."
           # What the app's update check sees (through the API, like with a token while private).

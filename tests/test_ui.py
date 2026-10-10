@@ -210,6 +210,10 @@ def test_updates_menu_prompts_and_tokens(app, tmp_path, monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", lambda *a: shown.append(a[2]))
     monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or 0)
     win = MainWindow()
+    assert win.version_label.text() == "From source"            # bottom-right corner
+    monkeypatch.setattr(updater, "current_build", lambda: Build(7, "abc1234", "2026-10-10"))
+    built = MainWindow()
+    assert built.version_label.text() == "Version 7" and "version 7" in built.windowTitle()
     help_menu = [a.menu() for a in win.menuBar().actions() if a.text() == "&Help"][0]
     assert "Check for &updates…" in [a.text() for a in help_menu.actions()]
     assert not update_ui.offer_install()                            # running from source

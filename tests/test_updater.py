@@ -92,7 +92,7 @@ def test_private_repo_needs_a_token_and_the_token_never_reaches_storage(github, 
         updater.latest("wrong", repo=REPO, api=github)
     rel = updater.latest(TOKEN, repo=REPO, api=github)
     assert rel.build == Build(7, "abc1234def", "2026-10-10T12:00:00Z")
-    assert rel.build.label == "build 7 (2026-10-10, abc1234)"
+    assert rel.build.label == "version 7 (2026-10-10, abc1234)"
     assert updater.is_newer(rel, Build(6)) and not updater.is_newer(rel, Build(7))
     assert not updater.is_newer(rel, None)                       # from source: never
     steps = []

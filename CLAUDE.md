@@ -178,6 +178,11 @@ fine-grained token (Contents: read) saved as "github" in keys.json; a public rep
 none. CI's "Update test" step updates a build-0 copy from the real zip; the publish step
 checks the release through the API.
 
+**Version number** = the CI run number of ci.yml (`build.json`), shown bottom-right in the
+app, in its title and in the release title. Kevin asked (2026-10-10): after every push that
+rebuilds the Windows app, wait for CI and tell him the new version number. Docs-only pushes
+don't rebuild (paths-ignore), so no new version then.
+
 Before the repo existed (2026-10-07..09), builds ran from branch `ccr-15172514-6ugcr0` of
 `sparkskevin96-cell/pawgress` (local branch `pawgress-build`), with pre-releases
 `pixel-pipeline-android-temp` and `pixel-pipeline-windows-temp` there. Cleaned up
