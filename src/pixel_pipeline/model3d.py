@@ -420,7 +420,12 @@ def has_colours(glb: bytes) -> bool:
     for m in meshes:
         kind = getattr(m.visual, "kind", None)
         if kind == "texture":
-            return True
+            # ComfyUI's SaveGLB adds a plain grey material with no image and no uvs: not colours
+            mat = getattr(m.visual, "material", None)
+            image = getattr(mat, "baseColorTexture", None) or getattr(mat, "image", None)
+            if image is not None and getattr(m.visual, "uv", None) is not None:
+                return True
+            continue
         if kind in ("vertex", "face"):
             cols = np.asarray(m.visual.vertex_colors if kind == "vertex" else m.visual.face_colors)
             if len(cols) and np.ptp(cols[:, :3], axis=0).max() > 8:

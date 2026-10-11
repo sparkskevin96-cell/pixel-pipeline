@@ -164,3 +164,21 @@ def test_mcp_prompt_to_model(comfy, tmp_path, monkeypatch):
     kinds = [getattr(c, "type", "") for c in content]
     assert kinds == ["text", "image", "image"]
     assert "(seed 9)" in content[0].text and (tmp_path / "hero_dirs.tres").exists()
+
+
+def test_plain_material_is_not_colours():
+    """ComfyUI's SaveGLB writes the shape with a grey PBR material (no image, no uvs): that
+    must still be painted from the picture."""
+    from pixel_pipeline.model3d import has_colours
+    box = trimesh.creation.box()
+    box.visual = trimesh.visual.TextureVisuals(
+        material=trimesh.visual.material.PBRMaterial(baseColorFactor=[56, 56, 56, 255]))
+    assert not has_colours(box.export(file_type="glb"))
+    painted = trimesh.creation.box()
+    painted.visual.vertex_colors = np.tile([[255, 0, 0, 255], [0, 0, 255, 255]], (4, 1))
+    assert has_colours(painted.export(file_type="glb"))
+    textured = trimesh.creation.box()
+    uv = np.random.default_rng(0).random((len(textured.vertices), 2))
+    tex = Image.fromarray(np.random.default_rng(1).integers(0, 255, (8, 8, 3), np.uint8))
+    textured.visual = trimesh.visual.TextureVisuals(uv=uv, image=tex)
+    assert has_colours(textured.export(file_type="glb"))
