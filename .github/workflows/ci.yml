@@ -1,7 +1,7 @@
 # Tests on Linux + Windows; on main (or by hand) also builds the Windows app.
-# Private repo, limited free minutes (Windows counts double), so: pushes only run on
-# main (PRs cover branches), docs-only changes are skipped, a newer push cancels an older
-# run, and the exe is only built for main / manual runs ("Run workflow" in the Actions tab).
+# Kept lean (minutes are free for this public repo, but it was private once and may be
+# again): pushes only run on main (PRs cover branches), docs-only changes are skipped, a
+# newer push cancels an older run, and the exe is only built for main / manual runs.
 name: CI
 
 on:
@@ -148,5 +148,5 @@ jobs:
             --notes "Version $GITHUB_RUN_NUMBER of the desktop app (shown in its bottom-right corner), commit ${GITHUB_SHA::7}.
 
           Download PixelPipeline-windows.zip, right-click > Extract All, open the PixelPipeline folder and run PixelPipeline.exe. It isn't signed, so SmartScreen warns: More info > Run anyway. It offers to install itself (desktop icon) and then updates itself."
-          # What the app's update check sees (through the API, like with a token while private).
+          # What the app's update check sees (through the API with a token, as for a private repo).
           python -c "import os; from pixel_pipeline.ui.updater import latest; r = latest(os.environ['GH_TOKEN'], repo=os.environ['GH_REPO']); print('The app sees', r.build.label, r.zip_size, 'bytes'); assert r.build.number == int(os.environ['GITHUB_RUN_NUMBER'])"

@@ -65,8 +65,9 @@ class TokenDialog(QDialog):
         self.setWindowTitle("GitHub token for updates")
         text = QLabel(
             (f"<p>{why}</p>" if why else "") +
-            "<p>The app's code is in a private GitHub repo, so to see new builds it needs a "
-            "read-only token from your GitHub account:</p><ol>"
+            "<p>Only needed if the app's GitHub repo is made private (it's public now, so "
+            "updates need nothing). A private repo only shows new versions to someone signed "
+            "in, so the app needs a read-only token from your GitHub account:</p><ol>"
             f'<li>Open <a href="{updater.TOKEN_URL}">GitHub → new token</a> (sign in if asked).</li>'
             "<li>Token name: <b>Pixel Pipeline updates</b>. Expiration: the longest it offers.</li>"
             "<li>Repository access: <b>Only select repositories</b> → <b>pixel-pipeline</b>.</li>"

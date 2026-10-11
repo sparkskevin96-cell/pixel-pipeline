@@ -25,10 +25,10 @@ no admin, with a desktop icon and a Start menu entry); after that the downloaded
 go. `pixel-pipeline.exe` in the same folder is the command line.
 
 **Updates:** a few seconds after it opens, the app checks the `windows-latest` release and
-asks to update when there's a newer build; it closes, swaps its files and opens again
-(Help → Check for updates does the same; the window title shows the build number). While
-the repo is private the check needs a read-only GitHub token: Help → Updates token walks
-through making one.
+asks to update when there's a newer version; it closes, swaps its files and opens again
+(Help → Check for updates does the same; the version number is in the bottom-right
+corner). The repo is public, so this needs no sign-in; if it's ever made private, Help →
+Updates token walks through making the read-only token the check then needs.
 
 **From source** (needed for GPU background removal and the MCP server). Install
 Python 3.11–3.13 from python.org, then in the repo folder:

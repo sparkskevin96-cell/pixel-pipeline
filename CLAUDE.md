@@ -158,11 +158,12 @@ wants terse answers and fixes over polish.
 - Images are numpy uint8 RGBA (H, W, 4); sprite alpha is binary (0/255).
 - Perceptual maths in Lab via `color.py`.
 - Run `pytest` before pushing; the UI test runs headless (`QT_QPA_PLATFORM=offscreen`).
-- Private repo with limited Actions minutes: keep workflows lean.
+- Keep workflows lean (Actions minutes are free while the repo is public).
 
 ## Repo and builds
 
-GitHub: `sparkskevin96-cell/pixel-pipeline` (private, created 2026-10-10). Pushes to `main`
+GitHub: `sparkskevin96-cell/pixel-pipeline` (created 2026-10-10 private, made **public**
+by Kevin 2026-10-11 so the app updates itself with no token). Pushes to `main`
 run CI (tests on Linux + Windows) and publish the Windows app as the `windows-latest`
 pre-release; changes under `mobile/` or `web/` publish the APK as `android-latest`. The
 Claude GitHub app can't dispatch workflows (403), so trigger by pushing.
@@ -173,9 +174,9 @@ uploads it as `version.json` on the release. A downloaded copy offers to install
 `%LOCALAPPDATA%\Programs\PixelPipeline` (+ desktop/Start menu shortcuts) or opens the
 installed copy if that's as new. Updating = download zip → unpack to
 `%LOCALAPPDATA%\PixelPipeline\update` → PowerShell script waits for the pid, robocopies
-(`_internal` mirrored) and restarts with `--updated`. Private repo => the check needs a
-fine-grained token (Contents: read) saved as "github" in keys.json; a public repo needs
-none. CI's "Update test" step updates a build-0 copy from the real zip; the publish step
+(`_internal` mirrored) and restarts with `--updated`. Public repo => no token. If it is ever made
+private again, the check needs a fine-grained token (Contents: read) saved as "github" in
+keys.json (Help → Updates token). CI's "Update test" step updates a build-0 copy from the real zip; the publish step
 checks the release through the API.
 
 **Version number** = the CI run number of ci.yml (`build.json`), shown bottom-right in the
