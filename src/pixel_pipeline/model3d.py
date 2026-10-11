@@ -304,6 +304,16 @@ class _View:
             cnt = cv2.dilate(inside, np.ones((5, 5), np.uint8))
             filled = np.where(inside[..., None] > 0, filled, grown)
             inside = cnt
+        # everything further out takes the nearest subject colour (was black: when the shape
+        # doesn't match the picture well, e.g. a turned head, whole parts land out here)
+        outside = (inside == 0).astype(np.uint8)
+        if outside.any() and not outside.all():
+            _, labels = cv2.distanceTransformWithLabels(outside, cv2.DIST_L2, 5,
+                                                        labelType=cv2.DIST_LABEL_PIXEL)
+            iy, ix = np.nonzero(outside == 0)
+            lut = np.zeros((int(labels.max()) + 1, 3), np.float32)
+            lut[labels[iy, ix]] = filled[iy, ix]
+            filled = np.where(outside[..., None] > 0, lut[labels], filled)
         self.blurred = filled
         # depth buffer from the dense samples: nearest = largest sign * z
         u, v = self.project(samples)

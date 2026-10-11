@@ -182,3 +182,15 @@ def test_plain_material_is_not_colours():
     tex = Image.fromarray(np.random.default_rng(1).integers(0, 255, (8, 8, 3), np.uint8))
     textured.visual = trimesh.visual.TextureVisuals(uv=uv, image=tex)
     assert has_colours(textured.export(file_type="glb"))
+
+
+def test_parts_outside_the_picture_take_the_nearest_colour_not_black():
+    """A shape that doesn't match its picture (e.g. a turned head) must not come out black
+    where it reaches past the picture's outline."""
+    from pixel_pipeline.model3d import paint_from_picture
+    cube = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    pic = np.zeros((256, 256, 4), np.uint8)
+    pic[40:216, 126:130] = (200, 40, 40, 255)         # outline much narrower than the shape
+    mesh, _ = paint_from_picture(cube, pic, samples=40_000)
+    cols = np.asarray(mesh.visual.vertex_colors)[:, :3].astype(int)
+    assert (cols.max(1) < 40).mean() == 0
