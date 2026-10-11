@@ -491,6 +491,16 @@ def test_auto_picks_similar_default_models(comfy):
         generate_sprite("a fox", settings_for("animal"), client=client, checkpoint="my_model.safetensors")
 
 
+def test_fp16_fix_vae_used_when_installed(comfy):
+    fake, client = comfy
+    generate_sprite("a fox", settings_for("animal"), client=client, seed=3)
+    (_, vl), = by_class(fake.prompts[0], "VAELoader")
+    assert vl["inputs"]["vae_name"] == "sdxl_vae.safetensors"
+    fake.models["vae"] = []                             # not installed: the checkpoint's own VAE
+    generate_sprite("a fox", settings_for("animal"), client=client, seed=3)
+    assert not by_class(fake.prompts[1], "VAELoader")
+
+
 def test_execution_error_out_of_memory(comfy):
     fake, client = comfy
     fake.fail_with = {"node_id": "10", "node_type": "KSampler", "exception_type": "torch.OutOfMemoryError",

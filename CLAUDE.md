@@ -3,7 +3,7 @@
 Kevin "spark" Sparks's personal game-dev tool: photos and phone videos → pixel-art
 sprites, animations, sheets, tilesets, `.aseprite`, Godot resources. Separate from
 Pawgress. Kevin has a game-dev / pixel-art background, uses **Godot**, owns
-**Aseprite**, works on Windows (RTX 4080 Laptop, 12 GB VRAM) and an Android phone. He
+**Aseprite**, works on Windows (RTX 4070 Laptop, 8 GB VRAM; corrected 2026-10-11, earlier notes said 4080/12 GB) and an Android phone. He
 wants terse answers and fixes over polish.
 
 ## Decisions (2026-10-07)
@@ -12,7 +12,7 @@ wants terse answers and fixes over polish.
   and its output always goes back through the converter (or the palette snap) so it lands on
   the exact grid and palette. PixelLab vs Retro Diffusion comparison is built (Prompt tab),
   prompt-only by Kevin's choice; he runs it with his own keys. Local models
-  (Qwen-Image-Edit / Flux Kontext via ComfyUI) fit his 12 GB GPU.
+  (Qwen-Image-Edit / Flux Kontext via ComfyUI) need fp8/GGUF on his 8 GB GPU.
 - **Desktop app, Python + Qt (PySide6).** Windows first.
 - **No PyTorch in the core.** PixelOE's algorithm is reimplemented in numpy/OpenCV
   (`pixelize.py`, credited in THIRD_PARTY_NOTICES).
@@ -129,8 +129,10 @@ wants terse answers and fixes over polish.
   artifact `sample` capability, which is hidden in the APK. (2) Local GPU: `generate.py`
   (ComfyUI HTTP client, SDXL + Pixel Art XL LoRA; setup in `docs/LOCAL_AI.md`), CLI
   `generate`, MCP `generate_sprite`, desktop File → Generate. (3) The mix: Claude
-  sketches with `draw_sprite`, then `generate_sprite(init_image=...)`. Never verified on a
-  real GPU from the cloud container, so Kevin's first run is the real test.
+  sketches with `draw_sprite`, then `generate_sprite(init_image=...)`. Verified on Kevin's
+  laptop 2026-10-11: ComfyUI 0.39.0 portable at `C:\AI\ComfyUI_windows_portable` (start
+  `run_nvidia_gpu.bat`) with SDXL base + Pixel Art XL + fp16-fix VAE (used automatically when
+  installed); 2 sprites in 53 s including the first model load. No LCM LoRA yet.
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

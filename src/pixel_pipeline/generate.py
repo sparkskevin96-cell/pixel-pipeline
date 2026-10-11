@@ -805,6 +805,11 @@ def _models(client: ComfyClient, opts: GenOptions, needed: set[str]) -> dict:
         out["lcm_lora"] = find("loras", opts.lcm_lora, DEFAULT_LCM_LORA)
     if "vae" in needed and opts.vae:
         out["vae"] = find("vae", opts.vae, None)
+    elif "vae" in needed and opts.auto_models:
+        # The fp16-fix VAE avoids speckles when SDXL runs in fp16; use it whenever it's installed.
+        cache["vae"] = client.list_models("vae")
+        out["vae"] = next((n for n in cache["vae"] if "sdxl_vae" in n.replace("\\", "/").lower()
+                           or "fp16-fix" in n.lower()), None)
     return out
 
 

@@ -1,7 +1,7 @@
 # Local AI: type a prompt, get a sprite (your GPU, free)
 
 ```
-"a knight with a red cape" ──► ComfyUI on your RTX 4080 ──► 1024 px picture ──► converter ──► 24x32 SNES sprite
+"a knight with a red cape" ──► ComfyUI on your RTX 4070 ──► 1024 px picture ──► converter ──► 24x32 SNES sprite
                                (SDXL + Pixel Art XL LoRA)                     (cut-out, grid, palette, outline)
 ```
 
@@ -111,10 +111,10 @@ refiner, and it works for isometric and side-on art. The LoRA draws "pixels" abo
 screen-pixels wide (128x128 logical at 1024²). The converter then picks your real size and
 palette.
 
-## Speed and VRAM (RTX 4080 Laptop, 12 GB)
+## Speed and VRAM (RTX 4070 Laptop, 8 GB)
 
 - SDXL in fp16 uses about 7 GB of VRAM plus 1–2 GB working memory at 1024x1024, which
-  fits in 12 GB. ComfyUI loads and unloads models by itself.
+  is tight in 8 GB: ComfyUI offloads part of the model to RAM by itself (slower, still works). Use the fp16-fix VAE.
 - The first image after starting ComfyUI takes about 20–60 s (loading 7 GB from disk). After
   that, expect roughly **6–12 s per image** at 25 steps and **2–4 s with `--fast`**. These are
   estimates; the first runs will tell. Plug the laptop in: on battery the GPU is throttled hard.
@@ -192,10 +192,10 @@ their own docs and community reports.
 
 | Option | Runs on | VRAM | Colours | Notes |
 |---|---|---|---|---|
-| **Stable Fast 3D** (Stability AI) | your 4080 | ~6 GB | textured | Under a second per model. Free licence under $1M yearly revenue. Gated download on Hugging Face (accept the terms first). |
-| **TripoSR** | your 4080 | ~6 GB | vertex colours | MIT licence. Lowest detail, fine at sprite sizes. |
-| **Hunyuan3D 2.1** | your 4080 for shape only | ~10 GB shape, ~21 GB texture | shape: none | Best shapes. Native ComfyUI nodes do the shape; texturing needs a bigger GPU or a low-VRAM fork. An untextured model still renders (grey, shaded), useful for a silhouette you recolour. |
-| **TRELLIS.2** (Microsoft) | 16–24 GB GPU or cloud | 16 GB+ | PBR | Top quality, too big for 12 GB without heavy offloading. |
+| **Stable Fast 3D** (Stability AI) | your 4070 | ~6 GB | textured | Under a second per model. Free licence under $1M yearly revenue. Gated download on Hugging Face (accept the terms first). |
+| **TripoSR** | your 4070 | ~6 GB | vertex colours | MIT licence. Lowest detail, fine at sprite sizes. |
+| **Hunyuan3D 2.1** | needs ~10 GB: over the 4070's 8 GB | ~10 GB shape, ~21 GB texture | shape: none | Best shapes. Native ComfyUI nodes do the shape; texturing needs a bigger GPU or a low-VRAM fork. An untextured model still renders (grey, shaded), useful for a silhouette you recolour. |
+| **TRELLIS.2** (Microsoft) | 16–24 GB GPU or cloud | 16 GB+ | PBR | Top quality, too big for 8 GB without heavy offloading. |
 | **Tripo, Meshy, Hunyuan3D web demo** | online | none | textured | Free tiers; upload the picture, download the `.glb`. Quickest way to try the pipeline today. |
 
 Tips:
@@ -223,7 +223,7 @@ changes:
 
 Starting points: `tools/comfyui/sdxl_pixel_art_txt2img.json` and `sdxl_pixel_art_img2img.json`
 (the built-in workflow as templates). The workflow must end in a **Save Image** (or Preview Image)
-node. Flux / Qwen-Image need their own model files (in `models\diffusion_models` etc.). In 12 GB,
+node. Flux / Qwen-Image need their own model files (in `models\diffusion_models` etc.). In 8 GB,
 use the fp8 or GGUF versions.
 
 ## Licences (short version, not legal advice)
