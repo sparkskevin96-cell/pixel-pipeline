@@ -233,6 +233,20 @@ def test_prompt_tab(services, tmp_path):
     assert win.tabs.currentIndex() == 0 and win.source is not None and win.sprite is not None
 
 
+def test_prompt_tab_defaults_to_the_gpu(services):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    from pixel_pipeline.ui.tools import PromptTab
+    tab = PromptTab(None)                               # no keys saved: only the free GPU
+    assert tab.use_gpu.isChecked() and not tab.use_pl.isChecked() and not tab.use_rd.isChecked()
+    save_keys({"pixellab": "pl-key"})
+    tab = PromptTab(None)
+    assert tab.use_gpu.isChecked() and tab.use_pl.isChecked() and not tab.use_rd.isChecked()
+
+
 def test_mcp_online_sprites(services, tmp_path):
     import asyncio
     pytest.importorskip("mcp")

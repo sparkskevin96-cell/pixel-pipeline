@@ -867,8 +867,10 @@ class PromptTab(ToolTab):
         wl.addRow(self.options)
         wl.addRow("Seed", self.seed)
 
+        from ..online import load_keys
+        keys = load_keys()                 # paid services start ticked only with a key; the GPU always
         self.use_pl = QCheckBox("PixelLab")
-        self.use_pl.setChecked(True)
+        self.use_pl.setChecked(bool(keys.get("pixellab")))
         self.pl_model = QComboBox()
         self.pl_model.addItems(list(PIXELLAB_MODELS))
         self.pl_model.setToolTip("pixen = fast, pixflux / bitforge = classic, pro = best (slower)")
@@ -877,13 +879,14 @@ class PromptTab(ToolTab):
         self.pl_dir = QComboBox()
         self.pl_dir.addItems(["any direction", *PIXELLAB_DIRECTIONS])
         self.use_rd = QCheckBox("Retro Diffusion")
-        self.use_rd.setChecked(True)
+        self.use_rd.setChecked(bool(keys.get("retrodiffusion")))
         self.rd_style = QComboBox()
         self.rd_style.setEditable(True)
         self.rd_style.addItems(list(RD_STYLES))
         self.rd_style.setToolTip("rd_fast $0.03, rd_plus $0.06, rd_pro $0.18 per image. "
                                  "fast/plus draw at 64 px or more (small sprites are made 2x)")
         self.use_gpu = QCheckBox("Your GPU (ComfyUI, free)")
+        self.use_gpu.setChecked(True)
         keys_btn = QPushButton("Keys…")
         keys_btn.clicked.connect(lambda: KeysDialog(self).exec())
         who = QGroupBox("Who makes it")
