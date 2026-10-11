@@ -181,7 +181,7 @@ def shape_from_picture(picture: Image.Image, *, client: ComfyClient | None = Non
     """Front picture (subject on white) -> 3D model file bytes (.glb) from ComfyUI."""
     o = options or ShapeOptions()
     client = client or ComfyClient()
-    client.ping()
+    client.ensure_running()
     name = client.upload_image(picture)
     seed = random.randrange(2**32) if seed is None else int(seed)
     if o.template:

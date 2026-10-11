@@ -37,9 +37,17 @@ works if you name it, e.g. `--checkpoint juggernautXL.safetensors`.
 
 ## 3. Start ComfyUI
 
-Double-click **`run_nvidia_gpu.bat`** in `ComfyUI_windows_portable`. Wait until the console
-says `To see the GUI go to: http://127.0.0.1:8188`, and **leave that window open** while
-you generate. If Windows Firewall asks, "Private networks" is enough (it's local only).
+Nothing to do: when you generate and nothing answers at `http://127.0.0.1:8188`, pixel-pipeline
+starts ComfyUI itself, hidden (no window), and stops it again when the app closes (frees ~7 GB of
+VRAM). It finds `ComfyUI_windows_portable` in `C:\AI`, `C:\`, your home folder, Downloads,
+Desktop or Documents; elsewhere, set `COMFYUI_DIR` to that folder. It runs the python line of
+`run_nvidia_gpu.bat` (so flags you add there, e.g. `--lowvram`, still apply) without opening a
+browser tab. ComfyUI's output goes to `~/.pixel-pipeline/comfyui.log`. The first sprite after
+starting takes 20-60 s longer (loading the model).
+
+To keep ComfyUI running yourself (e.g. to use its browser UI), double-click
+**`run_nvidia_gpu.bat`** and leave that window open; pixel-pipeline uses it and never closes it.
+If Windows Firewall asks, "Private networks" is enough (it's local only).
 
 Optional sanity check: open that address in a browser, pick `sd_xl_base_1.0` in the
 "Load Checkpoint" box and press **Run**. You should get a picture after a few seconds.

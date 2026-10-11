@@ -132,7 +132,10 @@ wants terse answers and fixes over polish.
   sketches with `draw_sprite`, then `generate_sprite(init_image=...)`. Verified on Kevin's
   laptop 2026-10-11: ComfyUI 0.39.0 portable at `C:\AI\ComfyUI_windows_portable` (start
   `run_nvidia_gpu.bat`) with SDXL base + Pixel Art XL + fp16-fix VAE (used automatically when
-  installed); 2 sprites in 53 s including the first model load. No LCM LoRA yet.
+  installed); 2 sprites in 53 s including the first model load. No LCM LoRA yet. Kevin asked
+  (2026-10-11) for no ComfyUI window: `ComfyClient.ensure_running` starts it hidden
+  (CREATE_NO_WINDOW, log ~/.pixel-pipeline/comfyui.log) only at the default address, and
+  atexit stops only processes we started (`start_comfyui` / `stop_started_comfyui`).
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

@@ -165,6 +165,82 @@ def _missing_hint(kind: str, name: str, installed: list[str]) -> str:
             f"Installed {kind}: {_list_text(installed)}.")
 
 
+# --------------------------------------------------------------------------- start-up
+
+DIR_ENV = "COMFYUI_DIR"   # folder holding run_nvidia_gpu.bat (ComfyUI_windows_portable)
+
+
+def find_comfyui() -> Path | None:
+    """The ComfyUI portable folder: $COMFYUI_DIR, else the usual places. None = not found."""
+    home = Path.home()
+    places = [os.environ.get(DIR_ENV)] + [str(p / "ComfyUI_windows_portable") for p in (
+        Path(r"C:\AI"), Path("C:\\"), home, home / "Downloads", home / "Desktop",
+        home / "OneDrive" / "Desktop", home / "Documents")]
+    for place in places:
+        if place and (Path(place) / "run_nvidia_gpu.bat").is_file():
+            return Path(place)
+    return None
+
+
+def comfyui_command(folder: Path) -> list[str]:
+    """The python line of run_nvidia_gpu.bat (keeps flags such as --lowvram), without
+    the browser tab it opens."""
+    args = ["-s", r"ComfyUI\main.py", "--windows-standalone-build"]
+    try:
+        for line in (folder / "run_nvidia_gpu.bat").read_text(errors="replace").splitlines():
+            if "main.py" in line and "python" in line.lower():
+                args = line.split()[1:]
+                break
+    except OSError:
+        pass
+    if "--disable-auto-launch" not in args:
+        args.append("--disable-auto-launch")
+    return [str(folder / "python_embeded" / "python.exe"), *args]
+
+
+COMFYUI_LOG = Path.home() / ".pixel-pipeline" / "comfyui.log"
+_started: list = []        # ComfyUI processes we started; stopped when we exit
+
+
+def start_comfyui(folder: Path):
+    """Start ComfyUI hidden (no window), output to COMFYUI_LOG. It is stopped when this
+    program exits; a ComfyUI you started yourself is never touched."""
+    import atexit
+    import subprocess
+    COMFYUI_LOG.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(COMFYUI_LOG, "wb")  # noqa: SIM115 - the child writes to it while running
+    kw: dict[str, Any] = {"cwd": str(folder), "stdout": log_file, "stderr": subprocess.STDOUT,
+                          "stdin": subprocess.DEVNULL}
+    if os.name == "nt":
+        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+    proc = subprocess.Popen(comfyui_command(folder), **kw)
+    log_file.close()
+    if not _started:
+        atexit.register(stop_started_comfyui)
+    _started.append(proc)
+    return proc
+
+
+def stop_started_comfyui() -> None:
+    """Stop the ComfyUI processes start_comfyui started (frees the GPU memory)."""
+    while _started:
+        proc = _started.pop()
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(10)
+            except Exception:  # noqa: BLE001
+                proc.kill()
+
+
+def _log_tail(lines: int = 6) -> str:
+    try:
+        text = COMFYUI_LOG.read_text(errors="replace").strip().splitlines()
+    except OSError:
+        return ""
+    return "\n".join(text[-lines:])
+
+
 # --------------------------------------------------------------------------- client
 
 class ComfyClient:
@@ -238,6 +314,33 @@ class ComfyClient:
         if not isinstance(stats, dict) or "system" not in stats:
             raise ComfyUIUnavailable(f"Something answered at {self.base_url} but it isn't ComfyUI.")
         return stats
+
+    def ensure_running(self, wait: float = 240.0, say=None) -> dict:
+        """ping(), but if nothing answers at the default address, start the installed
+        ComfyUI portable (find_comfyui) hidden in the background and wait for it."""
+        try:
+            return self.ping()
+        except ComfyUIUnavailable:
+            if self.base_url.replace("localhost", "127.0.0.1") != DEFAULT_URL:
+                raise
+            folder = find_comfyui()
+            if folder is None:
+                raise
+        (say or log.info)(f"Starting ComfyUI from {folder}…")
+        proc = start_comfyui(folder)
+        deadline = time.monotonic() + wait
+        while True:
+            time.sleep(2)
+            try:
+                return self.ping()
+            except ComfyUIUnavailable:
+                ended = proc is not None and proc.poll() is not None
+                if ended or time.monotonic() > deadline:
+                    why = "stopped" if ended else f"didn't answer within {wait:.0f} s"
+                    tail = _log_tail()
+                    raise ComfyUIUnavailable(
+                        f"Started ComfyUI from {folder} but it {why}. Its output is in "
+                        f"{COMFYUI_LOG}" + (f"; last lines:\n{tail}" if tail else ".")) from None
 
     def list_models(self, kind: str) -> list[str]:
         """Installed model files in a folder: checkpoints, loras, vae, diffusion_models, ..."""
@@ -839,7 +942,7 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
             raise ValueError("This workflow template is img2img ({{image}}): give it an init image.")
 
     client = client or ComfyClient()
-    client.ping()
+    client.ensure_running()
     init = load_image(init_image) if init_image is not None else None
     if init is not None and aspect is None:
         aspect = init.shape[1] / init.shape[0]

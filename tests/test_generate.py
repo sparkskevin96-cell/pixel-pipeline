@@ -10,6 +10,7 @@ import io
 import json
 import socket
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -438,6 +439,58 @@ def test_comfyui_not_running():
         client.ping()
     with pytest.raises(ComfyUIUnavailable, match=f"isn't running at http://127.0.0.1:{port}"):
         generate_sprite("a fox", settings_for("animal"), client=client)
+
+
+def test_comfyui_folder_and_command(tmp_path, monkeypatch):
+    from pixel_pipeline.generate import comfyui_command, find_comfyui
+    (tmp_path / "run_nvidia_gpu.bat").write_text(
+        ".\\python_embeded\\python.exe -s ComfyUI\\main.py --windows-standalone-build --lowvram\r\npause\r\n")
+    monkeypatch.setenv("COMFYUI_DIR", str(tmp_path))
+    assert find_comfyui() == tmp_path
+    cmd = comfyui_command(tmp_path)
+    assert cmd[0].endswith("python.exe") and cmd[1:] == [
+        "-s", "ComfyUI\\main.py", "--windows-standalone-build", "--lowvram", "--disable-auto-launch"]
+
+
+def test_ensure_running_starts_comfyui_at_the_default_address(comfy, tmp_path, monkeypatch):
+    import pixel_pipeline.generate as g
+    _, running = comfy
+    started = []
+    monkeypatch.setattr(g, "find_comfyui", lambda: tmp_path)
+    monkeypatch.setattr(g, "start_comfyui", started.append)
+    monkeypatch.setattr(g.time, "sleep", lambda s: None)
+    client = ComfyClient(g.DEFAULT_URL, timeout=2)
+    real_ping, calls = ComfyClient.ping, []
+
+    def ping(self):                      # down until started, then the fake server answers
+        calls.append(1)
+        if not started:
+            raise ComfyUIUnavailable("down")
+        return real_ping(running)
+    monkeypatch.setattr(ComfyClient, "ping", ping)
+    assert "system" in client.ensure_running()
+    assert started == [tmp_path]
+    # any other address is never started
+    other = ComfyClient("http://127.0.0.1:8000")
+    started.clear()
+    with pytest.raises(ComfyUIUnavailable):
+        other.ensure_running()
+    assert not started
+
+
+def test_started_comfyui_is_hidden_logged_and_stopped(tmp_path, monkeypatch):
+    import sys
+    import pixel_pipeline.generate as g
+    monkeypatch.setattr(g, "COMFYUI_LOG", tmp_path / "comfyui.log")
+    monkeypatch.setattr(g, "comfyui_command", lambda folder: [
+        sys.executable, "-c", "import time; print('hello from comfy', flush=True); time.sleep(60)"])
+    proc = g.start_comfyui(tmp_path)
+    deadline = time.monotonic() + 20
+    while "hello from comfy" not in g._log_tail() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert "hello from comfy" in g._log_tail() and proc.poll() is None
+    g.stop_started_comfyui()
+    assert proc.poll() is not None and not g._started
 
 
 def test_env_var_sets_url(monkeypatch):
