@@ -443,6 +443,112 @@ def has_colours(glb: bytes) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------- only these colours
+
+COLOUR_NAMES = {
+    "black": (28, 28, 32), "white": (238, 238, 236), "grey": (128, 128, 130),
+    "gray": (128, 128, 130), "dark grey": (70, 70, 74), "light grey": (180, 180, 182),
+    "brown": (110, 70, 42), "dark brown": (62, 40, 26), "tan": (196, 158, 110),
+    "cream": (238, 224, 194), "gold": (212, 160, 60), "red": (190, 40, 40),
+    "orange": (226, 120, 40), "yellow": (236, 204, 60), "pink": (205, 110, 125),
+    "green": (60, 140, 60), "blue": (50, 90, 190), "purple": (120, 60, 160),
+}
+
+
+def parse_colours(spec) -> np.ndarray:
+    """'black, white' / '#1c1c20 #eeeeec' / names and hex mixed -> (n, 3) uint8."""
+    if isinstance(spec, np.ndarray):
+        return spec.astype(np.uint8).reshape(-1, 3)
+    out = []
+    for part in str(spec).replace(";", ",").split(","):
+        word = " ".join(part.lower().split())
+        if not word:
+            continue
+        if word in COLOUR_NAMES:
+            out.append(COLOUR_NAMES[word])
+            continue
+        hexes = word.split()
+        if all(len(h.lstrip("#")) == 6 for h in hexes):
+            try:
+                out += [tuple(int(h.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)) for h in hexes]
+                continue
+            except ValueError:
+                pass
+        raise ValueError(f"Unknown colour '{part.strip()}'. Use names ({', '.join(COLOUR_NAMES)}) "
+                         "or hex like #1c1c20, separated by commas.")
+    if not out:
+        raise ValueError("Give at least one colour, e.g. 'black, white'.")
+    return np.array(out, np.uint8)
+
+
+def _nearest(rgb: np.ndarray, palette: np.ndarray, stretch: bool = False) -> np.ndarray:
+    """Index of the nearest palette colour (Lab). stretch: first map the colours' lightness
+    range (2nd-98th percentile) onto the palette's, so a white dog in shade still reads
+    white and black fur in sun still reads black."""
+    from .color import rgb_to_lab
+    lab = rgb_to_lab(rgb.reshape(-1, 3).astype(np.float32))
+    pal = rgb_to_lab(palette.astype(np.float32))
+    if stretch and len(pal) > 1 and len(lab) > 1:
+        lo, hi = np.percentile(lab[:, 0], [2, 98])
+        if hi - lo > 1:
+            lab[:, 0] = pal[:, 0].min() + (lab[:, 0] - lo) / (hi - lo) * np.ptp(pal[:, 0])
+    return np.argmin(((lab[:, None] - pal[None]) ** 2).sum(-1), 1)
+
+
+def picture_to_colours(rgba: np.ndarray, palette, speck: float = 0.015) -> np.ndarray:
+    """The picture in only these colours, without specks thinner than `speck` of the
+    subject's height (sun glare on fur, stray hairs); they take the nearest colour around."""
+    pal = parse_colours(palette)
+    out = rgba.copy()
+    inside = rgba[..., 3] >= 128
+    if not inside.any():
+        return out
+    label = np.full(inside.shape, -1, np.int32)
+    label[inside] = _nearest(rgba[..., :3][inside], pal, stretch=True)
+    ys = np.nonzero(inside)[0]
+    k = max(3, int(speck * (ys.max() - ys.min() + 1)) | 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    kept = np.full(inside.shape, -1, np.int32)
+    for i in range(len(pal)):
+        mask = cv2.morphologyEx((label == i).astype(np.uint8), cv2.MORPH_OPEN, kernel)
+        kept[(mask > 0) & inside] = i
+    lost = inside & (kept < 0)
+    if lost.any() and (kept >= 0).any():
+        _, near = cv2.distanceTransformWithLabels((kept < 0).astype(np.uint8), cv2.DIST_L2, 5,
+                                                  labelType=cv2.DIST_LABEL_PIXEL)
+        ky, kx = np.nonzero(kept >= 0)
+        lut = np.zeros(int(near.max()) + 1, np.int32)
+        lut[near[ky, kx]] = kept[ky, kx]
+        kept[lost] = lut[near[lost]]
+    elif lost.any():
+        kept[lost] = label[lost]
+    out[..., :3][inside] = pal[kept[inside]]
+    return out
+
+
+def snap_to_colours(mesh, palette, rounds: int = 6):
+    """Every vertex to the nearest of these colours, then lone specks to the colour most of
+    their neighbours have (blurred guesses on hidden sides would otherwise be in-betweens)."""
+    pal = parse_colours(palette)
+    cols = np.asarray(mesh.visual.vertex_colors)[:, :3]
+    label = _nearest(cols, pal)
+    edges = np.asarray(mesh.edges_unique)
+    if len(edges) and len(pal) > 1:
+        a, b = edges[:, 0], edges[:, 1]
+        n = len(label)
+        for _ in range(rounds):
+            votes = np.zeros((n, len(pal)))
+            np.add.at(votes, (a, label[b]), 1)
+            np.add.at(votes, (b, label[a]), 1)
+            total = votes.sum(1)
+            best = votes.argmax(1)
+            sure = (total > 0) & (votes[np.arange(n), best] >= 0.6 * total)
+            label = np.where(sure, best, label)
+    rgba = np.concatenate([pal[label], np.full((len(label), 1), 255, np.uint8)], 1)
+    mesh.visual = _trimesh().visual.ColorVisuals(mesh, vertex_colors=rgba)
+    return mesh
+
+
 # --------------------------------------------------------------------------- all together
 
 def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
@@ -450,11 +556,14 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
                     shape: bytes | str | Path | None = None, client: ComfyClient | None = None,
                     seed: int | None = None, shape_options: ShapeOptions | None = None,
                     cutout_model: str = "isnet-general-use", progress=None,
-                    **gen_opts) -> ModelResult:
+                    mirror_back: bool = False, colours=None, **gen_opts) -> ModelResult:
     """Prompt (or a picture, or a picture + a ready shape) -> coloured .glb.
 
     Writes <out>.glb (coloured), <out>.front.png (the picture) and <out>.shape.glb (the
-    shape as ComfyUI made it). progress(step, text) is called as each step starts."""
+    shape as ComfyUI made it). progress(step, text) is called as each step starts.
+    mirror_back: no back picture -> paint the far side from the picture mirrored (animals
+    and people seen from the side, marked about the same on both sides). colours: only
+    these colours ('black, white', hex), e.g. a black-and-white dog photographed in shade."""
     out = Path(out_glb)
     out.parent.mkdir(parents=True, exist_ok=True)
     say = progress or (lambda step, text: log.info("%s: %s", step, text))
@@ -470,6 +579,13 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
     pic_path = out.with_suffix(".front.png")
     Image.fromarray(rgba).save(pic_path)
     back_rgba = cut_out(back, cutout_model) if back is not None else None
+    if back_rgba is None and mirror_back:
+        back_rgba = np.ascontiguousarray(rgba[:, ::-1])
+    paint_rgba = rgba
+    if colours is not None:
+        paint_rgba = picture_to_colours(rgba, colours)
+        if back_rgba is not None:
+            back_rgba = picture_to_colours(back_rgba, colours)
 
     raw_path = None
     if shape is None:
@@ -486,9 +602,11 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
         out.write_bytes(glb)
     else:
         say("colour", "Painting the model from the picture…")
-        mesh, match = paint_from_picture(glb, rgba, back_rgba)
+        mesh, match = paint_from_picture(glb, paint_rgba, back_rgba)
         if match < 0.5:
             say("colour", f"Warning: the shape only matches the picture {match:.0%}.")
+        if colours is not None:
+            mesh = snap_to_colours(mesh, colours)
         mesh.export(out)
     return ModelResult(out, pic_path, raw_path, used_seed)
 

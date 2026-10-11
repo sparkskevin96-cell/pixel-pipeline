@@ -161,14 +161,29 @@ Setup (once, on top of steps 1–3 above):
    pixel-pipeline model "a knight with a red cape" -o knight.glb --directions 16 --godot --aseprite
    pixel-pipeline model --image my_drawing.png -o hero.glb          # your own front picture
    pixel-pipeline model --image front.png --back back.png -o hero.glb  # better colours behind
+   pixel-pipeline model --image dog.jpg -s animal --mirror-back --colours "black, white" -o dog.glb
    ```
 
-How it works and what to expect (not yet timed on your laptop):
+**Your own photo (a pet, say).** In the app: **From a picture…** cuts the subject out, then
+opens **Clean up the picture**: rub out what isn't the subject (a leash, a hand, the couch) and
+bring back anything the cut-out lost, then **Build the model**. A side-on photo with all four
+legs (or the whole body) visible works best. Options above the panels:
+- **Back picture…**: a photo of the other side. No such photo? Tick **mirror the front**: the
+  far side is painted from the picture mirrored (fine when the markings are about the same).
+- **Only these colours** (`--colours`): e.g. `black, white` or hex. The picture is snapped to
+  them (its brightness range stretched first, so white fur in shade still reads white) and thin
+  specks such as sun glare or stray hairs are removed; then every point of the model is snapped
+  too. Names: black, white, grey, dark grey, light grey, brown, dark brown, tan, cream, gold,
+  red, orange, yellow, pink, green, blue, purple.
+- **Repaint** paints the same shape again with changed options, without the GPU (~15 s).
+  **Clean up picture…** edits the picture again and builds a new shape.
+
+How it works and what to expect (RTX 4070 8 GB: picture ~10 s, shape under 2 min, colour ~15 s):
 - **Picture** (~10 s): SDXL **without** the pixel-art LoRA, prompted for one whole subject
   facing the viewer on plain white with even light. Clean pictures rebuild best.
 - **Shape** (likely 1–3 min): Hunyuan3D 2.1, wired exactly like ComfyUI's own "Image to Model
-  (Hunyuan3d 2.1)" template (30 steps, cfg 5, octree 256). About 10 GB of VRAM, so close games
-  and other GPU apps first. `--octree 192` is lighter, `384` more detailed.
+  (Hunyuan3d 2.1)" template (30 steps, cfg 5, octree 256). About 10 GB of VRAM; on the 8 GB
+  4070 ComfyUI offloads part of it and it still finishes in under 2 minutes. Close games first. `--octree 192` is lighter, `384` more detailed.
 - **Colour** (CPU, ~10–40 s): Hunyuan's own texture step needs ~21 GB, so the tool paints the
   shape itself: the picture goes onto everything the front view shows (it finds the model's
   orientation by matching outlines), and the back gets a blurred version of the front

@@ -297,3 +297,56 @@ def test_drops_from_a_browser_or_a_folder(app, tmp_path, monkeypatch):
         assert warnings and "wouldn't give the picture" in warnings[-1]
     finally:
         server.shutdown()
+
+
+def test_model_studio_clean_up_colours_and_repaint(app, tmp_path, monkeypatch):
+    trimesh = pytest.importorskip("trimesh")
+    from PIL import Image
+
+    import pixel_pipeline.model3d as model3d
+    from pixel_pipeline.ui import picture_editor
+    from pixel_pipeline.ui.model_studio import ModelStudio
+    calls = []
+
+    def fake_prompt_to_model(prompt, out, *, progress=None, seed=None, picture=None, shape=None,
+                             **kw):
+        calls.append({"picture": picture, "shape": shape, **kw})
+        trimesh.creation.box(extents=[1.2, 0.6, 0.4]).export(out.with_suffix(".shape.glb"))
+        body = trimesh.creation.box(extents=[1.2, 0.6, 0.4])
+        body.visual.vertex_colors = np.tile(np.array([238, 238, 236, 255], np.uint8), (8, 1))
+        body.export(out)
+        pic = out.with_suffix(".front.png")
+        Image.open(picture).save(pic) if picture else None
+        return model3d.ModelResult(out, pic, out.with_suffix(".shape.glb") if shape is None else None, 7)
+
+    monkeypatch.setattr(model3d, "prompt_to_model", fake_prompt_to_model)
+
+    def auto_accept(dlg):                       # rub out a stroke, then "Build the model"
+        dlg.size.setValue(10)
+        dlg.begin_stroke()
+        dlg.stroke(5, 5, 30, 5)
+        return 1
+    monkeypatch.setattr(picture_editor.PictureEditor, "exec", auto_accept)
+    photo = tmp_path / "dog.png"
+    Image.new("RGB", (64, 48), (30, 30, 30)).save(photo)
+
+    win = ModelStudio()
+    win.sync = True
+    win.subject.setCurrentText("animal")
+    win.only_colours.setText("blak, white")
+    win.from_picture(str(photo))
+    assert not calls and "Unknown colour" in win.last_error       # typo caught before the GPU
+    win.only_colours.setText("black, white")
+    win.mirror.setChecked(True)
+    monkeypatch.setattr(model3d, "cut_out", lambda p, *a: np.dstack(
+        [np.asarray(Image.open(p).convert("RGB")), np.full((48, 64), 255, np.uint8)]))
+    win.from_picture(str(photo))
+    first = calls[-1]
+    assert first["mirror_back"] and first["colours"].tolist() == [[28, 28, 32], [238, 238, 236]]
+    edited = np.asarray(Image.open(first["picture"]))
+    assert edited[5, 15, 3] == 0 and edited[40, 40, 3] == 255     # the stroke was rubbed out
+    assert win.repaint_btn.isEnabled() and win.edit_btn.isEnabled()
+    win.only_colours.setText("brown, tan")
+    win.repaint()
+    again = calls[-1]
+    assert again["shape"] is not None and again["colours"].tolist() == [[110, 70, 42], [196, 158, 110]]

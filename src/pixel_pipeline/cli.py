@@ -501,6 +501,10 @@ def _add_model(sub):
     p.add_argument("-s", "--subject", choices=("person", "animal", "object"), default="person")
     p.add_argument("--image", type=Path, help="use this front picture instead of a prompt")
     p.add_argument("--back", type=Path, help="optional back-view picture for the far side")
+    p.add_argument("--mirror-back", action="store_true",
+                   help="no back picture: paint the far side from the picture mirrored")
+    p.add_argument("--colours", "--colors-only", dest="only_colours", metavar="LIST",
+                   help="only these colours, e.g. 'black, white' or '#1c1c20, #eeeeec'")
     p.add_argument("--shape", type=Path, help="use this ready shape (.glb) instead of ComfyUI")
     p.add_argument("--seed", type=int)
     p.add_argument("--checkpoint", help="Hunyuan3D checkpoint (default: first one installed)")
@@ -540,6 +544,7 @@ def _cmd_model(a) -> int:
     needs_gpu = a.image is None or a.shape is None
     client = ComfyClient(a.comfyui) if needs_gpu else None
     res = prompt_to_model(a.prompt, a.out, subject=a.subject, picture=a.image, back=a.back,
+                          mirror_back=a.mirror_back, colours=a.only_colours,
                           shape=a.shape, client=client, seed=a.seed, shape_options=opts,
                           cutout_model=a.cutout, progress=lambda step, text: print(text))
     written = [res.model, res.picture] + ([res.raw] if res.raw else [])

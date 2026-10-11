@@ -78,12 +78,14 @@ class ModelStudio(QMainWindow):
         self.resize(1080, 640)
         self.client = client              # ComfyClient; None = default address
         self.sync = False                 # tests: run jobs on the calling thread
+        self.last_error = ""
         self.work = Path(tempfile.mkdtemp(prefix="pixel-pipeline-model-"))
         self.result = None                # ModelResult
         self.sprites = None
         self.anim = None                  # AnimatedSet when Animate is ticked
         self.anim_names: list[str] = []
         self.rigged: Path | None = None   # skeleton + animations added by Animate
+        self.back_path: Path | None = None  # picture of the far side
         self._anim_i = 0
         self.spin: list[np.ndarray] = []
         self._spin_i = 0
@@ -118,6 +120,31 @@ class ModelStudio(QMainWindow):
         for w in (QLabel("Subject"), self.subject, QLabel("Seed"), self.seed, self.make_btn,
                   pic_btn, model_btn):
             top.addWidget(w)
+
+        self.back_btn = QPushButton("Back picture…")
+        self.back_btn.setToolTip("A picture of the other side, for the parts the front can't see")
+        self.back_btn.clicked.connect(self.pick_back)
+        self.mirror = QCheckBox("No back picture: mirror the front")
+        self.mirror.setToolTip("Paint the far side from the picture mirrored: good for animals and "
+                               "people photographed from the side, marked about the same on both sides")
+        self.only_colours = QLineEdit()
+        self.only_colours.setPlaceholderText("Only these colours, e.g. black, white  "
+                                             "(empty = from the picture)")
+        self.only_colours.setToolTip("Names (black, white, brown, tan, cream, grey, pink, …) or hex "
+                                     "like #1c1c20. The picture and model are snapped to them, so a "
+                                     "white dog in shade stays white and sun glare on black fur goes.")
+        self.edit_btn = QPushButton("Clean up picture…")
+        self.edit_btn.setToolTip("Rub out a leash or hand, bring back a lost leg, then build again")
+        self.edit_btn.clicked.connect(lambda: self.edit_picture())
+        self.repaint_btn = QPushButton("Repaint")
+        self.repaint_btn.setToolTip("Paint the same shape again with the colour / back settings "
+                                    "(no GPU)")
+        self.repaint_btn.clicked.connect(self.repaint)
+        for b in (self.edit_btn, self.repaint_btn):
+            b.setEnabled(False)
+        paint = QHBoxLayout()
+        for w in (self.back_btn, self.mirror, self.only_colours, self.edit_btn, self.repaint_btn):
+            paint.addWidget(w, 1 if w is self.only_colours else 0)
 
         self.picture_view = _label("Front picture")
         self.model_view = _label("3D model (spins)")
@@ -178,6 +205,7 @@ class ModelStudio(QMainWindow):
         root = QWidget()
         lay = QVBoxLayout(root)
         lay.addLayout(top)
+        lay.addLayout(paint)
         lay.addLayout(panels, 1)
         lay.addLayout(form)
         self.setCentralWidget(root)
@@ -211,6 +239,10 @@ class ModelStudio(QMainWindow):
         self.make_btn.setEnabled(not busy)
         self.redo_btn.setEnabled(not busy and self.result is not None)
         self.save_btn.setEnabled(not busy and self.sprites is not None)
+        has_pic = self.result is not None and self.result.picture is not None \
+            and Path(self.result.picture).suffix.lower() == ".png"
+        self.edit_btn.setEnabled(not busy and has_pic)
+        self.repaint_btn.setEnabled(not busy and has_pic and self._shape() is not None)
         if busy:
             QApplication.setOverrideCursor(Qt.BusyCursor)
         else:
@@ -218,7 +250,9 @@ class ModelStudio(QMainWindow):
 
     def _failed(self, message: str):
         self.statusBar().showMessage("Stopped: " + message.splitlines()[0])
-        QMessageBox.warning(self, "Couldn't make the model", message)
+        self.last_error = message
+        if not self.sync:                     # tests (sync) can't click a message box away
+            QMessageBox.warning(self, "Couldn't make the model", message)
 
     def _model_job(self, prompt=None, picture=None, shape=None):
         from ..model3d import prompt_to_model
@@ -226,11 +260,12 @@ class ModelStudio(QMainWindow):
         subject = self.subject.currentText()
         name = "-".join("".join(c if c.isalnum() else " " for c in (prompt or "model").lower()).split())[:40]
         out = self.work / f"{name or 'model'}.glb"
+        paint = self._paint_options()
 
         def job(say):
             res = prompt_to_model(prompt, out, subject=subject, picture=picture, shape=shape,
                                   client=self.client, seed=seed,
-                                  progress=lambda step, text: say(text))
+                                  progress=lambda step, text: say(text), **paint)
             say("Rendering the model from every side…")
             return res, *self._sprite_job_body(res.model, say)
         return job
@@ -257,6 +292,76 @@ class ModelStudio(QMainWindow):
                                           elevation=self.elevation.value())
         return spin, sprites, anim, names, rigged
 
+    def _paint_options(self) -> dict:
+        from ..model3d import parse_colours
+        text = self.only_colours.text().strip()
+        colours = parse_colours(text) if text else None      # a typo shows before any GPU work
+        return {"back": str(self.back_path) if self.back_path else None,
+                "mirror_back": self.mirror.isChecked(), "colours": colours}
+
+    def _shape(self) -> Path | None:
+        """The uncoloured shape of the current model (to repaint without the GPU)."""
+        res = self.result
+        if res is None:
+            return None
+        for p in (res.raw, Path(res.model).with_suffix(".shape.glb")):
+            if p and Path(p).exists():
+                return Path(p)
+        return None
+
+    def pick_back(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Back picture (the other side)", "",
+                                              IMAGE_FILTER)
+        self.back_path = Path(path) if path else None
+        self.back_btn.setText(f"Back: {self.back_path.name}" if self.back_path else "Back picture…")
+
+    def _checked_options(self) -> bool:
+        try:
+            self._paint_options()
+            return True
+        except ValueError as e:
+            self._failed(str(e))
+            return False
+
+    def repaint(self):
+        shape = self._shape()
+        if shape is None or not self._checked_options():
+            return
+        picture, seed = self.result.picture, self.result.seed
+        job = self._model_job(prompt=self.prompt.text().strip() or None, picture=picture,
+                              shape=shape)
+
+        def keep_shape(say):
+            res, *rest = job(say)
+            res.raw, res.seed = shape, seed
+            return (res, *rest)
+        self._run(keep_shape, self._show)
+
+    def edit_picture(self, rgba=None, restore_alpha=None) -> bool:
+        """Clean up the picture, then build the model from it. Returns True if it builds."""
+        from ..pipeline import load_image
+        from .picture_editor import PictureEditor
+        if rgba is None:
+            if self.result is None or not self.result.picture:
+                return False
+            rgba = load_image(self.result.picture)
+            restore_alpha = np.full(rgba.shape[:2], 255, np.uint8)
+        dlg = PictureEditor(rgba, restore_alpha, self)
+        if not dlg.exec():
+            self.statusBar().showMessage("Picture not used.")
+            return False
+        return self.build_from(dlg.result())
+
+    def build_from(self, rgba: np.ndarray) -> bool:
+        from PIL import Image
+        if not self._checked_options():
+            return False
+        path = self.work / "picture.edited.png"
+        Image.fromarray(rgba).save(path)
+        self._run(self._model_job(prompt=self.prompt.text().strip() or None, picture=path),
+                  self._show)
+        return True
+
     def make(self):
         prompt = self.prompt.text().strip()
         if not prompt:
@@ -264,11 +369,22 @@ class ModelStudio(QMainWindow):
             return
         self._run(self._model_job(prompt=prompt), self._show)
 
-    def from_picture(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Front picture", "", IMAGE_FILTER)
-        if path:
+    def from_picture(self, path: str | None = None, edit: bool = True):
+        """A photo or drawing -> cut out -> clean up (rub out a leash…) -> model."""
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(self, "Front picture", "", IMAGE_FILTER)
+        if not path or not self._checked_options():
+            return
+        if not edit:
             self._run(self._model_job(prompt=self.prompt.text().strip() or None, picture=path),
                       self._show)
+            return
+        from ..model3d import cut_out
+
+        def job(say):
+            say("Cutting out the subject…")
+            return cut_out(path)
+        self._run(job, lambda rgba: self.edit_picture(rgba, np.full(rgba.shape[:2], 255, np.uint8)))
 
     def open_model(self):
         path, _ = QFileDialog.getOpenFileName(self, "3D model", "", MODEL_FILTER)

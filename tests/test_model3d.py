@@ -194,3 +194,35 @@ def test_parts_outside_the_picture_take_the_nearest_colour_not_black():
     mesh, _ = paint_from_picture(cube, pic, samples=40_000)
     cols = np.asarray(mesh.visual.vertex_colors)[:, :3].astype(int)
     assert (cols.max(1) < 40).mean() == 0
+
+
+def test_only_these_colours():
+    from pixel_pipeline.model3d import parse_colours, picture_to_colours
+    assert parse_colours("black, White").tolist() == [[28, 28, 32], [238, 238, 236]]
+    assert parse_colours("#ff0000, 00ff00").tolist() == [[255, 0, 0], [0, 255, 0]]
+    with pytest.raises(ValueError, match="Unknown colour"):
+        parse_colours("blak")
+    # a black dog with a shaded (grey-blue) white chest and a thin streak of sun glare
+    pic = np.zeros((200, 200, 4), np.uint8)
+    pic[20:180, 20:180] = (30, 30, 34, 255)
+    pic[20:180, 120:170] = (120, 128, 150, 255)      # white fur in shade
+    pic[60:62, 30:110] = (200, 200, 205, 255)        # glare, 2 px thin
+    out = picture_to_colours(pic, "black, white")
+    assert (out[100, 140, :3] == [238, 238, 236]).all()          # shade still reads white
+    assert (out[61, 70, :3] == [28, 28, 32]).all()               # glare is gone
+    assert (out[0, 0] == pic[0, 0]).all()                        # background untouched
+
+
+def test_mirror_back_and_colours_paint_only_those_colours(tmp_path):
+    from pixel_pipeline.model3d import prompt_to_model
+    box = trimesh.creation.box(extents=(2.0, 1.0, 0.8))
+    shape = tmp_path / "shape.glb"
+    box.export(shape)
+    pic = np.zeros((100, 200, 4), np.uint8)
+    pic[...] = (40, 40, 40, 255)
+    pic[:, :80] = (150, 150, 160, 255)
+    res = prompt_to_model(None, tmp_path / "m.glb", picture=pic, shape=shape, mirror_back=True,
+                          colours="black, white")
+    m = trimesh.load(res.model, force="mesh")
+    cols = {tuple(c) for c in np.asarray(m.visual.vertex_colors)[:, :3].tolist()}
+    assert cols <= {(28, 28, 32), (238, 238, 236)} and len(cols) == 2
