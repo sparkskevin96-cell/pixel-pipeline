@@ -631,6 +631,12 @@ def turnaround(
         description="3D humanoid without animations (e.g. from prompt_to_model): give it a "
                     "skeleton and idle/walk/run/attack/hurt/death first, then animate. `animations` "
                     "picks which.")] = False,
+    animal: Annotated[bool, Field(
+        description="auto_rig: a four-legged animal (also when subject is animal): skeleton + "
+                    "idle/walk/run/sit/happy/lie_down/death. The rigged model faces +z.")] = False,
+    head: Annotated[Literal["auto", "+x", "-x", "+z", "-z"], Field(
+        description="auto_rig animal: which end of the model is the head (auto = from the "
+                    "shape).")] = "auto",
     animate: Annotated[bool, Field(
         description="3D model: play its animations (a rigged, animated .glb/.gltf, e.g. from "
                     "Mixamo). Extra .glb files in `source` add their animations to the first "
@@ -662,12 +668,18 @@ def turnaround(
     explicit = {"width": width, "height": height, "colors": colors, "system": system, "look": look}
     settings = _build_settings(subject, explicit, extra_settings)
     if auto_rig:
-        from .autorig import ACTIONS
-        from .autorig import auto_rig as rig_model
-        wanted = [a for a in (animations or ACTIONS) if a in ACTIONS] or list(ACTIONS)
-        with _work_lock:
-            rigged = rig_model(srcs[0], out.with_name(out.stem + ".rigged.glb"), actions=wanted, up=up,
-                               yaw=yaw)
+        rig_out = out.with_name(out.stem + ".rigged.glb")
+        if animal or subject == "animal":
+            from .quadruped import ACTIONS, auto_rig_quadruped
+            wanted = [a for a in (animations or ACTIONS) if a in ACTIONS] or list(ACTIONS)
+            with _work_lock:
+                rigged = auto_rig_quadruped(srcs[0], rig_out, actions=wanted, head=head, up=up, yaw=yaw)
+        else:
+            from .autorig import ACTIONS
+            from .autorig import auto_rig as rig_model
+            wanted = [a for a in (animations or ACTIONS) if a in ACTIONS] or list(ACTIONS)
+            with _work_lock:
+                rigged = rig_model(srcs[0], rig_out, actions=wanted, up=up, yaw=yaw)
         srcs, animate, animations, yaw = [rigged.path], True, None, 0.0
     if animate or animations:
         from .anim3d import animated_turnaround, write_animated

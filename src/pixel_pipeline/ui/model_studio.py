@@ -135,7 +135,7 @@ class ModelStudio(QMainWindow):
                                      "white dog in shade stays white and sun glare on black fur goes.")
         self.edit_btn = QPushButton("Clean up picture…")
         self.edit_btn.setToolTip("Rub out a leash or hand, bring back a lost leg, then build again")
-        self.edit_btn.clicked.connect(lambda: self.edit_picture())
+        self.edit_btn.clicked.connect(self._edit_clicked)
         self.repaint_btn = QPushButton("Repaint")
         self.repaint_btn.setToolTip("Paint the same shape again with the colour / back settings "
                                     "(no GPU)")
@@ -174,10 +174,11 @@ class ModelStudio(QMainWindow):
         self.elevation.setSuffix("°")
         self.animate = QCheckBox("Animate")
         self.animate.setEnabled(False)
-        self.animate.setToolTip("Play the model's animations. A model without any gets a skeleton "
-                                "and idle, walk, run, attack, hurt, death (humanoids). Or open a "
-                                "rigged .glb (Mixamo) to play its own. "
-                                "its animations from every direction")
+        self.animate.setToolTip("Play the model's animations from every direction. A model "
+                                "without any gets a skeleton: people idle, walk, run, attack, "
+                                "hurt, death; animals (Subject: animal, four legs) idle, walk, "
+                                "run, sit, happy, lie down, death. Or open a rigged .glb (Mixamo) "
+                                "to play its own.")
         self.frames = QSpinBox()
         self.frames.setRange(1, 32)
         self.frames.setValue(8)
@@ -283,9 +284,14 @@ class ModelStudio(QMainWindow):
             from ..anim3d import animated_turnaround
             target = model
             if not names:
-                from ..autorig import auto_rig
                 say("Adding a skeleton and animations…")
-                rig = auto_rig(model, self.work / (Path(model).stem + ".rigged.glb"))
+                out = self.work / (Path(model).stem + ".rigged.glb")
+                if self.subject.currentText() == "animal":     # four legs: walk, run, sit…
+                    from ..quadruped import auto_rig_quadruped
+                    rig = auto_rig_quadruped(model, out)
+                else:
+                    from ..autorig import auto_rig
+                    rig = auto_rig(model, out)
                 target, rigged, names = rig.path, rig.path, rig.clips
             say(f"Playing {len(names)} animations from every side…")
             anim, _ = animated_turnaround([target], s, n, self.frames.value(),
@@ -337,6 +343,9 @@ class ModelStudio(QMainWindow):
             return (res, *rest)
         self._run(keep_shape, self._show)
 
+    def _edit_clicked(self, _checked=False):
+        self.edit_picture()
+
     def edit_picture(self, rgba=None, restore_alpha=None) -> bool:
         """Clean up the picture, then build the model from it. Returns True if it builds."""
         from ..pipeline import load_image
@@ -347,10 +356,15 @@ class ModelStudio(QMainWindow):
             rgba = load_image(self.result.picture)
             restore_alpha = np.full(rgba.shape[:2], 255, np.uint8)
         dlg = PictureEditor(rgba, restore_alpha, self)
-        if not dlg.exec():
+        try:
+            ok = dlg.exec()
+            edited = dlg.result().copy()
+        finally:
+            dlg.setParent(None)               # back to Python: freed once, when dlg goes
+        if not ok:
             self.statusBar().showMessage("Picture not used.")
             return False
-        return self.build_from(dlg.result())
+        return self.build_from(edited)
 
     def build_from(self, rgba: np.ndarray) -> bool:
         from PIL import Image

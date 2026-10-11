@@ -648,27 +648,45 @@ def _srgb_to_linear(c):
 def write_rigged(parts, sk: Skeleton, out_glb, actions=ACTIONS, weapon: str = "r",
                  keys: int = 25) -> Path:
     """Mesh + skeleton + skin + animations as one .glb."""
+    moves = _Moves(sk, weapon)
+    clips = []
+    for action in actions:
+        dur = DURATION[action]
+        times = np.linspace(0, dur, keys)
+        clips.append((action, times, [moves.quats(action, t / dur) for t in times], LOOPS[action]))
+    return write_skinned(parts, JOINTS, sk.joints, lambda v: skin_weights(v, sk), clips, out_glb)
+
+
+def write_skinned(parts, joints, positions: dict, weights, clips, out_glb) -> Path:
+    """Meshes + a world-aligned skeleton + skin + rotation animations as one .glb.
+    joints: [(name, parent)], parents first, the first one is the root. positions: name -> rest
+    position. weights(vertices) -> (joint indices, weights). clips: [(name, times, poses, loop)]
+    with poses = [({joint: quaternion}, root offset)]. Vertex colours and base colour textures
+    are kept."""
     from .turnaround import _texture
     g = GlbWriter()
-    j = sk.joints
+    j = positions
+    names = [n for n, _ in joints]
+    parent_of = dict(joints)
+    root = names[0]
     nodes = [{"name": "Armature", "children": [1]}]
-    index = {n: i + 1 for i, n in enumerate(NAMES)}
-    for n in NAMES:
-        parent = PARENT[n]
+    index = {n: i + 1 for i, n in enumerate(names)}
+    for n in names:
+        parent = parent_of[n]
         offset = j[n] - (j[parent] if parent else 0)
         node = {"name": n, "translation": [float(x) for x in offset]}
-        kids = [index[c] for c, p in JOINTS if p == n]
+        kids = [index[c] for c, p in joints if p == n]
         if kids:
             node["children"] = kids
         nodes.append(node)
-    ibm = np.tile(np.eye(4, dtype=np.float32), (len(NAMES), 1, 1))
-    for i, n in enumerate(NAMES):
+    ibm = np.tile(np.eye(4, dtype=np.float32), (len(names), 1, 1))
+    for i, n in enumerate(names):
         ibm[i, :3, 3] = -j[n]
-    g.doc["skins"] = [{"joints": [index[n] for n in NAMES], "skeleton": index["hips"],
+    g.doc["skins"] = [{"joints": [index[n] for n in names], "skeleton": index[root],
                        "inverseBindMatrices": g.accessor(ibm.transpose(0, 2, 1).reshape(-1, 16), "MAT4")}]
     prims, materials, images, textures = [], [], [], []
     for m, v in parts:
-        idx, wts = skin_weights(v, sk)
+        idx, wts = weights(v)
         attrs = {"POSITION": g.accessor(v.astype(np.float32), "VEC3"),
                  "JOINTS_0": g.accessor(idx, "VEC4", 5121),
                  "WEIGHTS_0": g.accessor(wts, "VEC4")}
@@ -704,26 +722,22 @@ def write_rigged(parts, sk: Skeleton, out_glb, actions=ACTIONS, weapon: str = "r
     g.doc["scenes"] = [{"nodes": [0, len(nodes) - 1]}]
     g.doc["scene"] = 0
 
-    moves = _Moves(sk, weapon)
     anims = []
-    for action in actions:
-        dur = DURATION[action]
-        times = np.linspace(0, dur, keys)
-        poses = [moves.quats(action, t / dur) for t in times]
-        t_acc = g.accessor(times.astype(np.float32), "SCALAR")
+    for name, times, poses, loop in clips:
+        t_acc = g.accessor(np.asarray(times, np.float32), "SCALAR")
         samplers, channels = [], []
-        for n in NAMES:
+        for n in names:
             q = np.array([p[0][n] for p in poses])
             for k in range(1, len(q)):                     # keep neighbours on one hemisphere
                 if q[k] @ q[k - 1] < 0:
                     q[k] = -q[k]
             samplers.append({"input": t_acc, "output": g.accessor(q.astype(np.float32), "VEC4")})
             channels.append({"sampler": len(samplers) - 1, "target": {"node": index[n], "path": "rotation"}})
-        hips = np.array([j["hips"] + p[1] for p in poses])
-        samplers.append({"input": t_acc, "output": g.accessor(hips.astype(np.float32), "VEC3")})
-        channels.append({"sampler": len(samplers) - 1, "target": {"node": index["hips"], "path": "translation"}})
-        anims.append({"name": action, "samplers": samplers, "channels": channels,
-                      "extras": {"loop": LOOPS[action]}})
+        moved = np.array([j[root] + p[1] for p in poses])
+        samplers.append({"input": t_acc, "output": g.accessor(moved.astype(np.float32), "VEC3")})
+        channels.append({"sampler": len(samplers) - 1, "target": {"node": index[root], "path": "translation"}})
+        anims.append({"name": name, "samplers": samplers, "channels": channels,
+                      "extras": {"loop": bool(loop)}})
     g.doc["animations"] = anims
     return g.save(out_glb)
 

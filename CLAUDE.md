@@ -69,6 +69,22 @@ wants terse answers and fixes over polish.
   marks one-shots (anim3d honours it). Verified on Khronos CesiumMan / RiggedFigure /
   BrainStem and box figures; Godot imports 17 bones + 6 animations (it doesn't loop "walk"
   for 3D use unless set in import settings; sprite exports carry loop flags).
+- **Four-legged rig** (`quadruped.py`, `rig --animal`, `turnaround --auto-rig -s animal`, MCP
+  turnaround(animal=), Prompt to Model Animate with Subject animal), 2026-10-11 for Kevin's dog:
+  long axis = longer horizontal extent; head = end with more mass above the back line (override
+  `head=`); side silhouette: belly row, legs below it split front/back at the gap, left/right by
+  depth; tail = thin columns at the back. Turned head +z, left +x (same as humanoid). 19 joints
+  (hips spine chest neck head tail1 tail2 + upper/lower/paw x front_l front_r back_l back_r);
+  legs bind only own side/half below the body. Clips: idle walk(4-beat) run sit happy lie_down
+  death, legs by 2-bone IK to planted feet. autorig's glTF writing is shared (`write_skinned`).
+- **Your own photo in Prompt to Model** (2026-10-11): From a picture -> cut out -> clean-up
+  window (`ui/picture_editor.py`: rub out / bring back, Ctrl+Z) -> build. `prompt_to_model(
+  mirror_back=, colours=)` / CLI `model --mirror-back --colours "black, white"`: picture snapped
+  to the colours (Lab, lightness stretched to the palette's first: shaded white fur stays white;
+  morphological open removes glare/hairs), model vertices snapped + neighbour majority. Repaint
+  = same shape, no GPU. Photos load with EXIF rotation (phone pictures are stored sideways).
+  PySide teardown crashes in tests came from a lambda capturing the window in a signal and
+  deleteLater without an event loop: connect methods, hand dialogs back with setParent(None).
 - **Online AIs** (`online.py`, CLI `ai`, MCP `online_sprites`, desktop Prompt tab), 2026-10-09:
   Kevin wants NEW sprites from prompts and does NOT want his photos sent to any service, so
   the online providers are prompt-only. PixelLab REST v2 (Bearer; create-image-pixen /

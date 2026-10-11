@@ -263,6 +263,11 @@ def _add_turnaround(sub):
     p.add_argument("--auto-rig", action="store_true",
                    help="3D humanoid without animations: give it a skeleton and idle/walk/run/"
                         "attack/hurt/death first (implies --animate)")
+    p.add_argument("--animal", action="store_true",
+                   help="--auto-rig a four-legged animal (also with -s animal): idle/walk/run/sit/"
+                        "happy/lie_down/death")
+    p.add_argument("--head", choices=("auto", "+x", "-x", "+z", "-z"), default="auto",
+                   help="--animal: which end of the model is the head (default: found from the shape)")
     p.add_argument("--colours-from", type=Path, metavar="MODEL",
                    help="--animate: take colours from this model (the original, when rigging "
                         "on Mixamo dropped them)")
@@ -282,11 +287,17 @@ def _cmd_turnaround(a) -> int:
         if not path.exists():
             raise SystemExit(f"error: {path} not found")
     if a.auto_rig:
-        from .autorig import ACTIONS, auto_rig
-        wanted = [x for x in (a.animations or ACTIONS) if x in ACTIONS] or list(ACTIONS)
         a.out.parent.mkdir(parents=True, exist_ok=True)
-        rigged = auto_rig(a.source[0], a.out.with_name(a.out.stem + ".rigged.glb"), actions=wanted,
-                          up=a.up, yaw=a.yaw)
+        rig_out = a.out.with_name(a.out.stem + ".rigged.glb")
+        if a.animal or a.subject == "animal":
+            from .quadruped import ACTIONS, auto_rig_quadruped
+            wanted = [x for x in (a.animations or ACTIONS) if x in ACTIONS] or list(ACTIONS)
+            rigged = auto_rig_quadruped(a.source[0], rig_out, actions=wanted, head=a.head, up=a.up,
+                                        yaw=a.yaw)
+        else:
+            from .autorig import ACTIONS, auto_rig
+            wanted = [x for x in (a.animations or ACTIONS) if x in ACTIONS] or list(ACTIONS)
+            rigged = auto_rig(a.source[0], rig_out, actions=wanted, up=a.up, yaw=a.yaw)
         notes = "".join(f"\n  note: {n}" for n in rigged.skeleton.notes)
         print(f"Rigged {a.source[0].name} -> {rigged.path}{notes}")
         a.source, a.animate, a.yaw = [rigged.path], True, 0.0
@@ -326,15 +337,22 @@ def _animated_turnaround(a) -> int:
 
 def _add_rig(sub):
     from .autorig import ACTIONS
+    from .quadruped import ACTIONS as ANIMAL_ACTIONS
     p = sub.add_parser(
-        "rig", help="humanoid 3D model -> skeleton + idle/walk/run/attack/hurt/death animations",
+        "rig", help="humanoid (or --animal) 3D model -> skeleton + animations",
         description="Finds the joints from the model's shape (standing, facing +z, A- or T-pose "
                     "works best), skins it and adds animations, as a rigged .glb that "
                     "turnaround --animate, Godot and Blender can use. No Mixamo needed.")
     p.add_argument("model", type=Path)
     p.add_argument("-o", "--out", type=Path, help="rigged .glb (default <model>.rigged.glb)")
     p.add_argument("--animations", type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
-                   default=list(ACTIONS), help=f"comma-separated, from: {','.join(ACTIONS)}")
+                   help=f"comma-separated, from: {','.join(ACTIONS)}; --animal: "
+                        f"{','.join(ANIMAL_ACTIONS)} (default: all)")
+    p.add_argument("--animal", action="store_true",
+                   help="a four-legged animal (dog, cat, horse ...) standing on all fours")
+    p.add_argument("--head", choices=("auto", "+x", "-x", "+z", "-z"), default="auto",
+                   help="--animal: which end is the head (default: found from the shape); the rigged "
+                        "model is turned to face +z")
     p.add_argument("--weapon-hand", choices=("right", "left"), default="right",
                    help="which hand swings in the attack")
     p.add_argument("--up", choices=("y", "z"), default="y")
@@ -349,7 +367,14 @@ def _cmd_rig(a) -> int:
     from .autorig import auto_rig
     if not a.model.exists():
         raise SystemExit(f"error: {a.model} not found")
-    res = auto_rig(a.model, a.out, actions=a.animations, weapon_hand=a.weapon_hand, up=a.up, yaw=a.yaw)
+    if a.animal:
+        from .quadruped import ACTIONS, auto_rig_quadruped
+        res = auto_rig_quadruped(a.model, a.out, actions=a.animations or ACTIONS, head=a.head,
+                                 up=a.up, yaw=a.yaw)
+    else:
+        from .autorig import ACTIONS
+        res = auto_rig(a.model, a.out, actions=a.animations or ACTIONS, weapon_hand=a.weapon_hand,
+                       up=a.up, yaw=a.yaw)
     written = [res.path]
     if a.preview:
         Image.fromarray(res.preview).save(a.preview)

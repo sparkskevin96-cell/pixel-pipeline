@@ -350,3 +350,24 @@ def test_model_studio_clean_up_colours_and_repaint(app, tmp_path, monkeypatch):
     win.repaint()
     again = calls[-1]
     assert again["shape"] is not None and again["colours"].tolist() == [[110, 70, 42], [196, 158, 110]]
+    win.close()
+
+
+def test_model_studio_animates_an_animal_on_four_legs(app, tmp_path):
+    pytest.importorskip("trimesh")
+    from test_quadruped import box_dog
+    from pixel_pipeline.ui.model_studio import ModelStudio
+    dog = box_dog(tmp_path / "dog.glb")
+    win = ModelStudio()
+    win.sync = True
+    win.subject.setCurrentText("animal")
+    win.directions.setCurrentText("4")
+    win.width_.setValue(24)
+    win.height_.setValue(24)
+    win.load_model(dog)
+    win.animate.setChecked(True)
+    win.frames.setValue(2)
+    win.update_sprites()
+    assert win.last_error == ""
+    assert win.anim_names[:4] == ["idle", "walk", "run", "sit"] and win.rigged is not None
+    win.close()
