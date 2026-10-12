@@ -13,6 +13,10 @@ ONE pre-rendered column sprite (top diamond + sides from its height down to BASE
 the water), so stacked heights have no seams. Painter's order = z_index: (c + r) * 8 + layer
 (block 0, water 1, range 2, shadow 3, cursor 4, prop/unit 5): back diagonals first; anything
 standing on a cell is drawn after that cell's column and before every cell in front of it.
+
+Play follows the 3D looks' rules: per-unit stats from map.json, purple move range (own move /
+jump), then a red attack range (enemies within `reach`), diorama.damage() for hits, done units
+greyed, automatic turn pass, last team standing wins (see the header of ISO_GD).
 """
 from __future__ import annotations
 
@@ -23,7 +27,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .diorama import BLOCKING_PROPS, LEVEL, TERRAINS, WALKABLE, Diorama, textures
+from .diorama import (BLOCKING_PROPS, CLASSES, DEFAULT_STATS, LEVEL, TERRAINS, WALKABLE, Diorama,
+                      textures)
 from .tilesets import _darkest, _shade, iso_floor
 
 BASE = -2                  # columns reach this many levels below level 0 (the diorama's skirt)
@@ -249,13 +254,19 @@ def _outline(mask: np.ndarray) -> np.ndarray:
     return mask & ~inner
 
 
-def range_sprite(w: int) -> np.ndarray:
-    """Purple movement-range diamond with a lighter edge."""
+def range_sprite(w: int, fill=(150, 50, 255, 200), edge=(226, 196, 255, 255)) -> np.ndarray:
+    """Movement-range diamond: a saturated, mostly opaque fill (stays clearly purple over green
+    grass, grey stone and brown planks alike) inside a lighter 1px outline."""
     mask = _diamond_mask(w)
     out = np.zeros((w // 2, w, 4), np.uint8)
-    out[mask] = (150, 84, 255, 140)
-    out[_outline(mask)] = (200, 160, 255, 230)
+    out[mask] = fill
+    out[_outline(mask)] = edge
     return out
+
+
+def attack_sprite(w: int) -> np.ndarray:
+    """The red attack-range diamond (same style as the purple move range)."""
+    return range_sprite(w, (240, 36, 36, 200), (255, 190, 176, 255))
 
 
 def cursor_sprite(w: int) -> np.ndarray:
@@ -409,13 +420,24 @@ void fragment() {
 ISO_GD = r'''extends Node2D
 ## Isometric tactics view (written by pixel-pipeline iso_scene.py; regenerate rather than edit).
 ## Board from res://map/map.json, look from res://iso/iso.json.
-## Click a unit of the active team -> purple range; click a purple cell -> it walks there and
-## the turn passes. Tab/Space = end turn, Esc/right click = deselect, WASD/arrows = pan,
-## mouse wheel = zoom (integer steps).
+##
+## Play (the same rules as the 3D looks): click an own unit that has not acted -> purple move
+## range (its own move/jump). Click a purple cell to walk there, or the unit itself to stay.
+## Then red cells = enemies within `reach` (Manhattan distance): click one to attack
+## (diorama.damage: attack - defence/2, x5/4 from higher ground, min 1); Space/Tab/Esc/right
+## click = wait. Done units grey out until their team's next turn; when the whole team is done
+## the turn passes (Space/Tab with nothing selected ends it early). Last team standing wins.
+## WASD/arrows = pan, mouse wheel = zoom (integer steps), Esc with nothing selected = menu.
 ##
 ## Painter's order: every sprite's z_index = (col + row) * K + layer, so back diagonals are
 ## drawn first and whatever stands on a cell is drawn after its column but before the cells
-## in front of it (which may hide it, e.g. a unit behind a wall).
+## in front of it (which may hide it, e.g. a unit behind a wall). HP bars and damage numbers
+## are drawn above everything.
+
+signal hit(attacker: Dictionary, target: Dictionary, amount: int)
+signal died(unit: Dictionary)
+signal turn_started(team: int)
+signal game_over(winner: int)
 
 const MAP_PATH := "res://map/map.json"
 const CONF_PATH := "res://iso/iso.json"
@@ -424,6 +446,8 @@ const WALKABLE: Array[String] = ["grass", "stone", "cobble", "planks", "dirt", "
 const BLOCKING: Array[String] = ["crate", "barrel", "post"]
 const STEPS: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
 const TEAM_NAMES: Array[String] = ["Blue", "Red", "Green", "Gold"]
+const ONCE: Array[String] = ["attack", "hurt", "death", "lie_down"]
+const STATS: Array[String] = ["hp", "attack", "defence", "move", "jump", "reach"]
 const K := 8
 const Z_BLOCK := 0
 const Z_WATER := 1
@@ -431,8 +455,11 @@ const Z_RANGE := 2
 const Z_SHADOW := 3
 const Z_CURSOR := 4
 const Z_THING := 5
+const Z_TOP := 3500            # hp bars, damage numbers: above the whole board
 const STEP_TIME := 0.28
 const PAN_SPEED := 220.0
+const BAR_W := 16
+const DONE_GREY := Color(0.55, 0.55, 0.55)
 
 var conf: Dictionary = {}
 var cols := 0
@@ -446,23 +473,32 @@ var hh := 8
 var lv := 8
 var base := -2
 var water_px := 2
-var move_range := 4
-var jump := 2
 
-var units: Array = []          # Dictionaries: node sprite ring name team cell from path t facing action body
+var units: Array = []          # Dictionaries: node sprite ring bar fill name team cell from path t facing action body hp max_hp atk def move jump reach done
 var teams: Array = []
 var active_team := 0
+var phase := "select"          # select | move | walk | act | busy | over
+var busy: bool:
+	get:
+		return phase == "walk" or phase == "busy"
 var selected: Variant = null   # a unit Dictionary or null
-var reach := {}                # Vector2i -> steps
+var reach := {}                # Vector2i -> steps (the purple move range)
+var attack_cells := {}         # Vector2i -> enemy unit (the red attack range)
 var came_from := {}
-var busy := false
+var hovered: Variant = null
+var preview := ""
+var winner := -1
 
 var cam: Camera2D
 var zoom_level := 2
 var hud: Label
+var hud_panel: ColorRect
+var banner: CanvasLayer
 var cursor: Sprite2D
 var range_layer: Node2D
+var attack_layer: Node2D
 var range_tex: Texture2D
+var attack_tex: Texture2D
 var ring_tex: Texture2D
 var water_tex: AtlasTexture
 var water_frames := 4
@@ -490,12 +526,11 @@ func _ready() -> void:
 	lv = int(conf["level_px"])
 	base = int(conf["base"])
 	water_px = roundi(float(m.get("water_level", 0.15)) / float(m.get("level", 0.5)) * lv)
-	move_range = int(conf.get("move", 4))
-	jump = int(conf.get("jump", 2))
 	for p in m.get("props", []):
 		if String(p["kind"]) in BLOCKING:
 			blocked[Vector2i(int(p["col"]), int(p["row"]))] = true
 	range_tex = load(conf["range"])
+	attack_tex = load(conf["attack"])
 	ring_tex = load(conf["cursor"])
 	_build_map()
 	_build_props(m.get("props", []))
@@ -589,6 +624,8 @@ func _build_map() -> void:
 		pick.append([o[1], o[2]])
 	range_layer = Node2D.new()
 	add_child(range_layer)
+	attack_layer = Node2D.new()
+	add_child(attack_layer)
 	cursor = Sprite2D.new()
 	cursor.texture = ring_tex
 	cursor.centered = false
@@ -654,6 +691,16 @@ func _build_props(props: Array) -> void:
 			glows.append([g, float(cell.x * 1.3 + cell.y * 2.1)])
 
 
+## A unit's stat: map.json's value, else the class table by name (diorama.CLASSES), else default.
+func _stat(u: Dictionary, i: int) -> int:
+	var v := int(u.get(STATS[i], 0))
+	if v > 0:
+		return v
+	var classes: Dictionary = conf.get("classes", {})
+	var row: Array = classes.get(String(u["name"]), conf.get("default_stats", [28, 10, 5, 4, 2, 1]))
+	return int(row[i])
+
+
 func _build_units(list: Array) -> void:
 	var defs: Dictionary = conf["units"]
 	var shadow: Texture2D = load(conf["shadow"])
@@ -670,20 +717,24 @@ func _build_units(list: Array) -> void:
 		node.add_child(sh)
 		var ring := Sprite2D.new()
 		ring.texture = ring_tex
-		ring.modulate = Color(conf["teams"][team % conf["teams"].size()])
+		ring.modulate = team_colour(team)
 		ring.modulate.a = 0.75
 		ring.scale = Vector2(0.75, 0.75)
 		ring.z_index = Z_CURSOR - Z_THING
 		node.add_child(ring)
-		var spr := AnimatedSprite2D.new()
+		var spr := AnimatedSprite2D.new()      # native sheet pixels: never scaled
 		spr.sprite_frames = _frames(d)
 		spr.centered = false
 		spr.offset = -Vector2(d["foot"][0], d["foot"][1])
 		node.add_child(spr)
 		var b: Array = d["body"]
+		var hp := _stat(u, 0)
 		var unit := {"node": node, "sprite": spr, "ring": ring, "name": uname, "team": team,
 			"cell": cell, "from": cell, "path": [], "t": 0.0, "facing": 4, "action": "idle",
-			"body": Rect2(b[0], b[1], b[2] - b[0], b[3] - b[1])}
+			"body": Rect2(b[0], b[1], b[2] - b[0], b[3] - b[1]),
+			"hp": hp, "max_hp": hp, "atk": _stat(u, 1), "def": _stat(u, 2), "move": _stat(u, 3),
+			"jump": _stat(u, 4), "reach": _stat(u, 5), "done": false}
+		_make_bar(unit)
 		units.append(unit)
 		if not teams.has(team):
 			teams.append(team)
@@ -694,32 +745,41 @@ func _build_units(list: Array) -> void:
 	teams.sort()
 
 
+func team_colour(team: int) -> Color:
+	return Color(conf["teams"][team % conf["teams"].size()])
+
+
 func _frames(d: Dictionary) -> SpriteFrames:
+	var sf: SpriteFrames = null
 	if String(d.get("tres", "")) != "" and ResourceLoader.exists(d["tres"]):
 		var res = load(d["tres"])
 		if res is SpriteFrames:
-			return res
-	var sheet: Texture2D = load(d["png"])
-	var data: Dictionary = _json(d["json"])
-	var sf := SpriteFrames.new()
-	var raw = data.get("frames", [])
-	var items: Array = []
-	if raw is Dictionary:
-		for k in raw:
-			items.append([String(k), raw[k]])
-	else:
-		for f in raw:
-			items.append([String(f["filename"]), f])
-	for it in items:
-		var anim: String = it[0].rsplit(" ", true, 1)[0]
-		if not sf.has_animation(anim):
-			sf.add_animation(anim)
-			sf.set_animation_speed(anim, 1000.0 / maxf(1.0, float(it[1].get("duration", 100))))
-		var r: Dictionary = it[1]["frame"]
-		var at := AtlasTexture.new()
-		at.atlas = sheet
-		at.region = Rect2(r["x"], r["y"], r["w"], r["h"])
-		sf.add_frame(anim, at)
+			sf = res
+	if sf == null:
+		var sheet: Texture2D = load(d["png"])
+		var data: Dictionary = _json(d["json"])
+		sf = SpriteFrames.new()
+		var raw = data.get("frames", [])
+		var items: Array = []
+		if raw is Dictionary:
+			for k in raw:
+				items.append([String(k), raw[k]])
+		else:
+			for f in raw:
+				items.append([String(f["filename"]), f])
+		for it in items:
+			var anim: String = it[0].rsplit(" ", true, 1)[0]
+			if not sf.has_animation(anim):
+				sf.add_animation(anim)
+				sf.set_animation_speed(anim, 1000.0 / maxf(1.0, float(it[1].get("duration", 100))))
+			var r: Dictionary = it[1]["frame"]
+			var at := AtlasTexture.new()
+			at.atlas = sheet
+			at.region = Rect2(r["x"], r["y"], r["w"], r["h"])
+			sf.add_frame(anim, at)
+	for anim in sf.get_animation_names():          # one-shots stop on their last frame
+		if String(anim).rsplit("_", true, 1)[0] in ONCE:
+			sf.set_animation_loop(anim, false)
 	return sf
 
 
@@ -737,16 +797,37 @@ func face(u: Dictionary, v: Vector2) -> void:
 
 func act(u: Dictionary, action: String) -> void:
 	u["action"] = action
-	_show(u)
+	_show(u, action in ONCE)
 
 
-func _show(u: Dictionary) -> void:
+func has_anim(u: Dictionary, action: String) -> bool:
+	var sf: SpriteFrames = u["sprite"].sprite_frames
+	return sf.has_animation("%s_%s" % [action, DIRS[u["facing"]]])
+
+
+## Seconds one pass of an action's animation takes in the unit's current direction (0 if none).
+func anim_length(u: Dictionary, action: String) -> float:
+	var sf: SpriteFrames = u["sprite"].sprite_frames
+	var anim := "%s_%s" % [action, DIRS[u["facing"]]]
+	if not sf.has_animation(anim):
+		return 0.0
+	var total := 0.0
+	for i in sf.get_frame_count(anim):
+		total += sf.get_frame_duration(anim, i)
+	return total / maxf(0.1, sf.get_animation_speed(anim))
+
+
+func _show(u: Dictionary, restart := false) -> void:
 	var spr: AnimatedSprite2D = u["sprite"]
 	var anim := "%s_%s" % [u["action"], DIRS[u["facing"]]]
 	if not spr.sprite_frames.has_animation(anim):
 		anim = "idle_" + DIRS[u["facing"]]
 		if not spr.sprite_frames.has_animation(anim):
 			return
+	if restart:
+		spr.play(anim)
+		spr.set_frame_and_progress(0, 0.0)
+		return
 	if anim == String(spr.animation) and spr.is_playing():
 		return
 	var same := String(spr.animation).begins_with(String(u["action"]) + "_")
@@ -763,16 +844,57 @@ func _place(u: Dictionary, at: Vector2, z: int) -> void:
 	node.z_index = z + Z_THING
 
 
-func unit_on(c: Vector2i):
+func unit_on(c: Vector2i) -> Variant:
 	for u in units:
 		if u["cell"] == c:
 			return u
 	return null
 
 
+## A small pixel HP bar above the unit: team-coloured frame, green -> yellow -> red fill.
+func _make_bar(u: Dictionary) -> void:
+	var b: Rect2 = u["body"]
+	var bar := Node2D.new()
+	bar.z_as_relative = false
+	bar.z_index = Z_TOP
+	bar.position = Vector2(-BAR_W / 2 - 1, b.position.y - 6)
+	var parts: Array = []
+	for spec in [[Vector2.ZERO, Vector2(BAR_W + 2, 4), team_colour(u["team"]).darkened(0.1)],
+			[Vector2(1, 1), Vector2(BAR_W, 2), Color(0.1, 0.07, 0.12)],
+			[Vector2(1, 1), Vector2(BAR_W, 2), Color.WHITE]]:
+		var r := ColorRect.new()
+		r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		r.position = spec[0]
+		r.size = spec[1]
+		r.color = spec[2]
+		bar.add_child(r)
+		parts.append(r)
+	u["node"].add_child(bar)
+	u["bar"] = bar
+	u["fill"] = parts[2]
+	_update_bar(u, false)
+
+
+func _update_bar(u: Dictionary, animate := true) -> void:
+	var f: ColorRect = u["fill"]
+	var ratio := clampf(float(u["hp"]) / maxf(1.0, float(u["max_hp"])), 0.0, 1.0)
+	var w := float(ceili(ratio * BAR_W)) if u["hp"] > 0 else 0.0
+	f.color = Color(0.36, 0.86, 0.32) if ratio > 0.5 else (Color(0.96, 0.8, 0.2) if ratio > 0.25 else Color(0.92, 0.24, 0.2))
+	if animate:
+		create_tween().tween_property(f, "size:x", w, 0.3)
+	else:
+		f.size.x = w
+
+
 ## Cells reachable from start (diorama.path_cost: `move` steps, climb <= jump levels, drop
-## <= 2 * jump), not through other units unless ignore_units. Fills came_from for paths.
-func reachable(start: Vector2i, ignore_units := false) -> Dictionary:
+## <= 2 * jump), not through other units unless ignore_units. move/jump default to the stats of
+## the unit standing on start. Fills came_from for paths.
+func reachable(start: Vector2i, ignore_units := false, move_range := -1, jump := -1) -> Dictionary:
+	var here: Variant = unit_on(start)
+	if move_range < 0:
+		move_range = int(here["move"]) if here != null else 4
+	if jump < 0:
+		jump = int(here["jump"]) if here != null else 2
 	var best := {start: 0}
 	came_from = {}
 	var occupied := {}
@@ -800,34 +922,57 @@ func reachable(start: Vector2i, ignore_units := false) -> Dictionary:
 	return best
 
 
+## diorama.damage(): attack - defence/2, x5/4 when the attacker stands higher, at least 1.
+@warning_ignore("integer_division")
+func damage(a: Dictionary, t: Dictionary) -> int:
+	var dmg: int = int(a["atk"]) - int(t["def"]) / 2
+	if hgt(a["cell"]) > hgt(t["cell"]):
+		dmg = dmg * 5 / 4
+	return maxi(1, dmg)
+
+
+func _overlay(layer: Node2D, tex: Texture2D, c: Vector2i) -> void:
+	var s := Sprite2D.new()
+	s.texture = tex
+	s.centered = false
+	s.position = top(c) - Vector2(hw, hh)
+	s.z_index = depth(c) + Z_RANGE
+	layer.add_child(s)
+
+
+## Select a unit of the active team that has not acted: its purple move range (phase move).
 func select(u) -> void:
 	_clear_range()
+	if selected != null and not is_same(selected, u):
+		var old_ring: Sprite2D = selected["ring"]
+		old_ring.modulate.a = 0.75
 	selected = u
 	if u == null:
+		phase = "select"
 		_update_hud()
 		return
+	phase = "move"
 	reach = reachable(u["cell"])
 	for c in reach:
-		if c == u["cell"]:
-			continue
-		var s := Sprite2D.new()
-		s.texture = range_tex
-		s.centered = false
-		s.position = top(c) - Vector2(hw, hh)
-		s.z_index = depth(c) + Z_RANGE
-		range_layer.add_child(s)
+		if c != u["cell"]:
+			_overlay(range_layer, range_tex, c)
 	_update_hud()
 
 
 func _clear_range() -> void:
-	for ch in range_layer.get_children():
-		ch.queue_free()
+	for t in attack_cells.values():
+		var ts: AnimatedSprite2D = t["sprite"]
+		ts.self_modulate = Color.WHITE
+	for layer in [range_layer, attack_layer]:
+		for ch in layer.get_children():
+			ch.queue_free()
 	reach = {}
+	attack_cells = {}
 
 
-## Walk the selected unit to a highlighted cell; the turn passes when it arrives.
+## Walk the selected unit to a highlighted cell; its action phase starts when it arrives.
 func move_selected(target: Vector2i) -> bool:
-	if selected == null or busy or not reach.has(target) or target == selected["cell"]:
+	if selected == null or phase != "move" or not reach.has(target) or target == selected["cell"]:
 		return false
 	var path: Array = []
 	var c := target
@@ -841,19 +986,195 @@ func move_selected(target: Vector2i) -> bool:
 	u["t"] = 0.0
 	face(u, Vector2(path[0] - u["cell"]))
 	act(u, "walk")
-	busy = true
+	phase = "walk"
 	_update_hud()
 	return true
 
 
+## Action phase: red cells on the enemies within reach; none -> the unit is done.
+func enter_act(u: Dictionary) -> void:
+	_clear_range()
+	selected = u
+	for e in units:
+		if e["team"] != u["team"] and e["hp"] > 0:
+			var dist: int = absi(e["cell"].x - u["cell"].x) + absi(e["cell"].y - u["cell"].y)
+			if dist <= int(u["reach"]):
+				attack_cells[e["cell"]] = e
+	if attack_cells.is_empty():
+		finish(u)
+		return
+	phase = "act"
+	for c in attack_cells:
+		_overlay(attack_layer, attack_tex, c)
+		var edge := Sprite2D.new()                 # outline over the target's feet: a tall
+		edge.texture = ring_tex                    # sprite would hide the red cell under it
+		edge.centered = false
+		edge.modulate = Color(1.0, 0.32, 0.26)
+		edge.position = top(c) - Vector2(hw, hh)
+		edge.z_index = depth(c) + Z_THING + 1
+		attack_layer.add_child(edge)
+	_update_hud()
+
+
+## The unit has acted: grey until its team's next turn; the turn passes once the team is done.
+func finish(u: Dictionary) -> void:
+	u["done"] = true
+	u["sprite"].modulate = DONE_GREY
+	var ring: Sprite2D = u["ring"]
+	ring.modulate.a = 0.4
+	_clear_range()
+	selected = null
+	phase = "select"
+	preview = ""
+	var all_done := true
+	for e in units:
+		if e["team"] == active_team and not e["done"]:
+			all_done = false
+	if all_done:
+		end_turn()
+	_update_hud()
+
+
 func end_turn() -> void:
-	if busy:
+	if busy or phase == "over":
 		return
 	select(null)
+	teams = _living_teams()
 	if teams.is_empty():
 		return
-	active_team = int(teams[(teams.find(active_team) + 1) % teams.size()])
+	var i := teams.find(active_team)
+	active_team = int(teams[(i + 1) % teams.size()])
+	for u in units:
+		if u["team"] == active_team:
+			u["done"] = false
+			u["sprite"].modulate = Color.WHITE
+			var ring: Sprite2D = u["ring"]
+			ring.modulate.a = 0.75
+	preview = ""
 	_update_hud()
+	turn_started.emit(active_team)
+
+
+func _living_teams() -> Array:
+	var out: Array = []
+	for u in units:
+		if not out.has(u["team"]):
+			out.append(u["team"])
+	out.sort()
+	return out
+
+
+## a attacks t: face each other, attack anim (or a lunge), the hit lands part-way through:
+## hp drops, damage number, hurt anim (or a flash + shake); at 0 hp the target dies.
+func attack(a: Dictionary, t: Dictionary) -> void:
+	if phase != "act" or not attack_cells.has(t["cell"]):
+		return
+	phase = "busy"
+	_clear_range()
+	preview = ""
+	var dmg := damage(a, t)
+	face(a, Vector2(t["cell"] - a["cell"]))
+	face(t, Vector2(a["cell"] - t["cell"]))
+	var hurt_len := clampf(anim_length(t, "hurt"), 0.35, 1.2) if has_anim(t, "hurt") else 0.4
+	var spr: AnimatedSprite2D = a["sprite"]
+	var tw := create_tween()
+	if has_anim(a, "attack"):
+		act(a, "attack")
+		var l := clampf(anim_length(a, "attack"), 0.3, 1.6)
+		tw.tween_interval(l * 0.55)
+		tw.tween_callback(_land.bind(a, t, dmg))
+		tw.tween_interval(maxf(l * 0.45, hurt_len))
+	else:                                          # no attack clip: lunge at the target
+		var toward: Vector2 = (top(t["cell"]) - top(a["cell"])).normalized() * 6.0
+		tw.tween_property(spr, "position", toward.round(), 0.1)
+		tw.tween_callback(_land.bind(a, t, dmg))
+		tw.tween_property(spr, "position", Vector2.ZERO, 0.14)
+		tw.tween_interval(maxf(0.1, hurt_len - 0.14))
+	tw.tween_interval(0.15)
+	tw.tween_callback(_after_hit.bind(a, t))
+	_update_hud()
+
+
+func _land(a: Dictionary, t: Dictionary, dmg: int) -> void:
+	t["hp"] = maxi(0, int(t["hp"]) - dmg)
+	_update_bar(t)
+	_number(t, dmg)
+	var ts: AnimatedSprite2D = t["sprite"]
+	var fx := create_tween()
+	fx.tween_property(ts, "self_modulate", Color(1.0, 0.35, 0.3), 0.04)
+	fx.tween_property(ts, "self_modulate", Color.WHITE, 0.08)
+	fx.tween_property(ts, "self_modulate", Color(1.0, 0.35, 0.3), 0.06)
+	fx.tween_property(ts, "self_modulate", Color.WHITE, 0.12)
+	if t["hp"] > 0 and has_anim(t, "hurt"):
+		act(t, "hurt")
+	elif t["hp"] > 0:                              # no hurt clip: shake
+		var sh := create_tween()
+		for x in [2, -2, 2, -1, 0]:
+			sh.tween_property(ts, "position:x", float(x), 0.05)
+	hit.emit(a, t, dmg)
+
+
+func _after_hit(a: Dictionary, t: Dictionary) -> void:
+	act(a, "idle")
+	if t["hp"] > 0:
+		act(t, "idle")
+		finish(a)
+	else:
+		_kill(t, a)
+
+
+func _kill(t: Dictionary, a: Dictionary) -> void:
+	var tw := create_tween()
+	var clip := "death" if has_anim(t, "death") else ("lie_down" if has_anim(t, "lie_down") else "")
+	if clip != "":
+		act(t, clip)
+		tw.tween_interval(clampf(anim_length(t, clip), 0.3, 1.8) + 0.3)
+	tw.tween_property(t["node"], "modulate:a", 0.0, 0.45)
+	tw.tween_callback(func():
+		units.erase(t)                             # frees its cell
+		t["node"].queue_free()
+		died.emit(t)
+		if not _check_victory():
+			finish(a))
+
+
+func _check_victory() -> bool:
+	var alive := _living_teams()
+	if alive.size() > 1:
+		return false
+	winner = int(alive[0]) if not alive.is_empty() else -1
+	teams = alive
+	phase = "over"
+	selected = null
+	_clear_range()
+	cursor.visible = false
+	_show_banner()
+	_update_hud()
+	game_over.emit(winner)
+	return true
+
+
+func _number(t: Dictionary, dmg: int) -> void:
+	var l := Label.new()
+	l.text = str(dmg)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	l.add_theme_font_size_override("font_size", 12)
+	l.add_theme_color_override("font_color", Color(1.0, 0.93, 0.45))
+	l.add_theme_color_override("font_outline_color", Color(0.25, 0.05, 0.05))
+	l.add_theme_constant_override("outline_size", 4)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.size = Vector2(40, 16)
+	l.z_as_relative = false
+	l.z_index = Z_TOP + 1
+	var b: Rect2 = t["body"]
+	var at: Vector2 = t["node"].position + Vector2(-20, b.position.y - 22)
+	l.position = at.round()
+	add_child(l)
+	var tw := create_tween()
+	tw.tween_property(l, "position:y", at.y - 10, 0.35).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+	tw.tween_interval(0.45)
+	tw.tween_property(l, "modulate:a", 0.0, 0.3)
+	tw.tween_callback(l.queue_free)
 
 
 func _step(u: Dictionary, delta: float) -> void:
@@ -868,9 +1189,7 @@ func _step(u: Dictionary, delta: float) -> void:
 		u["t"] = 0.0
 		_place(u, top(u["cell"]), depth(u["cell"]))
 		act(u, "idle")
-		busy = false
-		selected = null
-		end_turn()
+		enter_act(u)
 		return
 	var a: Vector2i = u["from"]
 	var b: Vector2i = u["path"][0]
@@ -896,7 +1215,7 @@ func cell_at(p: Vector2) -> Vector2i:
 	return Vector2i(-1, -1)
 
 
-func unit_at(p: Vector2):
+func unit_at(p: Vector2) -> Variant:
 	var best: Variant = null
 	for u in units:
 		var node: Node2D = u["node"]
@@ -907,27 +1226,65 @@ func unit_at(p: Vector2):
 	return best
 
 
+func _ready_unit(u) -> bool:
+	return u != null and u["team"] == active_team and not u["done"]
+
+
 func click(p: Vector2) -> void:
-	if busy:
-		return
-	var u: Variant = unit_at(p)
-	if u != null and u["team"] == active_team and u != selected:
-		select(u)
+	if busy or phase == "over":
 		return
 	var c := cell_at(p)
-	if selected != null and reach.has(c) and c != selected["cell"]:
-		move_selected(c)
+	var u: Variant = unit_at(p)
+	if phase == "act":
+		var target: Variant = null
+		if u != null and attack_cells.has(u["cell"]) and is_same(attack_cells[u["cell"]], u):
+			target = u
+		elif attack_cells.has(c):
+			target = attack_cells[c]
+		if target != null:
+			attack(selected, target)
 		return
-	var on: Variant = null
-	if inside(c):
+	if phase == "move" and selected != null:
+		if (u != null and is_same(u, selected)) or c == selected["cell"]:
+			enter_act(selected)                    # stay put and act
+			return
+		if _ready_unit(u):
+			select(u)
+			return
+		if reach.has(c) and unit_on(c) == null:
+			move_selected(c)
+			return
+	var on: Variant = u
+	if not _ready_unit(on) and inside(c):
 		on = unit_on(c)
-	if on != null and on["team"] == active_team and on != selected:
-		select(on)
+	select(on if _ready_unit(on) else null)
+
+
+## Space/Tab: the selected unit waits (done); with nothing selected, end the turn.
+func wait_or_end_turn() -> void:
+	if busy or phase == "over":
+		return
+	if selected != null:
+		finish(selected)
+	else:
+		end_turn()
+
+
+## Esc / right click: cancel the move range, or end the action phase (no undo of a move).
+func cancel() -> void:
+	if busy or phase == "over":
+		return
+	if phase == "act":
+		finish(selected)
 	else:
 		select(null)
 
 
 func _unhandled_input(e: InputEvent) -> void:
+	if phase == "over":
+		if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE and ResourceLoader.exists("res://menu.tscn"):
+			get_tree().change_scene_to_file("res://menu.tscn")
+		return
 	if e is InputEventMouseButton and e.pressed:
 		match e.button_index:
 			MOUSE_BUTTON_WHEEL_UP:
@@ -936,26 +1293,41 @@ func _unhandled_input(e: InputEvent) -> void:
 				set_zoom(zoom_level - 1)
 			MOUSE_BUTTON_LEFT:
 				click(get_global_mouse_position())
+				hover(get_global_mouse_position())
 			MOUSE_BUTTON_RIGHT:
-				select(null)
+				cancel()
 	elif e is InputEventMouseMotion:
 		hover(get_global_mouse_position())
 	elif e is InputEventKey and e.pressed and not e.echo:
 		if e.keycode == KEY_TAB or e.keycode == KEY_SPACE:
-			end_turn()
+			wait_or_end_turn()
 		elif e.keycode == KEY_ESCAPE:
-			if selected == null and ResourceLoader.exists("res://menu.tscn"):
+			if phase == "select" and ResourceLoader.exists("res://menu.tscn"):
 				get_tree().change_scene_to_file("res://menu.tscn")
 			else:
-				select(null)
+				cancel()
 
 
 func hover(p: Vector2) -> void:
 	var c := cell_at(p)
-	cursor.visible = inside(c) and ter(c) != "water"
+	cursor.visible = inside(c) and ter(c) != "water" and phase != "over"
 	if cursor.visible:
 		cursor.position = top(c) - Vector2(hw, hh)
 		cursor.z_index = depth(c) + Z_CURSOR
+	hovered = unit_at(p)
+	if hovered == null and inside(c):
+		hovered = unit_on(c)
+	preview = ""
+	if phase == "act" and selected != null:
+		var t: Variant = null
+		if hovered != null and attack_cells.has(hovered["cell"]):
+			t = hovered
+		elif attack_cells.has(c):
+			t = attack_cells[c]
+		if t != null:
+			var dmg := damage(selected, t)
+			preview = "Hit %s for %d%s" % [String(t["name"]).capitalize(), dmg, "  KO!" if dmg >= int(t["hp"]) else ""]
+	_update_hud()
 
 
 func set_zoom(z: int) -> void:
@@ -979,11 +1351,12 @@ func _build_ui() -> void:
 	set_zoom(int(conf.get("zoom", 1)))
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	var panel := ColorRect.new()
-	panel.color = Color(0.05, 0.05, 0.1, 0.72)
-	panel.position = Vector2(4, 4)
-	panel.size = Vector2(200, 30)
-	layer.add_child(panel)
+	hud_panel = ColorRect.new()
+	hud_panel.color = Color(0.05, 0.05, 0.1, 0.72)
+	hud_panel.position = Vector2(4, 4)
+	hud_panel.size = Vector2(236, 42)
+	hud_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(hud_panel)
 	hud = Label.new()
 	hud.position = Vector2(9, 6)
 	hud.add_theme_font_size_override("font_size", 10)
@@ -993,26 +1366,90 @@ func _build_ui() -> void:
 	strip.color = Color(0.05, 0.05, 0.1, 0.6)
 	strip.position = Vector2(0, 342)
 	strip.size = Vector2(640, 18)
+	strip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(strip)
 	var help := Label.new()
-	help.text = "Click unit > purple cell   Tab/Space end turn   WASD pan   wheel zoom"
+	help.text = "Unit > purple cell (unit = stay) > red enemy    Space wait / end turn    Esc cancel    WASD pan    wheel zoom"
 	help.position = Vector2(6, 344)
 	help.add_theme_font_size_override("font_size", 8)
 	help.modulate = Color(1, 1, 1, 0.85)
 	layer.add_child(help)
 
 
+func _show_banner() -> void:
+	banner = CanvasLayer.new()
+	banner.layer = 5
+	add_child(banner)
+	var band := ColorRect.new()
+	band.color = Color(0.03, 0.03, 0.07, 0.82)
+	band.position = Vector2(0, 148)
+	band.size = Vector2(640, 56)
+	band.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.add_child(band)
+	var col := team_colour(winner) if winner >= 0 else Color.WHITE
+	for edge in [148, 202]:
+		var line := ColorRect.new()
+		line.color = col
+		line.position = Vector2(0, edge)
+		line.size = Vector2(640, 2)
+		banner.add_child(line)
+	var l := Label.new()
+	l.text = "%s wins!" % TEAM_NAMES[winner % TEAM_NAMES.size()] if winner >= 0 else "Draw"
+	l.add_theme_font_size_override("font_size", 28)
+	l.add_theme_color_override("font_color", col.lerp(Color.WHITE, 0.3))
+	l.add_theme_color_override("font_outline_color", Color(0, 0, 0))
+	l.add_theme_constant_override("outline_size", 6)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.position = Vector2(0, 150)
+	l.size = Vector2(640, 40)
+	banner.add_child(l)
+	if ResourceLoader.exists("res://menu.tscn"):
+		var sub := Label.new()
+		sub.text = "Esc: menu"
+		sub.add_theme_font_size_override("font_size", 8)
+		sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		sub.position = Vector2(0, 189)
+		sub.size = Vector2(640, 12)
+		banner.add_child(sub)
+
+
+func _alive(u) -> bool:
+	for e in units:
+		if is_same(e, u):
+			return true
+	return false
+
+
+func unit_line(u: Dictionary) -> String:
+	return "%s  HP %d/%d  ATK %d DEF %d MOV %d" % [String(u["name"]).capitalize(), u["hp"], u["max_hp"],
+		u["atk"], u["def"], u["move"]]
+
+
 func _update_hud() -> void:
 	if hud == null:
 		return
 	var team_name: String = TEAM_NAMES[active_team % TEAM_NAMES.size()]
-	var line2 := "Pick a unit"
-	if selected != null:
-		line2 = "Selected: %s" % String(selected["name"]).capitalize()
-	if busy:
-		line2 = "Moving..."
-	hud.text = "%s team's turn\n%s" % [team_name, line2]
-	hud.modulate = Color(conf["teams"][active_team % conf["teams"].size()]).lerp(Color.WHITE, 0.45)
+	var shown: Variant = selected if selected != null else hovered
+	if shown != null and not _alive(shown):
+		shown = null
+	var line2 := unit_line(shown) if shown != null else ("Pick a unit" if phase != "over" else "")
+	var line3 := ""
+	match phase:
+		"select":
+			line3 = "Click a unit  (Space: end turn)"
+		"move":
+			line3 = "Purple: move   unit: stay   Space: wait"
+		"walk":
+			line3 = "Moving..."
+		"act":
+			line3 = preview if preview != "" else "Red: attack   Space: wait"
+		"busy":
+			line3 = "..."
+		"over":
+			line3 = "%s wins!" % TEAM_NAMES[winner % TEAM_NAMES.size()] if winner >= 0 else "Draw"
+	var line1 := "%s team's turn" % team_name if phase != "over" else "Battle over"
+	hud.text = "%s\n%s\n%s" % [line1, line2, line3]
+	hud.modulate = team_colour(active_team).lerp(Color.WHITE, 0.45)
 
 
 func _process(delta: float) -> void:
@@ -1033,7 +1470,14 @@ func _process(delta: float) -> void:
 		water_clock = 0.0
 		var f := int(water_tex.region.position.x / tile + 1) % water_frames
 		water_tex.region = Rect2(f * tile, 0, tile, tile / 2)
-	range_layer.modulate.a = 0.75 + 0.25 * sin(clock * 5.0)
+	var pulse := 0.92 + 0.08 * sin(clock * 4.0)    # gentle: stays clearly coloured
+	range_layer.modulate.a = pulse
+	attack_layer.modulate.a = pulse
+	if phase == "act":                             # targets glow red
+		var k := 0.5 + 0.5 * sin(clock * 6.0)
+		for t in attack_cells.values():
+			var ts: AnimatedSprite2D = t["sprite"]
+			ts.self_modulate = Color(1.0, 0.62 + 0.2 * k, 0.6 + 0.2 * k)
 	for g in glows:
 		var s: Sprite2D = g[0]
 		s.modulate.a = 0.75 + 0.25 * sin(clock * 9.0 + g[1]) * sin(clock * 5.3 + g[1] * 2.0)
@@ -1047,11 +1491,12 @@ func _process(delta: float) -> void:
 
 
 def write_iso_scene(diorama: Diorama, project_dir, units: dict | None = None, tile: int = 32, *,
-                    seed: int = 0, move: int = 4, jump: int = 2, zoom: int = 1,
-                    overwrite_map: bool = False) -> list[Path]:
+                    seed: int = 0, zoom: int = 1, overwrite_map: bool = False) -> list[Path]:
     """Write the isometric scene into `project_dir/iso/` (see the module doc).
     units: {map unit name: sprite sheet .png} (with its .json frame list and, if there, the
-    SpriteFrames .tres beside it); map units without a sheet get a plain stand-in.
+    SpriteFrames .tres beside it); map units without a sheet get a plain stand-in. Unit stats
+    (hp attack defence move jump reach) come from map.json, else diorama.CLASSES by name.
+    Sprites are drawn at their native sheet pixel size (no per-unit scaling).
     Returns the written files."""
     if tile % 8:
         raise ValueError("tile must be a multiple of 8 (e.g. 32)")
@@ -1077,11 +1522,13 @@ def write_iso_scene(diorama: Diorama, project_dir, units: dict | None = None, ti
     conf: dict = {
         "tile": tile, "level_px": lp, "base": BASE, "level": LEVEL,
         "min_level": min(levels), "max_level": max(levels),
-        "move": move, "jump": jump, "zoom": zoom, "teams": TEAM_COLOURS,
+        "zoom": zoom, "teams": TEAM_COLOURS,
+        "classes": {k: list(v) for k, v in CLASSES.items()}, "default_stats": list(DEFAULT_STATS),
         "walkable": sorted(WALKABLE), "blocking": sorted(BLOCKING_PROPS),
         "blocks": save(atlas, "blocks.png"), "blocks_rects": rects,
         "water": save(water_frames(tile, seed), "water.png"), "water_frames": WATER_FRAMES,
         "range": save(range_sprite(tile), "range.png"),
+        "attack": save(attack_sprite(tile), "attack.png"),
         "cursor": save(cursor_sprite(tile), "cursor.png"),
         "shadow": save(shadow_sprite(int(tile * 0.6) // 2 * 2), "shadow.png"),
     }

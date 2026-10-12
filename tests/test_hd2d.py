@@ -91,3 +91,56 @@ def test_cli_hd2d(tmp_path, capsys):
     assert main(["hd2d", "-o", str(tmp_path / "p"), "--unit", f"dog={dog}", "--unit", f"knight={knight}"]) == 0
     assert (tmp_path / "p" / "real3d.tscn").exists() and (tmp_path / "p" / "iso" / "iso.tscn").exists()
     assert "HD-2D project" in capsys.readouterr().out
+
+
+FIGHT_GD = """extends SceneTree
+var f := 0
+var b
+func _initialize() -> void:
+	change_scene_to_file("res://real3d.tscn")
+func _process(_d: float) -> bool:
+	f += 1
+	if f == 10:
+		b = root.get_child(root.get_child_count() - 1)
+		var k = b.units[0]
+		b._click(Vector2i(k["col"], k["row"]))
+		print("PHASE ", b.phase)
+		b._click(Vector2i(3, 2))
+	if f == 80:
+		print("PHASE ", b.phase, " TARGETS ", b.attack_cells.size())
+		var dog = b.units[1]
+		print("DAMAGE ", b._damage(b.units[0], dog))
+		b._click(Vector2i(dog["col"], dog["row"]))
+	if f == 160 and b.units.size() > 1:
+		print("HP ", b.units[1]["hp"], " PHASE ", b.phase, " TEAM ", b.active_team)
+	if f == 400:
+		print("END ", b.units.size(), " ", b.banner.text)
+		return true
+	return false
+"""
+
+
+@pytest.mark.skipif(not GODOT, reason="set GODOT_BIN to play a fight in Godot")
+@pytest.mark.parametrize("dog_hp", [30, 10])
+def test_fight_damage_turns_and_victory(tmp_path, dog_hp):
+    from pixel_pipeline.diorama import Unit, damage
+    h = np.ones((5, 6), int)
+    t = np.full((5, 6), "cobble", object)
+    knight = Unit("knight", 2, 2, 0, "E", attack=20)
+    dog = Unit("dog", 4, 2, 1, "W", hp=dog_hp)
+    d = Diorama(6, 5, h, t, [], [knight, dog], name="arena")
+    out = tmp_path / "p"
+    make_hd2d(out, {"dog": fake_sheet(tmp_path / "dog.png", anims=("idle", "walk", "death")),
+                    "knight": fake_sheet(tmp_path / "knight.png", anims=("idle", "walk", "attack"))}, d, iso=False)
+    (out / "fight.gd").write_text(FIGHT_GD)
+    run = subprocess.run([GODOT, "--headless", "--fixed-fps", "60", "--path", str(out), "-s", "fight.gd"],
+                         capture_output=True, text=True, timeout=180)
+    log = run.stdout + run.stderr
+    assert "SCRIPT ERROR" not in log, log[-2000:]
+    hit = damage(knight, dog)
+    assert "PHASE move" in log and "PHASE act TARGETS 1" in log and f"DAMAGE {hit}" in log
+    if dog_hp > hit:
+        assert f"HP {dog_hp - hit} PHASE select TEAM 1" in log   # knight done -> red's turn
+        assert "END 2 " in log
+    else:
+        assert "END 1 Blue wins!" in log                          # death, then victory

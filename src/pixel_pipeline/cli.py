@@ -559,8 +559,8 @@ def _add_hd2d(sub):
     p.add_argument("--unit", action="append", default=[], metavar="NAME=SHEET.png",
                    help="sprite sheet for a map unit (harbour has knight and dog). Repeatable")
     p.add_argument("--no-iso", dest="iso", action="store_false", help="skip the isometric 2D look")
-    p.add_argument("--ppu", type=float, default=30.0,
-                   help="sprite pixels per tile in 3D (smaller = bigger units, default 30)")
+    p.add_argument("--ppu", type=float, default=42.0,
+                   help="sprite pixels per tile in 3D (smaller = bigger units, default 42)")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=_cmd_hd2d)
 

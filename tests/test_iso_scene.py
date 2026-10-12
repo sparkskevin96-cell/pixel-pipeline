@@ -1,5 +1,7 @@
-"""The isometric 2D scene: files, map.json round trip, block geometry, and (with GODOT_BIN) the
-scene running in Godot: range = diorama.path_cost, a move walks there and passes the turn."""
+"""The isometric 2D scene: files, map.json round trip, block geometry, overlays, and (with
+GODOT_BIN) the scene running in Godot: range = diorama.path_cost with each unit's own move/jump,
+a move walks there and the unit is done; a scripted 1v1 fight checks damage = diorama.damage,
+hurt/death fallbacks, done-greying, the automatic turn pass and the victory banner."""
 import json
 import os
 import shutil
@@ -10,29 +12,32 @@ from PIL import Image
 import pytest
 
 from pixel_pipeline.cli import main
-from pixel_pipeline.diorama import Diorama, harbour, path_cost
+from pixel_pipeline.diorama import Diorama, Unit, damage, harbour, path_cost
 from pixel_pipeline.godot import write_sprite_frames
-from pixel_pipeline.iso_scene import DIRECTIONS, iso_column, unit_metrics, write_iso_scene
+from pixel_pipeline.iso_scene import (DIRECTIONS, attack_sprite, iso_column, range_sprite,
+                                      unit_metrics, write_iso_scene)
 
 GODOT = os.environ.get("GODOT_BIN") or shutil.which("godot")
 
 
-def fake_sheet(folder, name="knight", tres=True):
-    """16 x 24 frames, idle (1) + walk (2) in 16 directions, feet on row 21."""
+def fake_sheet(folder, name="knight", tres=True, size=(16, 24), anims=(("idle", 1), ("walk", 2))):
+    """Frames `size` (w, h) with a block body standing on row h-3, the given (anim, frame count)
+    in 16 directions (default idle 1 + walk 2, feet on row 21 of 16 x 24)."""
     folder.mkdir(parents=True, exist_ok=True)
-    frame = np.zeros((24, 16, 4), np.uint8)
-    frame[4:22, 5:11] = (200, 60, 60, 255)
-    names = [f"{a}_{d} {i}" for a, n in (("idle", 1), ("walk", 2)) for d in DIRECTIONS for i in range(n)]
+    fw, fh = size
+    frame = np.zeros((fh, fw, 4), np.uint8)
+    frame[4:fh - 2, fw // 2 - 3:fw // 2 + 3] = (200, 60, 60, 255)
+    names = [f"{a}_{d} {i}" for a, n in anims for d in DIRECTIONS for i in range(n)]
     Image.fromarray(np.concatenate([frame] * len(names), 1)).save(folder / f"{name}.png")
-    rects = [(i * 16, 0, 16, 24) for i in range(len(names))]
+    rects = [(i * fw, 0, fw, fh) for i in range(len(names))]
     (folder / f"{name}.json").write_text(json.dumps({"frames": [
         {"filename": nm, "frame": {"x": x, "y": y, "w": w, "h": h}, "duration": 100}
         for nm, (x, y, w, h) in zip(names, rects)]}))
     if tres:
-        anims = {}
+        anims_ = {}
         for i, nm in enumerate(names):
-            anims.setdefault(nm.split(" ")[0], {"frames": [], "duration_ms": 100})["frames"].append(i)
-        write_sprite_frames(folder / f"{name}.tres", folder / f"{name}.png", rects, anims)
+            anims_.setdefault(nm.split(" ")[0], {"frames": [], "duration_ms": 100})["frames"].append(i)
+        write_sprite_frames(folder / f"{name}.tres", folder / f"{name}.png", rects, anims_)
     return folder / f"{name}.png"
 
 
@@ -54,6 +59,23 @@ def test_unit_metrics_find_the_feet(tmp_path):
     png = fake_sheet(tmp_path, tres=False)
     m = unit_metrics(png, png.with_suffix(".json"))
     assert m["foot"] == [8, 21] and m["body"] == [-3, -17, 3, 1] and m["size"] == [16, 24]
+    # small animal sheets (40x40 dog, 48x40 wolf, 56x48 bear), some with walk frames only
+    for size, anims in (((40, 40), (("idle", 1),)), ((48, 40), (("walk", 2),)), ((56, 48), (("idle", 2),))):
+        png = fake_sheet(tmp_path / f"s{size[0]}", "a", False, size, anims)
+        m = unit_metrics(png, png.with_suffix(".json"))
+        assert m["size"] == list(size) and m["foot"] == [size[0] // 2, size[1] - 3]
+        assert m["body"][1] == -(size[1] - 7) and m["body"][3] == 1
+
+
+def test_overlays_are_saturated_purple_and_red():
+    import colorsys
+    for spr, hue in ((range_sprite(32), 270), (attack_sprite(32), 0)):
+        inside = spr[..., 3] > 0
+        assert spr[inside, 3].min() >= 180                      # mostly opaque fill
+        h, s_, _ = colorsys.rgb_to_hsv(*(spr[8, 16, :3] / 255))  # the centre: fill
+        assert s_ > 0.75 and min(abs(h * 360 - hue), 360 - abs(h * 360 - hue)) < 25
+        edge = spr[8, 0:3][inside[8, 0:3]][0, :3].astype(int)       # left tip = outline, lighter
+        assert edge.sum() > spr[8, 16, :3].astype(int).sum()
 
 
 def test_write_iso_scene_files_and_map_round_trip(tmp_path):
@@ -131,8 +153,8 @@ func _process(_d: float) -> bool:
 		iso.click(iso.top(far) + Vector2(0, 2))                    # click the cell's top
 		print("WALK %s" % mover["sprite"].animation)
 	elif n > 3 and not iso.busy:
-		print("ARRIVED %d %d %s %s" % [mover["cell"].x, mover["cell"].y, mover["sprite"].animation,
-			str(iso.active_team != start_team)])
+		print("ARRIVED %d %d %s %s %s %.2f %s" % [mover["cell"].x, mover["cell"].y, mover["sprite"].animation,
+			str(iso.active_team == start_team), str(mover["done"]), mover["sprite"].modulate.r, iso.phase])
 		return true
 	return n > 3000
 """
@@ -153,12 +175,116 @@ def test_iso_scene_runs_in_godot(tmp_path):
     lines = {x.split(" ", 1)[0]: x.split(" ", 1)[1] for x in res.stdout.splitlines() if " " in x}
     ranges = json.loads(lines["RANGES"])
     for u in d.units:
-        want = path_cost(d, (u.col, u.row))
+        want = path_cost(d, (u.col, u.row), u.move, u.jump)
         got = {(c, r): s for c, r, s in ranges[f"{u.col},{u.row}"]}
         assert got == want, u
     count, anim = lines["UNITS"].split()
     assert count == "4" and anim.startswith("idle_")
     assert lines["SELECTED"] == "true" and lines["WALK"].startswith("walk_")
     tx, ty = lines["TARGET"].split()
-    ax, ay, anim, passed = lines["ARRIVED"].split()
-    assert (ax, ay) == (tx, ty) and anim.startswith("idle_") and passed == "true"
+    ax, ay, anim, same_team, done, grey, phase = lines["ARRIVED"].split()
+    # no enemy in reach on arrival: the unit is done (greyed); its team mate still has to act
+    assert (ax, ay) == (tx, ty) and anim.startswith("idle_")
+    assert done == "true" and grey == "0.55" and same_team == "true" and phase == "select"
+
+
+FIGHT = """extends SceneTree
+# blue knight walks next to the red dog, attacks; red dog stays and bites back; blue hits again
+# and the dog dies -> removed, blue wins.
+var iso
+var n := 0
+var stage := 0
+var knight
+var dog
+
+func _initialize() -> void:
+	iso = load("res://iso/iso.tscn").instantiate()
+	root.add_child(iso)
+	iso.hit.connect(func(a, t, d):
+		print("HIT %s %d %d %d %d %d %s" % [a["name"], a["cell"].x, a["cell"].y, t["cell"].x, d, t["hp"], t["sprite"].animation]))
+	iso.died.connect(func(u): print("DIED %s %d" % [u["name"], iso.units.size()]))
+	iso.turn_started.connect(func(t): print("TURN %d %.2f %.2f" % [t, knight["sprite"].modulate.r, dog["sprite"].modulate.r]))
+	iso.game_over.connect(func(w): print("OVER %d" % w))
+
+func body(u) -> Vector2:
+	return u["node"].position + u["body"].get_center()
+
+func _process(_d: float) -> bool:
+	n += 1
+	if n > 4000:
+		return true                       # (also ends the run if a step below errors)
+	if n < 3 or iso.busy:
+		return false
+	if stage == 0:
+		knight = iso.units[0]
+		dog = iso.units[1]
+		print("STATS %d %d %d %d %d %d %d" % [knight["hp"], knight["atk"], knight["def"], knight["move"], knight["jump"], knight["reach"], dog["hp"]])
+		iso.click(body(knight))
+		iso.click(iso.top(Vector2i(2, 1)) + Vector2(0, 2))
+		stage = 1
+	elif stage == 1 and iso.phase == "act":
+		print("RED %s" % str(iso.attack_cells.keys()))
+		iso.hover(body(dog))
+		print("PREVIEW " + iso.hud.text.split("\\n")[2])
+		print("HUD " + iso.hud.text.split("\\n")[1])
+		iso.click(body(dog))
+		stage = 2
+	elif stage == 2 and iso.active_team == 1 and iso.phase == "select":
+		iso.click(body(dog))
+		iso.click(body(dog))              # again: stay and act
+		iso.click(body(knight))
+		stage = 3
+	elif stage == 3 and iso.active_team == 0 and iso.phase == "select":
+		iso.click(body(knight))
+		iso.click(body(knight))
+		iso.click(body(dog))
+		stage = 4
+	elif stage == 4 and iso.phase == "over":
+		iso.click(body(knight))
+		print("END %d %s %s %s" % [iso.units.size(), str(iso.unit_on(Vector2i(3, 1)) == null),
+			str(iso.selected == null), iso.banner.get_child(3).text])
+		return true
+	return n > 4000
+"""
+
+
+@pytest.mark.skipif(not GODOT, reason="set GODOT_BIN to run the iso scene in Godot")
+def test_iso_fight_in_godot(tmp_path):
+    # 1v1 on a strip: cols 0-2 at level 2, cols 3-4 at level 1 (the knight hits from above)
+    h = np.array([[2, 2, 2, 1, 1]] * 3)
+    knight = Unit("knight", 0, 1, 0, "E", attack=20)
+    dog = Unit("dog", 3, 1, 1, "W", hp=40)
+    d = Diorama(5, 3, h, np.full((3, 5), "grass", object), units=[knight, dog], name="duel")
+    out = tmp_path / "game"
+    # the knight's sheet has attack/hurt/death; the 40x40 dog has only idle + walk (fallbacks)
+    write_iso_scene(d, out, {
+        "knight": fake_sheet(tmp_path / "k", anims=(("idle", 1), ("walk", 2), ("attack", 3),
+                                                     ("hurt", 2), ("death", 2))),
+        "dog": fake_sheet(tmp_path / "d", "dog", tres=False, size=(40, 40))})
+    (out / "fight.gd").write_text(FIGHT)
+    run = [GODOT, "--headless", "--path", str(out)]
+    subprocess.run(run + ["--import"], capture_output=True, timeout=300)
+    res = subprocess.run(run + ["-s", "fight.gd"], capture_output=True, text=True, timeout=120)
+    log = res.stdout + res.stderr
+    assert "SCRIPT ERROR" not in log and "Parse Error" not in log, log
+    out_lines = [x for x in res.stdout.splitlines() if " " in x]
+    first = {x.split(" ", 1)[0]: x.split(" ", 1)[1] for x in reversed(out_lines)}
+    assert first["STATS"].split() == ["34", "20", "8", "4", "2", "1", "40"], log
+    assert first["RED"] == "[(3, 1)]"
+    up = damage(knight, dog, 2, 1)                 # from level 2 down onto level 1: +25%
+    back = damage(dog, knight, 1, 2)
+    assert up == 23 and back == 5
+    assert first["PREVIEW"] == f"Hit Dog for {up}"
+    assert first["HUD"] == "Knight  HP 34/34  ATK 20 DEF 8 MOV 4"
+    hits = [x.split()[1:] for x in out_lines if x.startswith("HIT ")]
+    assert [(h_[0], h_[1], h_[2], h_[4], h_[5]) for h_ in hits] == [
+        ("knight", "2", "1", str(up), str(40 - up)),
+        ("dog", "3", "1", str(back), str(34 - back)),
+        ("knight", "2", "1", str(up), "0")], log
+    assert hits[1][6].startswith("hurt_")          # the knight has a hurt clip; the dog not
+    assert hits[0][6].startswith("idle_")
+    turns = [x.split()[1:] for x in out_lines if x.startswith("TURN ")]
+    # red's turn: the knight that acted is greyed; blue's next turn: un-greyed, the dog grey
+    assert turns[:2] == [["1", "0.55", "1.00"], ["0", "1.00", "0.55"]], log
+    assert first["DIED"] == "dog 1" and first["OVER"] == "0"
+    assert first["END"] == "1 true true Blue wins!"

@@ -24,6 +24,18 @@ WALKABLE = {"grass", "stone", "cobble", "planks", "dirt", "sand"}
 LEVEL = 0.5          # one height level in tiles (world units: 1 tile = 1.0)
 
 
+# Class stats: hp, attack, defence, move, jump, reach (attack distance in cells).
+CLASSES = {
+    "knight":    (34, 12, 8, 4, 2, 1), "swordsman": (30, 13, 6, 4, 2, 1),
+    "paladin":   (40, 11, 11, 3, 1, 1), "spearman": (30, 12, 7, 4, 2, 2),
+    "archer":    (24, 11, 4, 4, 2, 4), "mage":      (22, 14, 3, 3, 2, 3),
+    "physician": (24, 6, 4, 4, 2, 1), "cleric":    (26, 8, 6, 4, 2, 1),
+    "rogue":     (24, 12, 4, 5, 3, 1), "dog":       (22, 9, 3, 5, 2, 1),
+    "wolf":      (26, 11, 4, 5, 2, 1), "bear":      (42, 15, 7, 3, 1, 1),
+}
+DEFAULT_STATS = (28, 10, 5, 4, 2, 1)
+
+
 @dataclass
 class Unit:
     name: str          # sprite set name, e.g. "dog", "knight"
@@ -31,6 +43,26 @@ class Unit:
     row: int
     team: int = 0
     facing: str = "S"  # one of the 16 direction names (E, ESE, SE, ...)
+    hp: int = 0        # 0 = from CLASSES by name
+    attack: int = 0
+    defence: int = 0
+    move: int = 0
+    jump: int = 0
+    reach: int = 0
+
+    def __post_init__(self):
+        stats = CLASSES.get(self.name, DEFAULT_STATS)
+        for field_name, value in zip(("hp", "attack", "defence", "move", "jump", "reach"), stats):
+            if not getattr(self, field_name):
+                setattr(self, field_name, value)
+
+
+def damage(attacker: Unit, target: Unit, attacker_level: int = 0, target_level: int = 0) -> int:
+    """attack - defence/2, +25% from higher ground, at least 1 (no dice: easy to plan)."""
+    dmg = attacker.attack - target.defence // 2
+    if attacker_level > target_level:
+        dmg = dmg * 5 // 4
+    return max(1, dmg)
 
 
 @dataclass
@@ -75,6 +107,27 @@ class Diorama:
 
 
 BLOCKING_PROPS = {"crate", "barrel", "post"}
+
+
+def place_units(d: Diorama, blue: list[str], red: list[str]) -> Diorama:
+    """Replace the map's units: blue starts at the front (high rows: pier and quay), red at
+    the back (low rows: the town), each on free walkable cells spread across the width."""
+    free = [(c, r) for r in range(d.rows) for c in range(d.cols) if d.walkable(c, r)]
+    front = sorted(free, key=lambda p: (-p[1], abs(p[0] - d.cols / 3)))
+    back = sorted(free, key=lambda p: (p[1], abs(p[0] - d.cols / 2)))
+    units, taken = [], set()
+
+    def put(names, cells, team, facing):
+        for name in names:
+            for c, r in cells:
+                if (c, r) not in taken and all(abs(c - tc) + abs(r - tr) > 1 for tc, tr in taken):
+                    taken.add((c, r))
+                    units.append(Unit(name, c, r, team, facing))
+                    break
+    put(blue, front, 0, "N")
+    put(red, back, 1, "S")
+    d.units = units
+    return d
 
 
 def harbour(cols: int = 18, rows: int = 14, seed: int = 0) -> Diorama:

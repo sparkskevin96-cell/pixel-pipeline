@@ -163,7 +163,17 @@ wants terse answers and fixes over polish.
   turn 45°. Fake 3D = same board in a SubViewportContainer (stretch_shrink 3 -> 640x360), ortho
   camera snapped to whole pixels, sprites fully camera-facing. Images load with
   Image.load_from_file (no import needed); the iso look needs `godot --import` once (the editor
-  does it). Units: `add_unit` writes `<name>.unit.json` (frame size, feet row, ppu 30).
+  does it). Units: `add_unit` writes `<name>.unit.json` (frame size, feet row, ppu 42 = a
+  64 px person stands ~1.5 tiles).
+- **Tactics rules** (all three looks, 2026-10-11): `diorama.CLASSES` gives hp/attack/defence/
+  move/jump/reach per unit name (Unit fields override); `diorama.damage` = attack - defence//2,
+  x5/4 from a higher level, min 1, no dice. Select -> purple move range (own move/jump) -> move
+  or stay -> red cells = enemies within Manhattan reach -> attack (attack/hurt/death clips, else
+  lunge/flash/fade), HP bars, damage numbers; done units grey, turn passes when the team is done,
+  banner when one team is left. `place_units(d, blue, red)` = roster. ONE SCALE for all sheets:
+  frames wide enough that height binds (people 96x64; dog 64x28, wolf 72x34, bear 88x44), else a
+  spear or bow shrinks its owner. 10 GPU characters in C:/Users/spark/Pictures/PixelPipeline/chars
+  (make_chars.sh / rescale.sh).
 - **Sprite normal maps** (`normals.py`, `turnaround/model --normals`): camera-space normal of the
   front-most splat per pixel, OpenGL (y up), cropped/resampled with the colour sprite's own
   geometry (`_fit_box`), averaged+renormalised, never palette-snapped; `<sheet>_n.png` packed

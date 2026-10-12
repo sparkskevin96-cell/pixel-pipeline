@@ -558,10 +558,24 @@ func _build_units() -> void:
 		add_child(node)
 		var c := int(u["col"]); var r := int(u["row"])
 		node.position = cell_pos(c, r)
+		var hp := int(u.get("hp", 28))
+		var bar := Sprite3D.new()
+		bar.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		bar.no_depth_test = true
+		bar.shaded = false
+		bar.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		bar.pixel_size = 0.035 if mode == "real" else 0.03
+		bar.render_priority = 10
+		bar.position = Vector3(0, q.size.y + q.center_offset.y - q.size.y / 2.0 + 0.15, 0)
+		node.add_child(bar)
 		var unit := {"node": node, "mesh": mesh, "mat": mat, "sheet": s, "col": c, "row": r,
 			"team": int(u["team"]), "yaw": _dir_yaw(u.get("facing", "S")), "anim": "idle", "t": randf() * 2.0,
-			"name": u["name"]}
+			"name": u["name"], "hp": hp, "max_hp": hp, "atk": int(u.get("attack", 10)),
+			"def": int(u.get("defence", 5)), "move": int(u.get("move", MOVE)), "jump": int(u.get("jump", JUMP)),
+			"reach": int(u.get("reach", 1)), "done": false, "bar": bar, "hold": false,
+			"tint": Color(1, 1, 1) if int(u["team"]) == 0 else Color(1.0, 0.82, 0.82)}
 		units.append(unit)
+		_update_bar(unit)
 		blocked[Vector2i(c, r)] = true
 
 func _dir_yaw(name: String) -> float:
@@ -592,6 +606,8 @@ func _animate_units(delta: float) -> void:
 		var total := 0.0
 		for f in fr: total += f["ms"]
 		var t := fmod(u["t"] * 1000.0, total)
+		if u["hold"]:
+			t = min(u["t"] * 1000.0, total - 1.0)
 		var pick = fr[0]
 		for f in fr:
 			if t < f["ms"]:
@@ -600,7 +616,8 @@ func _animate_units(delta: float) -> void:
 			t -= f["ms"]
 		var r: Rect2 = pick["rect"]
 		u["mat"].set_shader_parameter("frame", Vector4(r.position.x, r.position.y, r.size.x, r.size.y))
-		u["mat"].set_shader_parameter("flash", 0.18 * (0.5 + 0.5 * sin(Time.get_ticks_msec() / 150.0)) if u == selected else 0.0)
+		u["mat"].set_shader_parameter("flash", 0.18 * (0.5 + 0.5 * sin(Time.get_ticks_msec() / 150.0)) if u == selected else u.get("hit", 0.0))
+		u["mat"].set_shader_parameter("tint", u["tint"] * (0.5 if u["done"] else 1.0))
 
 # ------------------------------------------------------------------ camera
 
@@ -672,6 +689,13 @@ func _snap_camera() -> void:
 	cam.global_position = b.x * x + b.y * y + b.z * z
 
 # ------------------------------------------------------------------ play
+# select an own unit -> purple move range -> click a cell (or the unit) -> red cells: enemies
+# within reach -> click one to attack, Space to wait. Done units grey out; when the whole team
+# is done the turn passes. Last team standing wins.
+
+var phase := "select"      # select, move, act, busy, over
+var attack_cells := {}     # Vector2i -> target unit
+var banner: Label
 
 func _build_cursor() -> void:
 	cursor = MeshInstance3D.new()
@@ -696,14 +720,46 @@ func _hud() -> void:
 	hud.add_theme_color_override("font_outline_color", Color.BLACK)
 	hud.add_theme_constant_override("outline_size", 6)
 	layer.add_child(hud)
+	banner = Label.new()
+	banner.set_anchors_preset(Control.PRESET_FULL_RECT)
+	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	banner.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	banner.add_theme_font_size_override("font_size", 96 if mode == "real" else 40)
+	banner.add_theme_color_override("font_outline_color", Color.BLACK)
+	banner.add_theme_constant_override("outline_size", 14)
+	banner.visible = false
+	layer.add_child(banner)
 	_update_hud()
 
-func _update_hud() -> void:
-	var who := "Blue" if active_team == 0 else "Red"
+func _team_name(t: int) -> String:
+	return "Blue" if t == 0 else "Red"
+
+func _update_hud(extra: String = "") -> void:
 	var sel := ""
 	if selected != null:
-		sel = "   Selected: %s  (Move %d, Jump %d)" % [selected["name"].capitalize(), MOVE, JUMP]
-	hud.text = "%s team's turn%s\nClick a unit, then a lit cell.  Space: end turn   Q/E: turn camera   Wheel: zoom   Esc: menu" % [who, sel]
+		sel = "   %s  HP %d/%d  ATK %d  DEF %d  MOV %d" % [selected["name"].capitalize(), selected["hp"],
+			selected["max_hp"], selected["atk"], selected["def"], selected["move"]]
+	var help: String = {"select": "Click one of your units.", "move": "Click a purple cell to move (or the unit to stay).",
+		"act": "Click a red enemy to attack, Space to wait.", "busy": "", "over": "Esc: menu"}[phase]
+	hud.text = "%s team's turn%s\n%s %s\nSpace: end turn   Q/E: turn camera   Wheel: zoom   Esc: menu" % [
+		_team_name(active_team), sel, help, extra]
+
+func _update_bar(u: Dictionary) -> void:
+	var w := 22
+	var img := Image.create(w + 2, 4, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0.05, 0.05, 0.08))
+	var frame := Color(0.35, 0.55, 1.0) if u["team"] == 0 else Color(1.0, 0.35, 0.3)
+	for x in w + 2:
+		img.set_pixel(x, 0, frame)
+		img.set_pixel(x, 3, frame)
+	img.set_pixel(0, 1, frame); img.set_pixel(0, 2, frame)
+	img.set_pixel(w + 1, 1, frame); img.set_pixel(w + 1, 2, frame)
+	var k := float(u["hp"]) / float(u["max_hp"])
+	var fill := Color(0.3, 0.9, 0.35) if k > 0.5 else (Color(0.95, 0.85, 0.25) if k > 0.25 else Color(0.95, 0.3, 0.25))
+	for x in int(round(k * w)):
+		img.set_pixel(1 + x, 1, fill)
+		img.set_pixel(1 + x, 2, fill.darkened(0.25))
+	u["bar"].texture = ImageTexture.create_from_image(img)
 
 func _cell_under_mouse(pos: Vector2) -> Variant:
 	var from := cam.project_ray_origin(pos)
@@ -726,16 +782,28 @@ func _unit_at(cell: Vector2i) -> Variant:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
-			KEY_ESCAPE: get_tree().change_scene_to_file("res://menu.tscn")
+			KEY_ESCAPE:
+				if phase == "act":
+					_finish(selected)
+				elif selected != null and phase == "move":
+					_deselect()
+				else:
+					get_tree().change_scene_to_file("res://menu.tscn")
 			KEY_Q: cam_yaw_target -= 45.0
 			KEY_E: cam_yaw_target += 45.0
-			KEY_SPACE, KEY_TAB: _end_turn()
+			KEY_SPACE, KEY_TAB:
+				if phase == "act":
+					_finish(selected)
+				elif phase in ["select", "move"]:
+					_end_turn()
 	elif event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_zoom(0.9)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			_zoom(1.1)
-		elif event.button_index == MOUSE_BUTTON_LEFT and not moving:
+		elif event.button_index == MOUSE_BUTTON_RIGHT and phase == "act":
+			_finish(selected)
+		elif event.button_index == MOUSE_BUTTON_LEFT:
 			var cell = _cell_under_mouse(event.position)
 			if cell != null:
 				_click(cell)
@@ -744,28 +812,63 @@ func _unhandled_input(event: InputEvent) -> void:
 		cursor.visible = cell != null
 		if cell != null:
 			cursor.position = cell_pos(cell.x, cell.y) + Vector3(0, 0.03, 0)
+			if phase == "act" and attack_cells.has(cell):
+				var t: Dictionary = attack_cells[cell]
+				_update_hud("  Hit %s for %d" % [t["name"].capitalize(), _damage(selected, t)])
 
 func _zoom(k: float) -> void:
 	if mode == "fake":
 		cam.size = clamp(cam.size * k, 6.0, 30.0)
 	else:
-		cam_dist = clamp(cam_dist * k, 16.0, 70.0)
+		cam_dist = clamp(cam_dist * k, 12.0, 70.0)
 
 func _click(cell: Vector2i) -> void:
+	if phase in ["busy", "over"]:
+		return
 	var u: Variant = _unit_at(cell)
-	if u != null and u["team"] == active_team:
+	if phase == "act":
+		if attack_cells.has(cell):
+			_attack(selected, attack_cells[cell])
+		return
+	if u != null and u["team"] == active_team and not u["done"]:
+		if phase == "move" and u == selected:
+			_clear_range()
+			_enter_act(u)                          # stay put and act
+			return
 		selected = u
+		phase = "move"
 		_show_range()
-	elif selected != null and reach.has(cell) and cell != Vector2i(selected["col"], selected["row"]):
+	elif phase == "move" and reach.has(cell) and cell != Vector2i(selected["col"], selected["row"]):
 		_walk(selected, _path_to(cell))
 	else:
-		selected = null
-		_clear_range()
+		_deselect()
 	_update_hud()
+
+func _deselect() -> void:
+	selected = null
+	phase = "select"
+	_clear_range()
+	_update_hud()
+
+func _overlay_cell(cell: Vector2i, colour: Color, glow: Color) -> void:
+	var m := MeshInstance3D.new()
+	var q := QuadMesh.new(); q.size = Vector2(0.92, 0.92); q.orientation = PlaneMesh.FACE_Y
+	m.mesh = q
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = colour
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.emission_enabled = true
+	mat.emission = glow
+	m.material_override = mat
+	m.position = cell_pos(cell.x, cell.y) + Vector3(0, 0.02, 0)
+	overlay.add_child(m)
 
 func _show_range() -> void:
 	_clear_range()
 	var start := Vector2i(selected["col"], selected["row"])
+	var move: int = selected["move"]
+	var jump: int = selected["jump"]
 	reach = {start: [0, start]}
 	var frontier := [start]
 	while frontier.size() > 0:
@@ -776,31 +879,21 @@ func _show_range() -> void:
 				if not walkable(n.x, n.y):
 					continue
 				var dh: int = int(heights[n.y][n.x]) - int(heights[p.y][p.x])
-				if dh > JUMP or -dh > 2 * JUMP:
+				if dh > jump or -dh > 2 * jump:
 					continue
 				var cost: int = reach[p][0] + 1
-				if cost <= MOVE and (not reach.has(n) or cost < reach[n][0]):
+				if cost <= move and (not reach.has(n) or cost < reach[n][0]):
 					reach[n] = [cost, p]
 					nxt.append(n)
 		frontier = nxt
 	for cell in reach:
-		var m := MeshInstance3D.new()
-		var q := QuadMesh.new(); q.size = Vector2(0.92, 0.92); q.orientation = PlaneMesh.FACE_Y
-		m.mesh = q
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = Color(0.75, 0.25, 1.0, 0.45)
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.emission_enabled = true
-		mat.emission = Color(0.55, 0.1, 0.9)
-		m.material_override = mat
-		m.position = cell_pos(cell.x, cell.y) + Vector3(0, 0.02, 0)
-		overlay.add_child(m)
+		_overlay_cell(cell, Color(0.75, 0.25, 1.0, 0.45), Color(0.55, 0.1, 0.9))
 
 func _clear_range() -> void:
 	for o in overlay.get_children():
 		o.queue_free()
 	reach = {}
+	attack_cells = {}
 
 func _path_to(cell: Vector2i) -> Array:
 	var path := [cell]
@@ -809,10 +902,10 @@ func _path_to(cell: Vector2i) -> Array:
 	return path
 
 func _walk(u: Dictionary, path: Array) -> void:
-	moving = true
+	phase = "busy"
 	_clear_range()
 	blocked.erase(Vector2i(u["col"], u["row"]))
-	u["anim"] = "walk"
+	_play(u, "walk")
 	var tw := create_tween()
 	for i in range(1, path.size()):
 		var a: Vector2i = path[i - 1]
@@ -830,15 +923,129 @@ func _walk(u: Dictionary, path: Array) -> void:
 		var last: Vector2i = path[path.size() - 1]
 		u["col"] = last.x; u["row"] = last.y
 		blocked[last] = true
-		u["anim"] = "idle"
-		moving = false
-		selected = null
-		_update_hud())
+		_play(u, "idle")
+		_enter_act(u))
+
+func _play(u: Dictionary, anim: String, once := false) -> void:
+	u["anim"] = anim
+	u["t"] = 0.0
+	u["hold"] = once
+
+func _enter_act(u: Dictionary) -> void:
+	attack_cells = {}
+	for e in units:
+		if e["team"] != u["team"] and e["hp"] > 0:
+			var dist: int = abs(e["col"] - u["col"]) + abs(e["row"] - u["row"])
+			if dist <= u["reach"]:
+				attack_cells[Vector2i(e["col"], e["row"])] = e
+	if attack_cells.is_empty():
+		_finish(u)
+		return
+	phase = "act"
+	for cell in attack_cells:
+		_overlay_cell(cell, Color(1.0, 0.18, 0.15, 0.5), Color(0.9, 0.1, 0.05))
+	_update_hud()
+
+func _damage(a: Dictionary, t: Dictionary) -> int:
+	# the same rule as diorama.damage(): attack - defence/2, +25% from higher ground, min 1
+	var dmg: int = a["atk"] - int(t["def"] / 2)
+	if int(heights[a["row"]][a["col"]]) > int(heights[t["row"]][t["col"]]):
+		dmg = int(dmg * 5 / 4)
+	return max(1, dmg)
+
+func _attack(a: Dictionary, t: Dictionary) -> void:
+	phase = "busy"
+	_clear_range()
+	var dmg := _damage(a, t)
+	a["yaw"] = atan2(float(t["row"] - a["row"]), float(t["col"] - a["col"]))
+	t["yaw"] = atan2(float(a["row"] - t["row"]), float(a["col"] - t["col"]))
+	var tw := create_tween()
+	if "attack" in a["sheet"]["anims"]:
+		_play(a, "attack", true)
+		tw.tween_interval(0.45)
+	else:                                         # no attack clip: lunge at the target
+		var home: Vector3 = a["node"].position
+		var toward: Vector3 = (t["node"].position - home).normalized() * 0.35
+		tw.tween_property(a["node"], "position", home + toward, 0.12)
+		tw.tween_property(a["node"], "position", home, 0.16)
+	tw.tween_callback(func():
+		t["hp"] = max(0, t["hp"] - dmg)
+		_update_bar(t)
+		_number(t, dmg)
+		t["hit"] = 0.6
+		if "hurt" in t["sheet"]["anims"] and t["hp"] > 0:
+			_play(t, "hurt", true))
+	tw.tween_method(func(v): t["hit"] = v, 0.6, 0.0, 0.35)
+	tw.tween_interval(0.25)
+	tw.tween_callback(func():
+		if t["hp"] > 0:
+			_play(t, "idle")
+			_play(a, "idle")
+			_finish(a)
+		else:
+			_kill(t, a))
+
+func _kill(t: Dictionary, a: Dictionary) -> void:
+	var anims: Array = t["sheet"]["anims"]
+	var tw := create_tween()
+	if "death" in anims or "lie_down" in anims:
+		_play(t, "death" if "death" in anims else "lie_down", true)
+		tw.tween_interval(1.3)
+	tw.tween_method(func(v): t["mat"].set_shader_parameter("tint", t["tint"] * v), 1.0, 0.0, 0.4)
+	tw.tween_callback(func():
+		blocked.erase(Vector2i(t["col"], t["row"]))
+		units.erase(t)
+		t["node"].queue_free()
+		_play(a, "idle")
+		_finish(a))
+
+func _number(t: Dictionary, dmg: int) -> void:
+	var l := Label3D.new()
+	l.text = str(dmg)
+	l.font_size = 64 if mode == "real" else 40
+	l.pixel_size = 0.008 if mode == "real" else 0.012
+	l.outline_size = 14
+	l.modulate = Color(1.0, 0.95, 0.4)
+	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	l.no_depth_test = true
+	l.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST if mode == "fake" else BaseMaterial3D.TEXTURE_FILTER_LINEAR
+	l.position = t["node"].position + Vector3(0, 1.6, 0)
+	add_child(l)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(l, "position", l.position + Vector3(0, 0.9, 0), 0.8)
+	tw.tween_property(l, "modulate:a", 0.0, 0.8).set_delay(0.35)
+	tw.chain().tween_callback(l.queue_free)
+
+func _finish(u: Dictionary) -> void:
+	_clear_range()
+	if u != null:
+		u["done"] = true
+	selected = null
+	phase = "select"
+	for team in [0, 1]:
+		var alive := units.filter(func(x): return x["team"] == team)
+		if alive.is_empty():
+			phase = "over"
+			banner.text = "%s wins!" % _team_name(1 - team)
+			banner.visible = true
+			_update_hud()
+			return
+	var waiting := units.filter(func(x): return x["team"] == active_team and not x["done"])
+	if waiting.is_empty():
+		_end_turn()
+	else:
+		_update_hud()
 
 func _end_turn() -> void:
+	if phase == "over":
+		return
 	selected = null
 	_clear_range()
 	active_team = 1 - active_team
+	for u in units:
+		u["done"] = false
+	phase = "select"
 	_update_hud()
 '''
 
@@ -855,7 +1062,7 @@ def _foot_row(sheet: np.ndarray, frames: list) -> int:
     return int(np.median(lows)) + 1 if lows else frames[0]["frame"]["h"]
 
 
-def add_unit(project: Path, name: str, sheet_png, ppu: float = 30.0) -> Path:
+def add_unit(project: Path, name: str, sheet_png, ppu: float = 42.0) -> Path:
     """Copy a unit's sheet (+ .json, + _n.png if there) into res://units/<name>/ and write
     <name>.unit.json (frame size, feet row, pixels per tile, animations)."""
     sheet_png = Path(sheet_png)
@@ -884,7 +1091,7 @@ def add_unit(project: Path, name: str, sheet_png, ppu: float = 30.0) -> Path:
 
 
 def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str = "HD-2D Tactics",
-              iso: bool = True, tile_px: int = 32, ppu: float = 30.0) -> list[Path]:
+              iso: bool = True, tile_px: int = 32, ppu: float = 42.0) -> list[Path]:
     """Write the Godot project: menu, real 3D and fake 3D scenes (and the iso 2D look when
     iso_scene is available). units: {name: sheet.png from turnaround --animate}."""
     out = Path(out_dir)
