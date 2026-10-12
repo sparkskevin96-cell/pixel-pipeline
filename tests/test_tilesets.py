@@ -83,8 +83,8 @@ def test_writers_and_cli(side, tmp_path, capsys):
 def test_map_tab_styles(tmp_path):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
-    from PySide6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])  # noqa: F841
+    from conftest import qt_app
+    qt_app()
     from pixel_pipeline.ui.tools import MapTab
     tab = MapTab()
     tab.sync = True

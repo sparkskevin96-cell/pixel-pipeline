@@ -277,6 +277,9 @@ def _add_turnaround(sub):
                    help="also write Godot SpriteFrames (an animation per direction) + facing script")
     p.add_argument("--preview", type=int, metavar="SCALE",
                    help="also write a spinning preview GIF enlarged by SCALE")
+    p.add_argument("--normals", action="store_true",
+                   help="3D: also write <sheet>_n.png, normal maps laid out like the sheet "
+                        "(OpenGL / Godot convention), so scene lights shade the sprites")
     _add_setting_args(p, default_subject="person")
     p.set_defaults(func=_cmd_turnaround)
 
@@ -305,9 +308,9 @@ def _cmd_turnaround(a) -> int:
         return _animated_turnaround(a)
     sprites, what = turnaround_from(a.source, _settings(a), a.directions, elevation=a.elevation,
                                     up=a.up, yaw=a.yaw, light=a.light, reverse=a.reverse,
-                                    mirror=a.mirror, start=a.start, end=a.end)
+                                    mirror=a.mirror, start=a.start, end=a.end, normals=a.normals)
     a.out.parent.mkdir(parents=True, exist_ok=True)
-    written = write_turnaround(sprites, a.out, a.aseprite, a.godot, a.columns)
+    written = write_turnaround(sprites, a.out, a.aseprite, a.godot, a.columns, a.normals)
     if a.preview:
         written.append(write_preview(sprites, a.out.with_name(a.out.stem + "_spin.gif"), a.preview))
     w, h = sprites[0].size
@@ -320,9 +323,10 @@ def _animated_turnaround(a) -> int:
     from .anim3d import animated_turnaround, write_animated, write_animated_preview
     anim, what = animated_turnaround(a.source, _settings(a), a.directions, a.frames, a.animations,
                                      elevation=a.elevation, yaw=a.yaw, light=a.light,
-                                     in_place=a.in_place, colours_from=a.colours_from)
+                                     in_place=a.in_place, colours_from=a.colours_from,
+                                     normals=a.normals)
     a.out.parent.mkdir(parents=True, exist_ok=True)
-    written = write_animated(anim, a.out, a.aseprite, a.godot)
+    written = write_animated(anim, a.out, a.aseprite, a.godot, a.normals)
     if a.preview:
         written.append(write_animated_preview(anim, a.out.with_name(a.out.stem + "_anim.gif"),
                                               a.preview))
@@ -513,6 +517,69 @@ def _cmd_demo(a) -> int:
     return 0
 
 
+def _add_iso_demo(sub):
+    p = sub.add_parser(
+        "iso-demo", help="isometric 2D tactics scene (Godot 4) of the harbour battle map",
+        description="Writes <out>/iso/ (iso.tscn + iso.gd, block atlas from the map textures, props, "
+                    "units) and <out>/map/map.json; project.godot only if the folder has none. Click "
+                    "a unit -> purple range -> click a cell; Tab/Space ends the turn.")
+    p.add_argument("-o", "--out", type=Path, required=True, help="Godot project folder (new or existing)")
+    p.add_argument("--unit", action="append", default=[], metavar="NAME=SHEET.png",
+                   help="sprite sheet for a map unit (harbour has knight and dog); the .json frame "
+                        "list (and .tres) must sit next to the .png. Repeatable")
+    p.add_argument("--tile", type=int, default=32, help="tile width in px (default 32)")
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=_cmd_iso_demo)
+
+
+def _cmd_iso_demo(a) -> int:
+    from .diorama import harbour
+    from .iso_scene import write_iso_scene
+    units = {}
+    for spec in a.unit:
+        name, sep, path = spec.partition("=")
+        if not sep or not name or not Path(path).exists():
+            raise SystemExit(f"error: --unit wants NAME=existing_sheet.png, got {spec!r}")
+        units[name.strip()] = Path(path)
+    written = write_iso_scene(harbour(seed=a.seed), a.out, units, tile=a.tile, seed=a.seed)
+    print(f"Isometric scene -> {a.out / 'iso' / 'iso.tscn'} ({len(written)} files). Open "
+          f"{a.out / 'project.godot'} in Godot 4.3+ and press F5.")
+    return 0
+
+
+def _add_hd2d(sub):
+    p = sub.add_parser(
+        "hd2d", help="HD-2D tactics demo (Godot 4): one battle map in real 3D, fake 3D and iso 2D",
+        description="Writes a Godot 4 project with a menu and three looks of the harbour map: real "
+                    "3D (lit diorama, sprites lit through their _n.png normal maps, tilt-shift, "
+                    "bloom, Q/E turns the camera), fake 3D (the same through a 640x360 pixel "
+                    "camera) and isometric 2D. Units are sheets from turnaround --animate "
+                    "(--normals for lighting).")
+    p.add_argument("-o", "--out", type=Path, required=True, help="Godot project folder")
+    p.add_argument("--unit", action="append", default=[], metavar="NAME=SHEET.png",
+                   help="sprite sheet for a map unit (harbour has knight and dog). Repeatable")
+    p.add_argument("--no-iso", dest="iso", action="store_false", help="skip the isometric 2D look")
+    p.add_argument("--ppu", type=float, default=30.0,
+                   help="sprite pixels per tile in 3D (smaller = bigger units, default 30)")
+    p.add_argument("--seed", type=int, default=0)
+    p.set_defaults(func=_cmd_hd2d)
+
+
+def _cmd_hd2d(a) -> int:
+    from .diorama import harbour
+    from .hd2d import make_hd2d
+    units = {}
+    for spec in a.unit:
+        name, sep, path = spec.partition("=")
+        if not sep or not name or not Path(path).exists():
+            raise SystemExit(f"error: --unit wants NAME=existing_sheet.png, got {spec!r}")
+        units[name.strip()] = Path(path)
+    written = make_hd2d(a.out, units, harbour(seed=a.seed), iso=a.iso, ppu=a.ppu)
+    print(f"HD-2D project -> {a.out} ({len(written)} files). Open {a.out / 'project.godot'} in "
+          "Godot 4.6 and press F5.")
+    return 0
+
+
 # ---- model ---------------------------------------------------------------------------------
 
 def _add_model(sub):
@@ -553,6 +620,7 @@ def _add_model(sub):
     g.add_argument("--godot", action="store_true")
     g.add_argument("--aseprite", action="store_true")
     g.add_argument("--preview", type=int, metavar="SCALE")
+    g.add_argument("--normals", action="store_true", help="also write <sprites>_n.png normal maps")
     p.set_defaults(func=_cmd_model)
 
 
@@ -579,10 +647,16 @@ def _cmd_model(a) -> int:
     if a.directions:
         from .turnaround import render_model, turnaround_sprites, union_crop, write_preview, write_turnaround
         s = settings_for(a.subject, width=a.width, height=a.height, colors=a.colors)
-        views = union_crop(render_model(res.model, a.directions, a.elevation), s.margin, s.alpha_threshold)
-        sprites = turnaround_sprites(views, s)
+        if a.normals:
+            views, nviews = render_model(res.model, a.directions, a.elevation, normals=True)
+            views, nviews = union_crop(views, s.margin, s.alpha_threshold, nviews)
+        else:
+            views = union_crop(render_model(res.model, a.directions, a.elevation), s.margin,
+                               s.alpha_threshold)
+            nviews = None
+        sprites = turnaround_sprites(views, s, nviews)
         sheet = a.sprites or a.out.with_name(a.out.stem + "_dirs.png")
-        written += write_turnaround(sprites, sheet, a.aseprite, a.godot)
+        written += write_turnaround(sprites, sheet, a.aseprite, a.godot, normals=a.normals)
         if a.preview:
             written.append(write_preview(sprites, sheet.with_name(sheet.stem + "_spin.gif"), a.preview))
     seed = f" (seed {res.seed})" if res.seed is not None else ""
@@ -856,6 +930,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_video(sub)
     _add_turnaround(sub)
     _add_demo(sub)
+    _add_iso_demo(sub)
+    _add_hd2d(sub)
     _add_ai(sub)
     _add_rig(sub)
     _add_model(sub)

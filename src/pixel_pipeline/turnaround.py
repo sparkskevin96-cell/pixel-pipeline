@@ -155,29 +155,33 @@ def _fill_holes(rgb: np.ndarray, alpha: np.ndarray, passes: int = 2) -> None:
         if not hole.any():
             break
         summed = np.stack([cv2.filter2D(rgb[..., c] * filled, -1, k, borderType=cv2.BORDER_CONSTANT)
-                           for c in range(3)], -1)
+                           for c in range(rgb.shape[-1])], -1)
         rgb[hole] = summed[hole] / n[hole][:, None]
         alpha[hole] = 1
 
 
 def render_model(path, directions: int = 16, elevation: float = 30.0, size: int = 512,
                  up: str = "y", yaw: float = 0.0, light: float = 0.35,
-                 points: int | None = None) -> list[np.ndarray]:
+                 points: int | None = None, normals: bool = False):
     """Render a 3D model facing every direction (in direction_names order) as RGBA images of
     size x size, all at one scale with the model's ground point in the same place.
     yaw: degrees to turn the model if its front isn't +z. light: 0 = flat texture colours,
-    1 = full shading from the upper left."""
+    1 = full shading from the upper left. normals: return (views, normal views) (normals.py)."""
     pts, cols, nrm = load_model_points(path, points or 10 * size * size, up)
-    views = render_points([(pts, nrm)], cols, directions, elevation, size, yaw, light)
-    return [v[0] for v in views]
+    out = render_points([(pts, nrm)], cols, directions, elevation, size, yaw, light, normals)
+    if normals:
+        return [v[0] for v in out[0]], [v[0] for v in out[1]]
+    return [v[0] for v in out]
 
 
 def render_points(poses: list[tuple[np.ndarray, np.ndarray]], colours: np.ndarray,
                   directions: int = 16, elevation: float = 30.0, size: int = 512,
-                  yaw: float = 0.0, light: float = 0.35) -> list[list[np.ndarray]]:
+                  yaw: float = 0.0, light: float = 0.35, normals: bool = False):
     """Render coloured points in one or more poses (the same points moved: (points, normals)
     per pose, standing on y = 0 around the y axis, front +z) facing every direction.
-    Returns views[direction][pose], all framed alike: one scale, one ground point."""
+    Returns views[direction][pose], all framed alike: one scale, one ground point.
+    normals=True returns (views, normal views): the same layout of RGBA normal maps
+    (camera space, RGB = n * 0.5 + 0.5, x right, y up, z toward the camera; colour alpha)."""
     names = direction_names(directions)
     e = math.radians(elevation)
     ce, se = math.cos(e), math.sin(e)
@@ -190,18 +194,25 @@ def render_points(poses: list[tuple[np.ndarray, np.ndarray]], colours: np.ndarra
     light_dir = np.array([-0.45, 0.6, 0.66])
     light_dir /= np.linalg.norm(light_dir)
     base = colours.astype(np.float32)
-    views = []
+    views, nviews = [], []
     for k in range(len(names)):
         a = k * 360.0 / len(names)                   # facing angle on screen (Godot)
         t = math.radians(90.0 - a + yaw)            # model turn about its up axis
         ct, st = math.cos(t), math.sin(t)
-        views.append([_splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir)
-                      for pts, nrm in poses])
-    return views
+        row = [_splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir,
+                      normals) for pts, nrm in poses]
+        if normals:
+            views.append([r[0] for r in row])
+            nviews.append([r[1] for r in row])
+        else:
+            views.append(row)
+    return (views, nviews) if normals else views
 
 
-def _splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir) -> np.ndarray:
-    """One view: turn the points, project orthographically, keep the nearest per pixel."""
+def _splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir,
+           normals: bool = False):
+    """One view: turn the points, project orthographically, keep the nearest per pixel.
+    normals=True: (colour RGBA, normal-map RGBA) of the same kept points."""
     x = pts[:, 0] * ct + pts[:, 2] * st
     z = -pts[:, 0] * st + pts[:, 2] * ct
     y = pts[:, 1]
@@ -218,34 +229,49 @@ def _splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir
     rgb = np.zeros((size * size, 3), np.float32)
     alpha = np.zeros(size * size, np.uint8)
     c = base[pick]
-    if light > 0:
+    if light > 0 or normals:
         nx = nrm[pick, 0] * ct + nrm[pick, 2] * st
         nz = -nrm[pick, 0] * st + nrm[pick, 2] * ct
         ny = nrm[pick, 1]
-        cam = np.stack([nx, ny * ce - nz * se, ny * se + nz * ce], 1)
+        cam = np.stack([nx, ny * ce - nz * se, ny * se + nz * ce], 1)  # right, up, to camera
+    if light > 0:
         lam = np.abs(cam @ light_dir)            # meshes may have flipped normals
         c = c * ((1 - light) + light * lam)[:, None]
     rgb[lin] = c
     alpha[lin] = 1
-    rgb, alpha = rgb.reshape(size, size, 3), alpha.reshape(size, size)
+    if normals:                                  # hole-filled along with the colour
+        from .normals import encode, face_camera
+        nmap = np.zeros((size * size, 3), np.float32)
+        nmap[lin] = face_camera(cam.astype(np.float32))
+        rgb = np.concatenate([rgb, nmap], 1)
+    rgb, alpha = rgb.reshape(size, size, -1), alpha.reshape(size, size)
     _fill_holes(rgb, alpha)
     out = np.zeros((size, size, 4), np.uint8)
-    out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    out[..., :3] = np.clip(rgb[..., :3], 0, 255).astype(np.uint8)
     out[..., 3] = alpha * 255
-    return out
+    if not normals:
+        return out
+    nout = np.zeros((size, size, 4), np.uint8)
+    nout[..., :3] = encode(face_camera(rgb[..., 3:]))
+    nout[..., 3] = out[..., 3]
+    return out, nout
 
 
-def union_crop(views: list[np.ndarray], margin: float = 0.04, threshold: int = 128) -> list[np.ndarray]:
-    """Crop every view to the box holding the subject in all of them (keeps one scale)."""
+def union_crop(views: list[np.ndarray], margin: float = 0.04, threshold: int = 128,
+               also: list[np.ndarray] | None = None):
+    """Crop every view to the box holding the subject in all of them (keeps one scale).
+    also: more images framed like views (normal maps), cropped to the same box; then
+    returns (cropped views, cropped also)."""
     mask = np.zeros(views[0].shape[:2], bool)
     for v in views:
         mask |= v[..., 3] >= threshold
     ys, xs = np.nonzero(mask)
     if not len(xs):
-        return views
+        return views if also is None else (views, also)
     m = int(round(max(xs.max() - xs.min(), ys.max() - ys.min()) * margin))
     box = (xs.min() - m, ys.min() - m, xs.max() + 1 + m, ys.max() + 1 + m)
-    return [_crop_pad(v, *box) for v in views]
+    out = [_crop_pad(v, *box) for v in views]
+    return out if also is None else (out, [_crop_pad(v, *box) for v in also])
 
 
 # --------------------------------------------------------------------------- photos / video
@@ -312,17 +338,25 @@ def natural_key(path: Path):
 def turnaround_from(sources: list[Path], settings: Settings, directions: int = 16, *,
                     elevation: float = 30.0, up: str = "y", yaw: float = 0.0, light: float = 0.35,
                     reverse: bool = False, mirror: bool = False, start: float | None = None,
-                    end: float | None = None) -> tuple[list[Sprite], str]:
-    """A 3D model, a video, or photos/folders -> (sprites in direction order, what was read)."""
+                    end: float | None = None, normals: bool = False) -> tuple[list[Sprite], str]:
+    """A 3D model, a video, or photos/folders -> (sprites in direction order, what was read).
+    normals: 3D models only, also give every sprite a normal map (sprite.normal)."""
     from .pipeline import isolate, load_image
     from .video import is_video, read_frames
     sources = [Path(p) for p in sources]
     first = sources[0]
     if len(sources) == 1 and is_model(first):
+        what = f"{first.name}: 3D model rendered at {elevation:g} degrees"
+        if normals:
+            views, nviews = render_model(first, directions, elevation, up=up, yaw=yaw,
+                                         light=light, normals=True)
+            views, nviews = union_crop(views, settings.margin, settings.alpha_threshold, nviews)
+            return turnaround_sprites(views, settings, nviews), what
         views = union_crop(render_model(first, directions, elevation, up=up, yaw=yaw, light=light),
                            settings.margin, settings.alpha_threshold)
-        what = f"{first.name}: 3D model rendered at {elevation:g} degrees"
     else:
+        if normals:
+            raise ValueError("normal maps need a 3D model (photos and video have no normals)")
         want = capture_count(directions, mirror)
         if len(sources) == 1 and is_video(first):
             images = read_frames(first, want, start, end, inclusive=mirror).frames
@@ -342,10 +376,16 @@ def turnaround_from(sources: list[Path], settings: Settings, directions: int = 1
 
 # --------------------------------------------------------------------------- sprites + files
 
-def turnaround_sprites(views: list[np.ndarray], settings: Settings) -> list[Sprite]:
-    """Views (all the same size and framing) -> sprites with one palette and one scale."""
+def turnaround_sprites(views: list[np.ndarray], settings: Settings,
+                       normal_views: list[np.ndarray] | None = None) -> list[Sprite]:
+    """Views (all the same size and framing) -> sprites with one palette and one scale.
+    normal_views (framed like views): also set each sprite.normal, on the sprite's grid."""
     s = Settings(**{**settings.to_dict(), "crop_to_subject": False})
-    return sprites_from_rgba(views, s, shared_palette=True)
+    sprites = sprites_from_rgba(views, s, shared_palette=True)
+    if normal_views is not None:
+        from .normals import attach_normals
+        attach_normals(sprites, normal_views, s)
+    return sprites
 
 
 def godot_script(names: list[str], frames_name: str) -> str:
@@ -366,9 +406,10 @@ func face(direction: Vector2) -> void:
 
 
 def write_turnaround(sprites: list[Sprite], out_png, aseprite: bool = False, godot: bool = False,
-                     columns: int | None = None) -> list[Path]:
+                     columns: int | None = None, normals: bool = False) -> list[Path]:
     """Sheet PNG + JSON (one tag per direction); optionally .aseprite (tags) and Godot
-    SpriteFrames (one animation per direction) + a facing script."""
+    SpriteFrames (one animation per direction) + a facing script. normals: also
+    <sheet>_n.png, the sprites' normal maps laid out exactly like the sheet."""
     out = Path(out_png)
     names = direction_names(len(sprites))
     frames = [s.rgba for s in sprites]
@@ -379,6 +420,9 @@ def write_turnaround(sprites: list[Sprite], out_png, aseprite: bool = False, god
                                  for i, n in enumerate(names)]
     out_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     written = [out, out_json]
+    if normals:
+        from .normals import write_normal_sheet
+        written.append(write_normal_sheet(sprites, out, columns))
     if aseprite:
         ase = out.with_suffix(".aseprite")
         write_aseprite(ase, frames, sprites[0].palette, durations=100,

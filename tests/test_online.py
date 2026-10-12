@@ -216,8 +216,8 @@ def test_prompt_tab(services, tmp_path):
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
-    from PySide6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])  # noqa: F841
+    from conftest import qt_app
+    qt_app()
     from pixel_pipeline.ui.app import MainWindow
     save_keys(services)
     win = MainWindow()
@@ -237,8 +237,8 @@ def test_prompt_tab_defaults_to_the_gpu(services):
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
-    from PySide6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])  # noqa: F841
+    from conftest import qt_app
+    qt_app()
     from pixel_pipeline.ui.tools import PromptTab
     tab = PromptTab(None)                               # no keys saved: only the free GPU
     assert tab.use_gpu.isChecked() and not tab.use_pl.isChecked() and not tab.use_rd.isChecked()

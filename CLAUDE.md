@@ -152,6 +152,30 @@ wants terse answers and fixes over polish.
   (2026-10-11) for no ComfyUI window: `ComfyClient.ensure_running` starts it hidden
   (CREATE_NO_WINDOW, log ~/.pixel-pipeline/comfyui.log) only at the default address, and
   atexit stops only processes we started (`start_comfyui` / `stop_started_comfyui`).
+- **HD-2D tactics demo** (`hd2d.py`, `diorama.py`, CLI `hd2d`), 2026-10-11, toward Kevin's goal
+  (Triangle Strategy-style games): one Godot 4.6 project, menu + three looks of one map.
+  `diorama.Diorama` = height levels (1 level = half a tile), terrain per cell, props, units;
+  `harbour()` = stone tiers + stairs + cobble quay + pier over water. Real 3D (`board.gd`, mode
+  real): terrain meshed at runtime with SurfaceTool from map.json, units = quads with a
+  Y-billboard shader drawing a sheet frame, NORMAL_MAP from `<sheet>_n.png`, direction picked
+  from camera-relative facing; fov 22 telephoto, CameraAttributesPractical near+far DOF
+  (tilt-shift), glow, ACES, SSAO, sunset sun + torch OmniLights, water shader with glints; Q/E
+  turn 45°. Fake 3D = same board in a SubViewportContainer (stretch_shrink 3 -> 640x360), ortho
+  camera snapped to whole pixels, sprites fully camera-facing. Images load with
+  Image.load_from_file (no import needed); the iso look needs `godot --import` once (the editor
+  does it). Units: `add_unit` writes `<name>.unit.json` (frame size, feet row, ppu 30).
+- **Sprite normal maps** (`normals.py`, `turnaround/model --normals`): camera-space normal of the
+  front-most splat per pixel, OpenGL (y up), cropped/resampled with the colour sprite's own
+  geometry (`_fit_box`), averaged+renormalised, never palette-snapped; `<sheet>_n.png` packed
+  like the sheet. Tests share ONE QApplication (`conftest.qt_app`): a second QApplication after
+  the first died with a test crashed the Windows CI run at random.
+- **Isometric tactics look** (`iso_scene.py`, CLI `iso-demo`), 2026-10-11, one of the three looks
+  of the tactics demo over `diorama.py`: `write_iso_scene(d, project, {name: sheet.png})` writes
+  `iso/` (+ map/map.json if absent, project.godot only if absent). One pre-rendered column per
+  cell (top + sides from its height down to level -2; tile W, level = W/4 px; side texture 1:1,
+  line per level), painter's order by z_index = (col+row)*8 + layer. GDScript range = path_cost
+  (test compares them in Godot). Grid +col faces SE, +row SW. Verified on Godot 4.6.1 with real
+  GPU screenshots (`Pictures/PixelPipeline/hd2d_iso_test/shot_*.png`, `shot.gd` makes them).
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

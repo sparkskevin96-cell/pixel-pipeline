@@ -700,9 +700,11 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
                         animations: list[str] | None = None, *, elevation: float = 30.0,
                         yaw: float = 0.0, light: float = 0.35, in_place: bool = True,
                         size: int | None = None, points: int | None = None,
-                        seed: int = 0, colours_from=None) -> tuple[AnimatedSet, str]:
+                        seed: int = 0, colours_from=None,
+                        normals: bool = False) -> tuple[AnimatedSet, str]:
     """Rigged + animated glTF file(s) -> AnimatedSet and a description of what was read.
-    colours_from: the original coloured model, when rigging (Mixamo) dropped its colours."""
+    colours_from: the original coloured model, when rigging (Mixamo) dropped its colours.
+    normals: also give every sprite a normal map (sprite.normal, see normals.py)."""
     rig = load_rig(paths)
     clips = select_clips(rig, animations)
     names = direction_names(directions)
@@ -710,11 +712,20 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
     poses, colours = animated_poses(rig, clips, frames, points or 6 * size * size, seed, in_place,
                                     colours_from)
     flat = [p for row in poses for p in row]
-    views = render_points(flat, colours, directions, elevation, size, yaw, light)  # [dir][pose]
-    order = [views[d][a * frames + f] for a in range(len(clips)) for d in range(len(names))
+    views = render_points(flat, colours, directions, elevation, size, yaw, light, normals)
+    nviews = None
+    if normals:
+        views, nviews = views                                          # [dir][pose] each
+    order = [(d, a * frames + f) for a in range(len(clips)) for d in range(len(names))
              for f in range(frames)]
-    cropped = union_crop(order, settings.margin, settings.alpha_threshold)
-    sprites = turnaround_sprites(cropped, settings)
+    cropped = [views[d][i] for d, i in order]
+    if normals:
+        cropped, nviews = union_crop(cropped, settings.margin, settings.alpha_threshold,
+                                     [nviews[d][i] for d, i in order])
+    else:
+        cropped = union_crop(cropped, settings.margin, settings.alpha_threshold)
+    del views
+    sprites = turnaround_sprites(cropped, settings, nviews)
     per = len(names) * frames
     nested = [[sprites[a * per + d * frames: a * per + (d + 1) * frames] for d in range(len(names))]
               for a in range(len(clips))]
@@ -773,10 +784,11 @@ func _show() -> void:
 
 
 def write_animated(anim: AnimatedSet, out_png, aseprite: bool = False,
-                   godot: bool = False) -> list[Path]:
+                   godot: bool = False, normals: bool = False) -> list[Path]:
     """Sheet (a row per action and direction, a column per frame) + JSON (a tag per
     action_direction); optionally .aseprite (same tags) and Godot SpriteFrames (an animation
-    per action_direction, e.g. walk_SE) + a script that plays action + facing."""
+    per action_direction, e.g. walk_SE) + a script that plays action + facing.
+    normals: also <sheet>_n.png, the normal maps laid out exactly like the sheet."""
     out = Path(out_png)
     frames = [s.rgba for s in anim.flat()]
     f = anim.frames
@@ -794,6 +806,9 @@ def write_animated(anim: AnimatedSet, out_png, aseprite: bool = False,
                                  for n, lo, hi, _ in tags]
     out_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     written = [out, out_json]
+    if normals:
+        from .normals import write_normal_sheet
+        written.append(write_normal_sheet(anim.flat(), out, f))
     if aseprite:
         ase = out.with_suffix(".aseprite")
         durations = [a.frame_ms for a in anim.actions for _ in range(f * len(anim.directions))]

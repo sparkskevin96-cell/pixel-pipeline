@@ -39,3 +39,16 @@ def blob_png(tmp_path):
     path = tmp_path / "blob.png"
     Image.fromarray(make_blob(), "RGBA").save(path)
     return path
+
+
+_QAPP = []
+
+
+def qt_app():
+    """The one QApplication for the whole test run. Qt can't destroy its application object
+    and make another: a QApplication held in a test's local variable dies with the test while
+    its windows live on, and the next one then crashes at random (CI on Windows)."""
+    from PySide6.QtWidgets import QApplication
+    if not _QAPP:
+        _QAPP.append(QApplication.instance() or QApplication([]))
+    return _QAPP[0]

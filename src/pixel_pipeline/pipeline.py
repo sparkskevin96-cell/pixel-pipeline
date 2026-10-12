@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union
 
@@ -62,6 +62,8 @@ class Sprite:
     rgba: np.ndarray     # (H, W, 4) final pixels
     indices: np.ndarray  # (H, W) palette index, -1 = transparent
     palette: np.ndarray  # (N, 3) RGB
+    # (H, W, 4) normal map aligned pixel for pixel with rgba (normals.py), when asked for
+    normal: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     @property
     def size(self) -> tuple[int, int]:
@@ -89,12 +91,11 @@ def _crop_to_subject(rgba: np.ndarray, s: Settings) -> np.ndarray:
     return rgba[max(0, y0 - m):y1 + m, max(0, x0 - m):x1 + m]
 
 
-def _fit(rgba: np.ndarray, out_w: int, out_h: int, inset: int, s: Settings) -> np.ndarray:
-    """Scale the subject onto a (out_h*patch, out_w*patch) RGBA canvas."""
+def _fit_box(sw: int, sh: int, out_w: int, out_h: int, inset: int, s: Settings):
+    """Where _fit puts a sw x sh image: (canvas w, canvas h, scaled w, scaled h, x, y)."""
     p = s.patch
     cw, ch = out_w * p, out_h * p
     iw, ih = max(1, out_w - 2 * inset) * p, max(1, out_h - 2 * inset) * p
-    sh, sw = rgba.shape[:2]
     if s.fit == "stretch":
         nw, nh = iw, ih
     elif s.fit in ("contain", "cover"):
@@ -102,6 +103,16 @@ def _fit(rgba: np.ndarray, out_w: int, out_h: int, inset: int, s: Settings) -> n
         nw, nh = max(1, round(sw * scale)), max(1, round(sh * scale))
     else:
         raise ValueError(f"Unknown fit '{s.fit}' (use contain, cover, stretch)")
+    x = inset * p + (iw - nw) // 2
+    bottom = s.anchor == "bottom" and s.fit == "contain"
+    y = inset * p + ((ih - nh) if bottom else (ih - nh) // 2)
+    return cw, ch, nw, nh, x, y
+
+
+def _fit(rgba: np.ndarray, out_w: int, out_h: int, inset: int, s: Settings) -> np.ndarray:
+    """Scale the subject onto a (out_h*patch, out_w*patch) RGBA canvas."""
+    sh, sw = rgba.shape[:2]
+    cw, ch, nw, nh, x, y = _fit_box(sw, sh, out_w, out_h, inset, s)
 
     # Resize with premultiplied alpha so background colours don't bleed into edges.
     alpha = rgba[..., 3].astype(np.float32) / 255
@@ -111,9 +122,6 @@ def _fit(rgba: np.ndarray, out_w: int, out_h: int, inset: int, s: Settings) -> n
     rgb = cv2.resize(premul, (nw, nh), interpolation=interp).reshape(nh, nw, 3)
     rgb = np.clip(rgb / np.maximum(a, 1e-6)[..., None], 0, 255)
 
-    x = inset * p + (iw - nw) // 2
-    bottom = s.anchor == "bottom" and s.fit == "contain"
-    y = inset * p + ((ih - nh) if bottom else (ih - nh) // 2)
     sx, sy, dx, dy = max(0, -x), max(0, -y), max(0, x), max(0, y)
     w, h = min(nw - sx, cw - dx), min(nh - sy, ch - dy)
     canvas = np.zeros((ch, cw, 4), np.float32)

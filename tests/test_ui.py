@@ -15,7 +15,8 @@ from pixel_pipeline.ui.app import MainWindow  # noqa: E402
 
 @pytest.fixture(scope="module")
 def app():
-    return QApplication.instance() or QApplication([])
+    from conftest import qt_app
+    return qt_app()
 
 
 def test_preset_and_render(app, blob_png):
@@ -194,6 +195,7 @@ def test_crash_reports_survive_to_the_next_start(app, tmp_path, monkeypatch):
         assert sys.excepthook is crash._hook and (tmp_path / "running").exists()
     finally:
         faulthandler.disable()
+        faulthandler.enable(sys.__stderr__)      # keep pytest's crash traces for later tests
     log = crash.report("Traceback (most recent call last):\nValueError: boom")
     assert "boom" in log.read_text() and "Pixel Pipeline" in log.read_text()
 
