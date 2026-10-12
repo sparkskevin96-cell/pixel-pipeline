@@ -47,7 +47,7 @@ jobs:
       - name: Install
         run: python -m pip install -e ".[dev,ui,cutout,mcp,3d]"
       - name: Test
-        run: python -m pytest -q
+        run: python -X faulthandler -m pytest -v -p no:cacheprovider
 
   build-windows:
     needs: test
