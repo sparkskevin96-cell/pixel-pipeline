@@ -95,6 +95,19 @@ wants terse answers and fixes over polish.
   api-examples repo; the cloud container's network blocks both hosts, so they were only tested
   against fakes (tests/test_online.py). Results at sprite size are snapped to the palette
   (`to_sprite`, no resampling). Keys: env or ~/.pixel-pipeline/keys.json.
+- **App layout (2026-10-12, Kevin: "make it feel intuitive")**: tabs in the order you make a
+  game: `1 Characters` (ModelStudio + Character Library list on the left; Kind person/animal/
+  object, Size words not numbers, Name, Add to library = rig + all clips x16 + normals at the
+  library scale; More settings hides the raw numbers), `2 World` (map tiles), `3 Game`
+  (`ui/game_tab.py`: tick up to 6 per team from the library -> hd2d project in
+  ~/Pixel Pipeline/Games/<name>, godot --import, Play launches Godot found via GODOT_BIN/PATH/
+  winget), `Sprite` (From a photo | From words, basics up front, More settings folds the rest),
+  `More tools` (Directions from photos, Team colours, Portrait, Simple 2D demo). Per-tab status
+  hints; `MainWindow.show_tool(w)` / `current_tool()` handle the nested tabs. **Character
+  Library** = `library.py`, ~/Pixel Pipeline/Characters/<slug>/ (character.json, model.glb,
+  picture.png, rigged.glb, sheet.* + sheet_n.png, thumb.png); PIXEL_LIBRARY overrides (tests use
+  a temp one via conftest). SIZES: person small/normal/large 80x52/96x64/112x76, animal
+  64x28/72x34/88x44.
 - **Desktop app** (`ui/app.py` MainWindow = QTabWidget): Sprite (the original live
   converter), Directions / Teams / Portrait / Map tiles / Godot demo (`ui/tools.py`, each a
   `ToolTab` from `ui/common.py`: slow work on a QThread via `run(job, on_done)`, `sync=True`

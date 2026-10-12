@@ -110,10 +110,14 @@ def test_model_studio_plays_a_rigged_model(app, tmp_path):
 def test_main_window_has_every_tool(app):
     win = MainWindow()
     titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-    assert titles == ["Sprite", "Prompt", "Directions", "Teams", "Portrait", "Map tiles",
-                      "Godot demo", "Prompt to Model"]
+    assert titles == ["1  Characters", "2  World", "3  Game", "Sprite", "More tools"]
+    assert win.current_tool() is win.studio                       # opens on Characters
+    assert [win.sprite_tabs.tabText(i) for i in range(2)] == ["From a photo", "From words"]
+    win.show_tool(win.portrait_tab)
+    assert win.current_tool() is win.portrait_tab and "face" in win.statusBar().currentMessage()
     win.open_model_studio()
     assert win.tabs.currentWidget() is win.studio
+    assert not any(b.isVisible() for b in win.advanced_boxes)     # Sprite basics only, at first
 
 
 def test_directions_tab_animated_and_still(app, tmp_path):
@@ -280,7 +284,7 @@ def test_drops_from_a_browser_or_a_folder(app, tmp_path, monkeypatch):
         web.setUrls([QUrl(f"http://127.0.0.1:{server.server_port}/knight.png")])
         web.setHtml(f'<img src="http://127.0.0.1:{server.server_port}/knight.png">')
         drop(web)
-        assert win.source.shape == (30, 20, 4) and win.tabs.currentIndex() == 0
+        assert win.source.shape == (30, 20, 4) and win.current_tool() is win.sprite_split
         assert win.source_path == tmp_path / "dropped" / "knight.png"
         raw = QMimeData()                                 # a browser that hands over the pixels
         raw.setImageData(QImage(8, 6, QImage.Format_RGBA8888))
@@ -290,7 +294,7 @@ def test_drops_from_a_browser_or_a_folder(app, tmp_path, monkeypatch):
         Image.new("RGB", (9, 7), (10, 200, 10)).save(local)
         files = QMimeData()
         files.setUrls([QUrl.fromLocalFile(str(local))])
-        win.tabs.setCurrentWidget(win.directions_tab)     # a tool that takes files keeps them
+        win.show_tool(win.directions_tab)                 # a tool that takes files keeps them
         win.handle_drop(files)
         assert win.directions_tab.sources == [local]
         gone = QMimeData()
@@ -373,3 +377,43 @@ def test_model_studio_animates_an_animal_on_four_legs(app, tmp_path):
     assert win.last_error == ""
     assert win.anim_names[:4] == ["idle", "walk", "run", "sit"] and win.rigged is not None
     win.close()
+
+
+def test_library_characters_tab_and_game_tab(app, tmp_path, monkeypatch):
+    pytest.importorskip("trimesh")
+    from test_hd2d import fake_sheet
+    from pixel_pipeline import library
+    from pixel_pipeline.ui.game_tab import GameTab
+    from pixel_pipeline.ui.model_studio import ModelStudio
+    sheet = fake_sheet(tmp_path / "hero.png", anims=("idle", "walk"),
+                       dirs=("E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+                             "N", "NNE", "NE", "ENE"))
+    a = library.import_sheet("Geela", sheet, kind="person", role="physician")
+    b = library.import_sheet("Rex", sheet, kind="animal", size="small")
+    assert [c.name for c in library.list_characters()] == ["Rex", "Geela"]       # newest first
+    assert a.stats_class == "physician" and b.stats_class == "dog" and a.thumb.exists()
+    anim = library.load_animated(a)
+    assert len(anim.directions) == 16 and [x.name for x in anim.actions] == ["idle", "walk"]
+
+    win = ModelStudio()
+    win.sync = True
+    assert win.library.count() == 2 and "2" in win.lib_title.text()
+    win.open_character(a)
+    assert win.anim is not None and win.name.text() == "Geela" and win.add_btn.text() == "In your library"
+    assert not win.add_btn.isEnabled()
+    win.subject.setCurrentText("animal")
+    assert [win.size_.itemText(i) for i in range(win.size_.count())] == ["small", "medium", "large"]
+    win.close()
+
+    monkeypatch.setenv("PIXEL_GAMES", str(tmp_path / "games"))
+    game = GameTab()
+    game.sync = True
+    assert game.blue.count() == 2 and len(game.team(game.blue)) == 1 and len(game.team(game.red)) == 1
+    assert game.make_btn.isEnabled()
+    game.iso.setChecked(False)
+    game.make()
+    assert (game.out / "real3d.tscn").exists() and (game.out / "units" / "geela" / "geela.png").exists()
+    import json
+    units = json.loads((game.out / "map" / "map.json").read_text())["units"]
+    geela = next(u for u in units if u["name"] == "geela")
+    assert (geela["hp"], geela["attack"]) == library.CLASSES["physician"][:2]

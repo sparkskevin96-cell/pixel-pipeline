@@ -230,7 +230,7 @@ def test_prompt_tab(services, tmp_path):
     assert {p.name for p in tab.save(tmp_path / "knight.png")} >= {"knight_compare.png"}
     tab.pick.setCurrentIndex(1)
     tab.send()
-    assert win.tabs.currentIndex() == 0 and win.source is not None and win.sprite is not None
+    assert win.current_tool() is win.sprite_split and win.source is not None and win.sprite is not None
 
 
 def test_prompt_tab_defaults_to_the_gpu(services):

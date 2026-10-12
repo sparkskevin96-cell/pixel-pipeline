@@ -52,3 +52,9 @@ def qt_app():
     if not _QAPP:
         _QAPP.append(QApplication.instance() or QApplication([]))
     return _QAPP[0]
+
+
+@pytest.fixture(autouse=True)
+def _own_library(tmp_path_factory, monkeypatch):
+    """Tests never touch the real Character Library."""
+    monkeypatch.setenv("PIXEL_LIBRARY", str(tmp_path_factory.mktemp("library")))

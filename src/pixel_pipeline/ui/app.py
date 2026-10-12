@@ -17,7 +17,7 @@ from PySide6.QtCore import QBuffer, QIODevice, QStandardPaths, Qt, QTimer, Signa
 from PySide6.QtGui import QAction, QIcon, QImage, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QGroupBox, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QFormLayout, QGroupBox, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -67,7 +67,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._dropped.connect(self._on_dropped)
         self.setWindowTitle("Pixel Pipeline")
-        self.resize(1280, 820)
+        self.resize(1440, 900)
         self.setAcceptDrops(True)
         self.source: np.ndarray | None = None
         self.source_path: Path | None = None
@@ -102,8 +102,9 @@ class MainWindow(QMainWindow):
         self.version_label.setToolTip(build.label if build else "Running from source")
         self.version_label.setStyleSheet("padding:0 6px;font-weight:600;")
         self.statusBar().addPermanentWidget(self.version_label)
-        self.statusBar().showMessage("Drop a photo onto the window (from a folder or straight from "
-                                     "your browser), or File → Open (Ctrl+O)")
+        self.tabs.currentChanged.connect(lambda *_: self._hint())
+        self.tabs.setCurrentWidget(self.studio)
+        self._hint()
 
     # ---- layout ---------------------------------------------------------------
     def _build_controls(self):
@@ -161,12 +162,27 @@ class MainWindow(QMainWindow):
         ]
         panel = QWidget()
         column = QVBoxLayout(panel)
+        advanced = {"Pixels", "Finish", "View / export"}
+        self.more_sprite = QPushButton("More settings ▸")
+        self.more_sprite.setCheckable(True)
+        self.advanced_boxes = []
         for title, rows in groups:
             box = QGroupBox(title)
             form = QFormLayout(box)
             for label, widget in rows:
                 form.addRow(label, widget)
+            if title in advanced:
+                box.setVisible(False)
+                self.advanced_boxes.append(box)
             column.addWidget(box)
+            if title == "Colour":
+                column.addWidget(self.more_sprite)
+
+        def toggle(on):
+            for b in self.advanced_boxes:
+                b.setVisible(on)
+            self.more_sprite.setText("More settings ▾" if on else "More settings ▸")
+        self.more_sprite.toggled.connect(toggle)
         column.addStretch(1)
         self.controls = QScrollArea()
         self.controls.setWidget(panel)
@@ -202,9 +218,11 @@ class MainWindow(QMainWindow):
         split.addWidget(sprite_scroll)
         split.setSizes([320, 420, 500])
 
+        from .game_tab import GameTab
         from .model_studio import ModelStudio
         from .tools import DemoTab, DirectionsTab, MapTab, PortraitTab, PromptTab, TeamsTab
         say = self.statusBar().showMessage
+        self.sprite_split = split
         self.prompt_tab = PromptTab(say, send_to_sprite=self.use_candidate)
         self.directions_tab = DirectionsTab(say)
         self.teams_tab = TeamsTab(say, current_sprite=lambda: self.sprite)
@@ -213,23 +231,86 @@ class MainWindow(QMainWindow):
         self.demo_tab = DemoTab(say)
         self.studio = ModelStudio()
         self.studio.setWindowFlags(Qt.Widget)
+        self.game_tab = GameTab(say)
+        self.studio.library_changed.connect(self.game_tab.refresh)
+
+        def sub(pages):
+            t = QTabWidget()
+            for widget, title, tip in pages:
+                t.addTab(widget, title)
+                t.setTabToolTip(t.count() - 1, tip)
+            t.currentChanged.connect(lambda *_: self._hint())
+            return t
+        self.sprite_tabs = sub([
+            (split, "From a photo", "Photo, picture or video -> sprite, idle and walk animations"),
+            (self.prompt_tab, "From words", "Words -> sprite from your GPU (and PixelLab / Retro "
+                                            "Diffusion with keys), side by side"),
+        ])
+        self.more_tabs = sub([
+            (self.directions_tab, "Directions from photos", "Photos or a video walking around a "
+                                                            "subject -> 4/8/16 directions"),
+            (self.teams_tab, "Team colours", "Player / enemy / ally colours + Godot palette shader"),
+            (self.portrait_tab, "Portrait", "Head-and-shoulders dialogue portrait"),
+            (self.demo_tab, "Simple 2D demo", "The older flat Godot demo with one unit"),
+        ])
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         for widget, title, tip in (
-            (split, "Sprite", "Photo, picture or video -> sprite, idle and walk animations"),
-            (self.prompt_tab, "Prompt", "Words -> sprite from PixelLab, Retro Diffusion and your "
-                                        "GPU, side by side"),
-            (self.directions_tab, "Directions", "3D model, photos or video -> 4/8/16 facing "
-                                                "directions, animated for rigged models"),
-            (self.teams_tab, "Teams", "Player / enemy / ally colours + Godot palette shader"),
-            (self.portrait_tab, "Portrait", "Head-and-shoulders dialogue portrait"),
-            (self.map_tab, "Map tiles", "Terrain tiles with transitions + Godot TileSet"),
-            (self.demo_tab, "Godot demo", "A Godot project using it all"),
-            (self.studio, "Prompt to Model", "Prompt -> 3D model on your GPU -> direction sprites"),
+            (self.studio, "1  Characters", "Make characters from words, photos or 3D models; they "
+                                           "animate and go into your Character Library"),
+            (self.map_tab, "2  World", "Ground and terrain tiles"),
+            (self.game_tab, "3  Game", "Pick two teams from your library -> a Godot tactics game"),
+            (self.sprite_tabs, "Sprite", "One-off sprites from a photo or from words"),
+            (self.more_tabs, "More tools", "Directions from photos, team colours, portraits, the "
+                                           "older 2D demo"),
         ):
             self.tabs.addTab(widget, title)
             self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
         self.setCentralWidget(self.tabs)
+
+    HINTS = {
+        "sprite": "Drop a photo onto the window (from a folder or straight from your browser), or "
+                  "File → Open (Ctrl+O). The basics are on the left; More settings has the rest.",
+        "prompt": "Describe a sprite and press Make. Your GPU draws it; Open in the Sprite tab to "
+                  "tweak it.",
+        "map": "Pick terrains (built-in, a photo, or words) and press Make tiles.",
+        "game": "Tick who fights on each side, press Make game, then Play.",
+        "directions": "Add photos or a video walking around a subject (start in front, walk right), "
+                      "then Make sprites.",
+        "teams": "Open a sprite or sheet (or use the Sprite tab's), get player/enemy/ally colours.",
+        "portrait": "Open a photo or picture: it finds the face and makes a dialogue portrait.",
+        "demo": "The older flat 2D demo. For the full game use 3 Game.",
+    }
+
+    def current_tool(self):
+        """The page you're looking at, inside Sprite / More tools too."""
+        w = self.tabs.currentWidget()
+        while isinstance(w, QTabWidget):
+            w = w.currentWidget()
+        return w
+
+    def show_tool(self, widget):
+        """Bring a page to the front, wherever it lives."""
+        for outer in (self.sprite_tabs, self.more_tabs):
+            if outer.indexOf(widget) >= 0:
+                self.tabs.setCurrentWidget(outer)
+                outer.setCurrentWidget(widget)
+                return
+        self.tabs.setCurrentWidget(widget)
+
+    def _hint(self):
+        w = self.current_tool()
+        if w is self.studio:
+            text = self.studio.HINT
+        else:
+            key = {self.sprite_split: "sprite", self.prompt_tab: "prompt", self.map_tab: "map",
+                   self.game_tab: "game", self.directions_tab: "directions",
+                   self.teams_tab: "teams", self.portrait_tab: "portrait",
+                   self.demo_tab: "demo"}.get(w)
+            text = self.HINTS.get(key, "")
+        if w is self.game_tab:
+            self.game_tab.refresh()
+        self.statusBar().showMessage(text)
 
     def _build_menu(self):
         menu = self.menuBar().addMenu("&File")
@@ -516,7 +597,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Generated “{prompt}” (seed {seed}). Tweak anything on the left.")
 
     def open_model_studio(self):
-        self.tabs.setCurrentWidget(self.studio)
+        self.show_tool(self.studio)
 
     def use_candidate(self, cand):
         """A Prompt tab result -> Sprite tab source, so every setting there applies."""
@@ -524,7 +605,7 @@ class MainWindow(QMainWindow):
                         .split())[:40]
         self.remove_bg.setChecked(False)          # services already give a transparent background
         self.set_source(load_image(cand.raw), Path.cwd() / f"{slug or 'sprite'}-{cand.provider}.png")
-        self.tabs.setCurrentIndex(0)
+        self.show_tool(self.sprite_split)
 
     def set_source(self, rgba, path: Path):
         self.source = rgba
@@ -636,7 +717,7 @@ class MainWindow(QMainWindow):
 
     def open_dropped(self, paths: list[Path]):
         """Dropped files go to the tool that's open (or the Sprite tab)."""
-        tab = self.tabs.currentWidget()
+        tab = self.current_tool()
         try:
             if tab is self.directions_tab:
                 tab.add_sources(paths)
@@ -645,7 +726,7 @@ class MainWindow(QMainWindow):
             elif tab is self.studio and paths[0].suffix.lower() in MODEL_EXTS:
                 self.studio.load_model(paths[0])
             else:
-                self.tabs.setCurrentIndex(0)
+                self.show_tool(self.sprite_split)
                 self.open_path(paths[0])
         except Exception as e:  # noqa: BLE001 - shown to the person
             QMessageBox.warning(self, "Couldn't open that", f"{paths[0]}\n\n{e}")

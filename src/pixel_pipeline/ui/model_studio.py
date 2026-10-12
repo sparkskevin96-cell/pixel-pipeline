@@ -1,4 +1,10 @@
-"""Prompt to Model: type what you want, get a coloured 3D model and its direction sprites.
+"""Characters: make a character from words, a photo or a 3D model, watch it play, keep it.
+
+Left: your Character Library (library.py). Click one to see it play. Right, top to bottom:
+1. make it (words -> GPU picture -> 3D shape; or a photo; or a 3D model), 2. look at it
+(picture, spinning model, sprites), 3. name it and press Add to library: it gets a skeleton,
+every animation from 16 directions at the one library scale, a normal map and a thumbnail,
+ready for the Game tab. More settings shows the raw numbers (directions, size, colours, tilt).
 
 Prompt -> front picture -> 3D shape (Hunyuan3D in ComfyUI on this PC) -> painted from the
 picture -> spinning preview + 4/8/16-direction sprites -> Save all (.glb, picture, sprite
@@ -17,9 +23,12 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSpinBox,
+    QSplitter, QVBoxLayout, QWidget,
 )
 
 from ..settings import settings_for
@@ -70,7 +79,9 @@ def _fit(rgba: np.ndarray, size: int = PANEL) -> np.ndarray:
 
 
 class ModelStudio(QMainWindow):
-    """One window: prompt in, model + sprites out."""
+    """The Characters tab: make a character, see it play, keep it in the library."""
+
+    library_changed = Signal()
 
     def __init__(self, client=None):
         super().__init__()
@@ -86,6 +97,7 @@ class ModelStudio(QMainWindow):
         self.anim_names: list[str] = []
         self.rigged: Path | None = None   # skeleton + animations added by Animate
         self.back_path: Path | None = None  # picture of the far side
+        self.character = None             # the library Character on show, if any
         self._anim_i = 0
         self.spin: list[np.ndarray] = []
         self._spin_i = 0
@@ -95,8 +107,12 @@ class ModelStudio(QMainWindow):
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._next_anim_frame)
         self._build()
-        self.statusBar().showMessage("Type what you want and press Make model. Needs ComfyUI "
-                                     "running with Hunyuan3D (see docs/LOCAL_AI.md).")
+        self.statusBar().showMessage(self.HINT)
+        self.refresh_library()
+
+    HINT = ("Describe a character and press Make from words (your GPU), or start from a photo or "
+            "a 3D model. Then name it and press Add to library. Click a character on the left "
+            "to see it play.")
 
     # ---- layout ---------------------------------------------------------------
     def _build(self):
@@ -105,21 +121,26 @@ class ModelStudio(QMainWindow):
         self.prompt.returnPressed.connect(self.make)
         self.subject = QComboBox()
         self.subject.addItems(["person", "animal", "object"])
+        self.subject.setToolTip("person: two legs (idle walk run attack hurt death). animal: four "
+                                "legs (idle walk run sit happy lie down death). object: no skeleton.")
         self.seed = QSpinBox()
         self.seed.setRange(0, 2**31 - 1)
         self.seed.setSpecialValueText("random")
-        self.make_btn = QPushButton("Make model")
+        self.make_btn = QPushButton("Make from words")
         self.make_btn.setDefault(True)
         self.make_btn.clicked.connect(self.make)
-        pic_btn = QPushButton("From a picture…")
+        pic_btn = QPushButton("From a photo…")
+        pic_btn.setToolTip("A photo or drawing of the whole subject; you can rub out a leash or a "
+                           "hand before the 3D shape is built")
         pic_btn.clicked.connect(self.from_picture)
-        model_btn = QPushButton("Open a 3D model…")
+        model_btn = QPushButton("From a 3D model…")
+        model_btn.setToolTip("A .glb/.gltf/.obj from Blender, Tripo, Meshy… (no GPU needed)")
         model_btn.clicked.connect(self.open_model)
         top = QHBoxLayout()
         top.addWidget(self.prompt, 1)
-        for w in (QLabel("Subject"), self.subject, QLabel("Seed"), self.seed, self.make_btn,
-                  pic_btn, model_btn):
+        for w in (QLabel("Kind"), self.subject, self.make_btn, pic_btn, model_btn):
             top.addWidget(w)
+        self.seed.setToolTip("The same words + seed make the same picture again")
 
         self.back_btn = QPushButton("Back picture…")
         self.back_btn.setToolTip("A picture of the other side, for the parts the front can't see")
@@ -145,13 +166,15 @@ class ModelStudio(QMainWindow):
         paint = QHBoxLayout()
         for w in (self.back_btn, self.mirror, self.only_colours, self.edit_btn, self.repaint_btn):
             paint.addWidget(w, 1 if w is self.only_colours else 0)
+        self.paint_box = QGroupBox("Photo options")
+        self.paint_box.setLayout(paint)
 
         self.picture_view = _label("Front picture")
         self.model_view = _label("3D model (spins)")
         self.sprite_view = _label("Direction sprites")
         panels = QHBoxLayout()
-        for title, view in (("1. Picture", self.picture_view), ("2. Model", self.model_view),
-                            ("3. Sprites", self.sprite_view)):
+        for title, view in (("Picture", self.picture_view), ("3D model", self.model_view),
+                            ("In the game (every direction)", self.sprite_view)):
             box = QGroupBox(title)
             lay = QVBoxLayout(box)
             lay.addWidget(view)
@@ -189,9 +212,31 @@ class ModelStudio(QMainWindow):
         self.save_btn.clicked.connect(self.save_all)
         for b in (self.redo_btn, self.save_btn):
             b.setEnabled(False)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("Name, e.g. Geela")
+        self.size_ = QComboBox()
+        self.size_.setToolTip("People: small / normal / large. Animals: sized next to a person "
+                              "(small = a dog, medium = a wolf, large = a bear)")
+        self.subject.currentTextChanged.connect(self._kind_changed)
+        self.add_btn = QPushButton("Add to library")
+        self.add_btn.setToolTip("Skeleton + every animation from 16 directions + normal map, saved "
+                                "in your Character Library at the one game scale")
+        self.add_btn.setStyleSheet("font-weight:600;")
+        self.add_btn.clicked.connect(self.add_to_library)
+        self.add_btn.setEnabled(False)
+        self.more_btn = QPushButton("More settings ▸")
+        self.more_btn.setCheckable(True)
+        self.more_btn.toggled.connect(self._toggle_more)
+        keep = QHBoxLayout()
+        for w in (QLabel("Name"), self.name, QLabel("Size"), self.size_, self.add_btn):
+            keep.addWidget(w, 1 if w is self.name else 0)
+        keep.addStretch(1)
+        keep.addWidget(self.more_btn)
+        self._kind_changed(self.subject.currentText())
+
         form = QFormLayout()
         row = QHBoxLayout()
-        for label, w in (("Directions", self.directions), ("Width", self.width_),
+        for label, w in (("Seed", self.seed), ("Directions", self.directions), ("Width", self.width_),
                          ("Height", self.height_), ("Colours", self.colors),
                          ("Camera tilt", self.elevation)):
             row.addWidget(QLabel(label))
@@ -202,14 +247,156 @@ class ModelStudio(QMainWindow):
         row.addWidget(self.redo_btn)
         row.addWidget(self.save_btn)
         form.addRow(row)
+        self.more = QWidget()
+        self.more.setLayout(form)
+        self.more.setVisible(False)
 
-        root = QWidget()
-        lay = QVBoxLayout(root)
+        # the library
+        self.library = QListWidget()
+        self.library.setViewMode(QListWidget.IconMode)
+        self.library.setIconSize(QSize(72, 72))
+        self.library.setGridSize(QSize(96, 104))
+        self.library.setResizeMode(QListWidget.Adjust)
+        self.library.setMovement(QListWidget.Static)
+        self.library.setMinimumWidth(220)
+        self.library.itemClicked.connect(lambda item: self.open_character(item.data(Qt.UserRole)))
+        self.lib_title = QLabel("Your characters")
+        self.lib_title.setStyleSheet("font-weight:600;")
+        new_btn = QPushButton("New character")
+        new_btn.clicked.connect(self.new_character)
+        folder_btn = QPushButton("Show folder")
+        folder_btn.clicked.connect(self.show_library_folder)
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(self.lib_title)
+        ll.addWidget(self.library, 1)
+        lb = QHBoxLayout()
+        lb.addWidget(new_btn)
+        lb.addWidget(folder_btn)
+        ll.addLayout(lb)
+
+        right = QWidget()
+        lay = QVBoxLayout(right)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.addLayout(top)
-        lay.addLayout(paint)
+        lay.addWidget(self.paint_box)
         lay.addLayout(panels, 1)
-        lay.addLayout(form)
-        self.setCentralWidget(root)
+        lay.addLayout(keep)
+        lay.addWidget(self.more)
+        split = QSplitter()
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setStretchFactor(1, 1)
+        split.setSizes([240, 1000])
+        self.setCentralWidget(split)
+
+    # ---- library --------------------------------------------------------------
+    def _kind_changed(self, kind: str):
+        from ..library import DEFAULT_SIZE, SIZES
+        self.size_.clear()
+        sizes = SIZES.get(kind)
+        if sizes:
+            self.size_.addItems(list(sizes))
+            self.size_.setCurrentText(DEFAULT_SIZE[kind])
+        self.size_.setEnabled(bool(sizes))
+        if hasattr(self, "add_btn"):
+            self._busy(False) if self._thread is None else None
+
+    def _toggle_more(self, on: bool):
+        self.more.setVisible(on)
+        self.more_btn.setText("More settings ▾" if on else "More settings ▸")
+
+    def refresh_library(self, select=None):
+        from ..library import list_characters
+        self.library.clear()
+        chars = list_characters()
+        for ch in chars:
+            item = QListWidgetItem(ch.name)
+            if ch.thumb.exists():
+                item.setIcon(QIcon(QPixmap(str(ch.thumb))))
+            item.setData(Qt.UserRole, ch)
+            item.setToolTip(f"{ch.name}: {ch.kind}, {ch.size}. Class {ch.stats_class}: "
+                            "HP %d  ATK %d  DEF %d  MOV %d  JMP %d  RNG %d" % ch.stats())
+            self.library.addItem(item)
+            if select is not None and ch.folder == select.folder:
+                self.library.setCurrentItem(item)
+        self.lib_title.setText(f"Your characters ({len(chars)})")
+
+    def show_library_folder(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from ..library import root
+        root().mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(root())))
+
+    def new_character(self):
+        self.character = None
+        self.result = None
+        self.sprites = None
+        self.anim = None
+        self._anim_timer.stop()
+        self._spin_timer.stop()
+        self.spin = []
+        self.name.clear()
+        self.prompt.clear()
+        for view, text in ((self.picture_view, "Picture"), (self.model_view, "3D model (spins)"),
+                           (self.sprite_view, "Every direction, animated")):
+            view.clear()
+            view.setText(text)
+        self.library.clearSelection()
+        self._busy(False)
+        self.statusBar().showMessage(self.HINT)
+
+    def open_character(self, ch):
+        """Show a library character: its picture, spinning model, and every animation playing."""
+        from ..library import load_animated
+        from ..model3d import ModelResult
+        self.character = ch
+        self.name.setText(ch.name)
+        self.subject.setCurrentText(ch.kind)
+        if self.size_.findText(ch.size) >= 0:
+            self.size_.setCurrentText(ch.size)
+
+        def job(say):
+            say(f"Opening {ch.name}…")
+            model = ch.model if ch.model.exists() else ch.rigged
+            views = render_model(model, 16, self.elevation.value(), size=320) if model.exists() else []
+            spin = union_crop(views) if views else []
+            anim = load_animated(ch)
+            sprites = [d[0] for d in anim.sprites[0]]
+            pic = ch.picture if ch.picture.exists() else None
+            res = ModelResult(model, pic, None, None)
+            return res, spin, sprites, anim, [a.name for a in anim.actions], ch.rigged
+        self._run(job, self._show_character)
+
+    def _show_character(self, payload):
+        self._show(payload)
+        ch = self.character
+        self.statusBar().showMessage(
+            f"{ch.name}: {ch.kind}, {ch.size}, playing {len(self.anim_names)} animations from every "
+            f"direction. It's ready for the Game tab. Files: {ch.folder}")
+
+    def add_to_library(self):
+        """Rig + animate + render the current model at the library scale, then keep it."""
+        from ..library import add_character
+        if self.result is None:
+            return
+        name = self.name.text().strip() or (self.prompt.text().strip()[:30] or "Character")
+        kind = self.subject.currentText()
+        size = self.size_.currentText()
+        model = self.result.model
+        picture = self.result.picture if self.result.picture and \
+            Path(self.result.picture).suffix.lower() == ".png" else None
+
+        def job(say):
+            return add_character(name, model, kind=kind, size=size, picture=picture, progress=say)
+
+        def done(ch):
+            self.refresh_library(select=ch)
+            self.library_changed.emit()
+            self.open_character(ch)
+        self._run(job, done)
 
     # ---- jobs -----------------------------------------------------------------
     def _run(self, job, on_done):
@@ -240,6 +427,11 @@ class ModelStudio(QMainWindow):
         self.make_btn.setEnabled(not busy)
         self.redo_btn.setEnabled(not busy and self.result is not None)
         self.save_btn.setEnabled(not busy and self.sprites is not None)
+        if hasattr(self, "add_btn"):
+            can_rig = self.subject.currentText() in ("person", "animal")
+            self.add_btn.setEnabled(not busy and self.result is not None and can_rig
+                                    and self.character is None)
+            self.add_btn.setText("In your library" if self.character is not None else "Add to library")
         has_pic = self.result is not None and self.result.picture is not None \
             and Path(self.result.picture).suffix.lower() == ".png"
         self.edit_btn.setEnabled(not busy and has_pic)
@@ -377,6 +569,7 @@ class ModelStudio(QMainWindow):
         return True
 
     def make(self):
+        self.character = None             # something new: not (yet) in the library
         prompt = self.prompt.text().strip()
         if not prompt:
             self.statusBar().showMessage("Type what you want first.")
@@ -389,6 +582,7 @@ class ModelStudio(QMainWindow):
             path, _ = QFileDialog.getOpenFileName(self, "Front picture", "", IMAGE_FILTER)
         if not path or not self._checked_options():
             return
+        self.character = None
         if not edit:
             self._run(self._model_job(prompt=self.prompt.text().strip() or None, picture=path),
                       self._show)
@@ -407,6 +601,7 @@ class ModelStudio(QMainWindow):
 
     def load_model(self, path: Path):
         """Skip the GPU: use a model made elsewhere (Tripo, Meshy, Blender, ...)."""
+        self.character = None             # something new: not (yet) in the library
         from ..model3d import ModelResult
 
         def job(say):
