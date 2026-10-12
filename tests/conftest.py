@@ -58,3 +58,28 @@ def qt_app():
 def _own_library(tmp_path_factory, monkeypatch):
     """Tests never touch the real Character Library."""
     monkeypatch.setenv("PIXEL_LIBRARY", str(tmp_path_factory.mktemp("library")))
+
+
+_EXIT = [0]
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _EXIT[0] = int(exitstatus)
+
+
+def pytest_unconfigure(config):
+    """Once the results are printed, end the process without Python tearing Qt down: with
+    windows from many tests still around, that teardown crashed at random (CI, Linux and
+    Windows) after every test had passed."""
+    if _QAPP:
+        import os
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        if os.name == "nt":     # ExitProcess still unloads Qt's DLLs, which is what crashes
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            k32.TerminateProcess(k32.GetCurrentProcess(), _EXIT[0])
+        os._exit(_EXIT[0])
