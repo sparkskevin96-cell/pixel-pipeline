@@ -19,6 +19,7 @@ The HD-2D board (hd2d.board.gd) draws the new prop kinds through res://map/props
 from __future__ import annotations
 
 import json
+import shutil
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1582,16 +1583,24 @@ def _height_tiles(levels: int, cell: int) -> np.ndarray:
     return out
 
 
-def _export_tilemap(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
+def _export_tilemap(doc: MapDoc, out: Path, style: assets.Style,
+                    project: assets.Project | None = None) -> list[Path]:
     """Top-down TileMap: the maptiles terrain TileSet (terrain painting works in the editor),
-    a Height layer (custom data "level"), a Props layer (custom data "kind"), Marker2D starts."""
+    a Height layer (custom data "level"), a Props layer (custom data "kind"), Marker2D starts.
+    Terrains the project has a generated tileset for (tilegen.py) paint with its texture; those
+    tilesets are copied to tilesets/<name>/ too."""
     from .maptiles import Terrain, build_terrain_set, write_godot_terrain_tileset
+    from .tilegen import project_textures, project_tilesets
     d = doc.diorama
     T = style.tile
     tex = terrain_textures(T)
+    generated = project_textures(project, T)
     used = sorted(set(d.terrain.ravel()), key=lambda n: -int((d.terrain == n).sum()))
     terrains = []
     for name in used:
+        if name in generated:
+            terrains.append(Terrain(name, *generated[name]))
+            continue
         top = tex[name][0]
         dark = top[..., :3].reshape(-1, 3).astype(int)
         edge = tuple(int(v) for v in dark[dark.sum(1).argmin()])
@@ -1642,6 +1651,13 @@ def _export_tilemap(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
     scene.write_text("\n".join(lines), encoding="utf-8")
     files.append(scene)
     files += _write_project(out, d.name, "res://map.tscn")
+    for a in project_tilesets(project):                 # fences, walls, shores... ready to paint
+        if a.extra.get("camera", "topdown") == "topdown" and (a.folder / "tileset.tres").exists():
+            dst = out / "tilesets" / a.folder.name
+            dst.mkdir(parents=True, exist_ok=True)
+            for f in ("tileset.png", "tileset.tres", "tileset.tsx", "tileset.json"):
+                if (a.folder / f).exists():
+                    files.append(Path(shutil.copy2(a.folder / f, dst / f)))
     return files
 
 
@@ -1864,6 +1880,9 @@ def export_map(asset, target: str, out_dir) -> list[Path]:
         style = assets.current_project().style
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    if target == "godot-tilemap":
+        proj = _project_of(asset) if isinstance(asset, assets.Asset) else None
+        return _export_tilemap(doc, out, style, proj)
     return _EXPORTERS[target](doc, out, style)
 
 

@@ -228,6 +228,8 @@ class MainWindow(QMainWindow):
         self.teams_tab = TeamsTab(say, current_sprite=lambda: self.sprite)
         self.portrait_tab = PortraitTab(say)
         self.map_tab = MapTab(say)
+        from .tilegen_tab import TilegenTab
+        self.tilegen_tab = TilegenTab(say)
         self.demo_tab = DemoTab(say)
         self.studio = ModelStudio()
         self.studio.setWindowFlags(Qt.Widget)
@@ -242,6 +244,8 @@ class MainWindow(QMainWindow):
         self.portraits_tab = PortraitsTab(say)
         self.effects_tab = EffectsTab(say)
         self.cards_tab = CardsTab(say)
+        from .uikit_tab import UIKitTab
+        self.uikit_tab = UIKitTab(say)
         self.assets_tab = AssetsTab(status=say)
         self.items_tab = self.props_tab = None
         try:
@@ -252,7 +256,7 @@ class MainWindow(QMainWindow):
             pass
         # anything new anywhere shows up everywhere
         for sig in (self.studio.library_changed, self.map_editor.map_saved, self.portraits_tab.changed,
-                    self.effects_tab.changed, self.cards_tab.changed, *([w.changed for w in (self.items_tab, self.props_tab)
+                    self.effects_tab.changed, self.cards_tab.changed, self.tilegen_tab.changed, self.uikit_tab.changed, *([w.changed for w in (self.items_tab, self.props_tab)
                                                  if w is not None and hasattr(w, "changed")])):
             sig.connect(lambda *_: self.assets_tab.refresh())
         self.map_editor.map_saved.connect(lambda *_: self.game_tab.refresh())
@@ -283,12 +287,16 @@ class MainWindow(QMainWindow):
             (self.map_editor, "Maps", "Paint height, terrain, props and team starts; save maps to "
                                       "your library; export to Godot, Tiled or JSON"),
             (self.map_tab, "Terrain tiles", "Terrain tilesets with transitions + Godot TileSet"),
+            (self.tilegen_tab, "Tile variations", "Paths, shores, cliffs and fences drawn by your GPU "
+                                                  "in the house style, as tilesets"),
         ])
         self.faces_tabs = sub([
             (self.portraits_tab, "Portraits", "Painted and pixel portraits of a character, with "
                                               "expressions"),
             (self.cards_tab, "Cards", "Card art from a character, item or words + card frames; "
                                       "export a card scene for Godot or Unity"),
+            (self.uikit_tab, "UI kit", "Buttons, panels, bars, a pixel font and icons in the "
+                                       "house style; Godot Theme / Unity 9-slice sprites"),
             (self.effects_tab, "Effects", "Slashes, sparks, fire, magic, heal… as sprite sheets"),
         ])
         self.objects_tabs = sub([(w, t, tip) for w, t, tip in (
@@ -302,7 +310,7 @@ class MainWindow(QMainWindow):
                                         "animate and go into your library"),
             (self.objects_tabs, "Items && props", "Items with inventory icons; props and buildings"),
             (self.world_tabs, "World", "Maps and terrain tiles"),
-            (self.faces_tabs, "Portraits, cards && effects", "Portraits with expressions, cards, effects"),
+            (self.faces_tabs, "Portraits, cards && effects", "Portraits with expressions, cards, UI kits, effects"),
             (self.assets_tab, "Library", "Everything you've made, by project: search, tag, export "
                                          "to Godot / Unity / GameMaker / Aseprite, re-skin, queue"),
             (self.game_tab, "Try in a game", "Drop your characters onto a map in a Godot tactics "
@@ -323,6 +331,8 @@ class MainWindow(QMainWindow):
         "prompt": "Describe a sprite and press Make. Your GPU draws it; Open in the Sprite tab to "
                   "tweak it.",
         "map": "Pick terrains (built-in, a photo, or words) and press Make tiles.",
+        "tilegen": "Pick a terrain, add words, press Make (your GPU draws textures); pick one, "
+                   "check the sample map, Save.",
         "game": "A test bed for your assets: pick a map, tick who stands on each side, press Make "
                 "game, then Play.",
         "maps": "Pick a map on the left or make one from a template; paint with the tools; Save, "
@@ -331,6 +341,8 @@ class MainWindow(QMainWindow):
         "effects": "Pick an effect, a theme and a size; it plays live; Make saves it.",
         "cards": "Pick a character, item or prop (or type words), fill the card, Make art (your "
                  "GPU) and pick one; Save card; Export for Godot or Unity.",
+        "uikit": "Pick a theme and scale; the preview shows every piece in the house style; Save "
+                 "kit; Export for Godot (Theme) or Unity (9-slice sprites).",
         "library": "Everything in this project. Search, filter, tag; Export… for any engine; "
                    "Re-skin… makes colour variants; the queue makes many in a row.",
         "items": "Describe an item (or use a photo / 3D model) and press Make: icon variations + "
@@ -370,9 +382,11 @@ class MainWindow(QMainWindow):
             text = self.studio.HINT
         else:
             key = {self.sprite_split: "sprite", self.prompt_tab: "prompt", self.map_tab: "map",
+                   self.tilegen_tab: "tilegen",
                    self.game_tab: "game", self.directions_tab: "directions",
                    self.map_editor: "maps", self.portraits_tab: "portraits",
                    self.effects_tab: "effects", self.assets_tab: "library", self.cards_tab: "cards",
+                   self.uikit_tab: "uikit",
                    self.items_tab: "items", self.props_tab: "props",
                    self.teams_tab: "teams", self.portrait_tab: "portrait",
                    self.demo_tab: "demo"}.get(w)

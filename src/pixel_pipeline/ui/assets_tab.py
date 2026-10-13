@@ -29,7 +29,7 @@ from .. import exports, jobqueue, reskin
 from .common import PixelView, ToolTab, checkerboard, to_pixmap
 
 KIND_CHIPS = (("All", None), ("Characters", "character"), ("Items", "item"), ("Props", "prop"),
-              ("Maps", "map"), ("Portraits", "portrait"), ("Effects", "effect"))
+              ("Maps", "map"), ("Tilesets", "tileset"), ("Portraits", "portrait"), ("Effects", "effect"))
 OUTLINES = (("Shaded outline", "selout"), ("Solid outline", "solid"), ("No outline", "none"))
 THUMB = 96
 

@@ -116,6 +116,14 @@ def test_main_window_has_every_tool(app):
     win.show_tool(win.map_editor)
     assert win.current_tool() is win.map_editor and "template" in win.statusBar().currentMessage()
     assert [win.sprite_tabs.tabText(i) for i in range(2)] == ["From a photo", "From words"]
+    assert [win.world_tabs.tabText(i) for i in range(win.world_tabs.count())] == [
+        "Maps", "Terrain tiles", "Tile variations"]
+    win.show_tool(win.tilegen_tab)
+    assert win.current_tool() is win.tilegen_tab and "GPU" in win.statusBar().currentMessage()
+    assert [win.faces_tabs.tabText(i) for i in range(win.faces_tabs.count())] == [
+        "Portraits", "Cards", "UI kit", "Effects"]
+    win.show_tool(win.uikit_tab)
+    assert win.current_tool() is win.uikit_tab and "theme" in win.statusBar().currentMessage()
     win.show_tool(win.portrait_tab)
     assert win.current_tool() is win.portrait_tab and "face" in win.statusBar().currentMessage()
     win.open_model_studio()

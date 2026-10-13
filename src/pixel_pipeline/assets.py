@@ -23,8 +23,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-KINDS = ("character", "item", "prop", "map", "portrait", "effect", "card")
-FOLDERS = {k: k + "s" for k in KINDS}
+KINDS = ("character", "item", "prop", "map", "portrait", "effect", "card", "tileset", "ui")
+FOLDERS = {k: k + "s" for k in KINDS} | {"ui": "ui"}       # UI kits (uikit.py): <project>/ui
 
 
 def home() -> Path:

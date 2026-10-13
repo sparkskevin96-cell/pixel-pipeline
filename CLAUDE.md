@@ -168,6 +168,45 @@ wants terse answers and fixes over polish.
     plan: 47 BVH, ~33 MB, awaiting Kevin's OK).
   - `springs.py`: spring bones for capes/hair/tails (add_springs, rebake); Model Studio checkbox
     "Capes/hair/tails swing"; library.add_character_springs. Quadruped tails now hang.
+  - Mocap, after Kevin OK'd the CMU download (47 BVH, 33 MB in ~/Pixel Pipeline/Mocap/cmu):
+    all retarget. One-shots longer than 2.5 s are cut to their main move (mocap.action_window);
+    loops need motion inside the window and weight joints by how much they move; per-clip
+    `cycle` ranges in the index (dance 1.5-5 s, idles, slow walks). Characters page: "Mocap: …"
+    entries in Add animation (downloaded files only). autorig._straighten_torso: capes/cloaks
+    pulled the joint depth back and hunched Knight/Swordsman/Spearman/Paladin 17-31 degrees;
+    the spine now stands over the knees (head may tilt 8 degrees); Skeleton.back = back-most
+    surface so death lies a cape on the floor, not through it. All library people re-rigged.
+  - Style training on the 4070 8 GB (2026-10-13) does NOT work yet: ComfyUI's TrainLoraNode
+    aborts under dynamic VRAM (backward pass), and with --disable-dynamic-vram --lowvram,
+    offloading, bypass_mode, 512-1024 px, with or without Pixel Art XL, bf16 or native dtype
+    it still asks ~10 GiB at step 0. Kept: TRAIN_FLAGS restart of our hidden ComfyUI, /free
+    before each chunk, bypass_mode, training_dtype "none". Needs a lighter trainer (e.g. kohya
+    sd-scripts / OneTrainer 8 GB SDXL presets: fp8 base, cached latents) or a bigger GPU.
+- **UI kit (2026-10-13)** (`uikit.py` + `ui/uikit_tab.py`, Portraits, cards & effects -> UI kit):
+  asset kind "ui" (<project>/ui, in assets.KINDS). Procedural, no GPU: THEMES wood/stone/
+  parchment/metal/crystal/sci-fi; Style outline/shading/detail/palette shape every piece; drawn
+  at 1x, whole-number scale (default from Style.tile). 9-slice panels/window/dialogue/buttons x4/
+  tabs/slots/bars/slider/scrollbar keep corners + bevels inside the margins, edges uniform, so
+  engine stretching = preview. Godot ProgressBar draws fill over the whole background rect, so
+  bar fills carry the frame's transparent padding. 16 px icons (optional GPU versions via
+  icon_prompt + with_style), cursors, font = cards' 5x7 + the 9 missing ASCII glyphs as BMFont.
+  Godot export = theme.tres (StyleBoxTexture, type variations WindowPanel/DialogueBox/Slot/
+  HealthBar…, relative paths) + UIKitDemo.tscn: verified headless 4.6.1 (test). Unity export =
+  sprites with spriteBorder + Editor/PixelPipelineUIKit.cs (.fnt -> Font asset, demo Canvas from
+  kit.json "demo"): verified 12/12 in 6000.3.9f1 batch (tools/verify_unity/verify_uikit.py).
+- **Tile variations (2026-10-13)** (`tilegen.py` + `ui/tilegen_tab.py`, World -> Tile variations):
+  asset kind "tileset" (<project>/tilesets, in assets.KINDS). SDXL swatch at the project camera
+  (camera_for: side-scroller -> side, isometric -> iso, else top-down), prompt via with_style
+  "tile" (+ style LoRA from generate) -> seamless (CPU: 4 half-offset copies weighted sin^2/cos^2,
+  zero on their own seams; inpaint_seams: offset copy's centre cross repainted) -> converter
+  tileable at Style.tile, project palette. Sets: ground = maptiles 16 corner; water/cliff = 47
+  blob (Godot mode 0, 8 peering bits; elliptic inner-corner notches with the sides' margins +
+  edge-tapered jitter so every shared edge matches; base 0:0 has 8 map-border alternatives);
+  fence/wall = 16 line tiles (mode 2, physics boxes) + base row; side/iso via tilesets.py.
+  Interior variants keep a border band (shifted piece of the same picture, same colours).
+  Files: .tres, .tsx wang set + example.tmj, json, texture.png, sheet.png/.json (Unity slices it;
+  no clips). maplib godot-tilemap paints with project_textures and copies tilesets/. Godot 4.6.1
+  headless paints blob/line/corner sets right (test). No real-GPU run yet.
 - **App layout (2026-10-12, Kevin: "make it feel intuitive")**: tabs in the order you make a
   game: `1 Characters` (ModelStudio + Character Library list on the left; Kind person/animal/
   object, Size words not numbers, Name, Add to library = rig + all clips x16 + normals at the

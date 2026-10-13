@@ -323,7 +323,7 @@ class FakeClient:
         self.loras = []
         self.fail = None
 
-    def ensure_running(self):
+    def ensure_running(self, **_):
         return {}
 
     def list_models(self, kind):

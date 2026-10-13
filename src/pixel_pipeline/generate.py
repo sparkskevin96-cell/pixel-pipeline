@@ -202,9 +202,10 @@ COMFYUI_LOG = Path.home() / ".pixel-pipeline" / "comfyui.log"
 _started: list = []        # ComfyUI processes we started; stopped when we exit
 
 
-def start_comfyui(folder: Path):
+def start_comfyui(folder: Path, extra_args: tuple = ()):
     """Start ComfyUI hidden (no window), output to COMFYUI_LOG. It is stopped when this
-    program exits; a ComfyUI you started yourself is never touched."""
+    program exits; a ComfyUI you started yourself is never touched. extra_args: more flags
+    (training needs --disable-dynamic-vram)."""
     import atexit
     import subprocess
     COMFYUI_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +214,10 @@ def start_comfyui(folder: Path):
                           "stdin": subprocess.DEVNULL}
     if os.name == "nt":
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-    proc = subprocess.Popen(comfyui_command(folder), **kw)
+    cmd = comfyui_command(folder)
+    cmd += [a for a in extra_args if a not in cmd]
+    proc = subprocess.Popen(cmd, **kw)
+    proc.pp_flags = tuple(extra_args)
     log_file.close()
     if not _started:
         atexit.register(stop_started_comfyui)
@@ -315,11 +319,23 @@ class ComfyClient:
             raise ComfyUIUnavailable(f"Something answered at {self.base_url} but it isn't ComfyUI.")
         return stats
 
-    def ensure_running(self, wait: float = 240.0, say=None) -> dict:
+    def ensure_running(self, wait: float = 240.0, say=None, extra_args: tuple = ()) -> dict:
         """ping(), but if nothing answers at the default address, start the installed
-        ComfyUI portable (find_comfyui) hidden in the background and wait for it."""
+        ComfyUI portable (find_comfyui) hidden in the background and wait for it.
+        extra_args: flags it must run with; a ComfyUI we started without them is restarted
+        (one you started yourself is used as it is)."""
         try:
-            return self.ping()
+            info = self.ping()
+            ours = [p for p in _started if p.poll() is None]
+            if not extra_args or not ours or all(set(extra_args) <= set(getattr(p, "pp_flags", ()))
+                                                  for p in ours):
+                return info
+            (say or log.info)(f"Restarting ComfyUI with {' '.join(extra_args)}…")
+            stop_started_comfyui()
+            time.sleep(3)
+            folder = find_comfyui()
+            if folder is None:
+                raise ComfyUIUnavailable("ComfyUI portable not found")
         except ComfyUIUnavailable:
             if self.base_url.replace("localhost", "127.0.0.1") != DEFAULT_URL:
                 raise
@@ -327,7 +343,7 @@ class ComfyClient:
             if folder is None:
                 raise
         (say or log.info)(f"Starting ComfyUI from {folder}…")
-        proc = start_comfyui(folder)
+        proc = start_comfyui(folder, extra_args) if extra_args else start_comfyui(folder)
         deadline = time.monotonic() + wait
         while True:
             time.sleep(2)

@@ -57,6 +57,11 @@ CHUNK_OVERHEAD = 30.0                        # s per chunk: copy SDXL in RAM + l
 ENCODE_SECONDS = 60.0                        # VAE + CLIP encoding the dataset once
 
 
+# ComfyUI's dynamic VRAM loading (default since ~0.3x) aborts the process on the first
+# backward pass of TrainLoraNode (c10 AbortHandler, seen 2026-10-13 on the 4070 8 GB)
+TRAIN_FLAGS = ("--disable-dynamic-vram", "--lowvram")
+
+
 class StyleTrainError(RuntimeError):
     """Something the user has to fix (message written for them)."""
 
@@ -363,10 +368,10 @@ def train_workflow(dataset_name: str, cfg: TrainConfig, *, steps: int, seed: int
           positive=["3", 1], batch_size=cfg.batch_size, grad_accumulation_steps=1,
           steps=int(steps), learning_rate=cfg.learning_rate, rank=cfg.rank,
           optimizer=cfg.optimizer, loss_function="MSE", seed=int(seed) % 2**63,
-          training_dtype="bf16", lora_dtype="bf16", quantized_backward=False, algorithm="LoRA",
+          training_dtype="none", lora_dtype="bf16", quantized_backward=False, algorithm="LoRA",
           gradient_checkpointing=cfg.gradient_checkpointing, checkpoint_depth=1,
           offloading=cfg.offloading, existing_lora=existing_lora, bucket_mode=False,
-          bypass_mode=False)
+          bypass_mode=True)     # LoRA beside the weights: patched copies of all SDXL weights kept for backward need >8 GB
     _node(wf, "5", "SaveLoRA", "Save LoRA", lora=["4", 0], prefix=prefix, steps=["4", 2])
     return wf
 
@@ -558,8 +563,17 @@ class ComfyBackend:
         except Exception:  # noqa: BLE001
             pass
 
+    def _free(self) -> None:
+        """Ask ComfyUI to unload every model and free its memory before training."""
+        try:
+            body = json.dumps({"unload_models": True, "free_memory": True}).encode()
+            self.client._request("POST", "/free", body, {"Content-Type": "application/json"})
+            time.sleep(2)
+        except Exception:  # noqa: BLE001 - an old ComfyUI without /free: train anyway
+            pass
+
     def prepare(self, dataset: Dataset, name: str, cfg: TrainConfig) -> None:
-        self.client.ensure_running()
+        self.client.ensure_running(extra_args=TRAIN_FLAGS)
         self._check_nodes()
         inp = self.root / "input" / Path(name)
         if inp.exists():
@@ -573,7 +587,8 @@ class ComfyBackend:
     def train_chunk(self, name: str, cfg: TrainConfig, *, steps: int, seed: int,
                     existing: Path | None, prefix: str, on_step: StepFn,
                     should_abort: AbortFn) -> Path:
-        self.client.ensure_running()
+        self.client.ensure_running(extra_args=TRAIN_FLAGS)
+        self._free()                    # the encode step's models would stay on an 8 GB card
         existing_name = "[None]"
         if existing is not None:
             names = self.client.list_models("loras")
