@@ -12,6 +12,11 @@ colour   paint_from_picture(): the picture is projected onto the parts of the mo
          shows. Parts it can't see (the back) take the colours of a blurred copy of the
          picture straight through the model, so a red cape stays red behind, unless a
          back-view picture is given.
+views    views_for_model(): real back (and left / right side) pictures to paint from. The
+         shape is rendered from behind (or the side) with the camera found for the front
+         picture, shaded grey and tinted with the front's colours, and SDXL redraws that as
+         "back view of <prompt>, same outfit, same colours" (img2img, same seed, no pixel
+         LoRA). The new picture keeps the shape's outline, so it lands on the model exactly.
 
 Any API-format workflow with an {{image}} input that ends in a SaveGLB node can replace
 the shape step (`template`), e.g. ComfyUI's TRELLIS.2 nodes on a bigger GPU; a model that
@@ -22,7 +27,7 @@ from __future__ import annotations
 import io
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -73,6 +78,26 @@ class ModelResult:
     picture: Path          # the front picture it was built from
     raw: Path | None       # the uncoloured shape ComfyUI returned
     seed: int | None
+    views: dict = field(default_factory=dict)   # back / left / right -> picture made for it
+
+
+VIEWS = ("front", "front+back", "all")
+VIEW_TURN = {"back": 180.0, "left": -90.0, "right": 90.0}   # camera walks round (degrees)
+VIEW_PROMPTS = {
+    "back": "back view of {prompt}, seen from behind, the same {what} from the back, same "
+            "outfit, same colours, same materials, whole body in frame, plain white background, "
+            "soft even lighting, no shadows, clean shapes, game {kind} concept art",
+    "left": "side view of {prompt}, profile facing left, the same {what} seen from its left "
+            "side, same outfit, same colours, same materials, whole body in frame, plain white "
+            "background, soft even lighting, no shadows, clean shapes, game {kind} concept art",
+    "right": "side view of {prompt}, profile facing right, the same {what} seen from its "
+             "right side, same outfit, same colours, same materials, whole body in frame, plain "
+             "white background, soft even lighting, no shadows, clean shapes, game {kind} "
+             "concept art",
+}
+VIEW_NEGATIVE = {"back": "front view, face, looking at the viewer, ",
+                 "left": "front view, back view, facing the viewer, ",
+                 "right": "front view, back view, facing the viewer, "}
 
 
 # --------------------------------------------------------------------------- picture
@@ -423,18 +448,39 @@ class _View:
 
 
 def paint_from_picture(mesh, picture: np.ndarray, back: np.ndarray | None = None,
-                       samples: int = 400_000, min_match: float = 0.5, upright: bool = True):
+                       samples: int = 400_000, min_match: float = 0.5, upright: bool = True,
+                       left: np.ndarray | None = None, right: np.ndarray | None = None):
     """Colour a shape-only mesh from its front picture (RGBA, background removed).
 
     Returns (trimesh with vertex colours, turned to front +z / up +y; silhouette match 0-1).
-    `back`: optional back-view picture (RGBA) for the parts the front can't see."""
+    `back`, `left`, `right`: optional pictures from behind and from the character's left and
+    right side (the same camera walked round 180 / 90 degrees; views_for_model makes them)
+    for the parts the front can't see. Each part takes the picture that faces it best (the
+    front picture first: it is the one the shape was made from)."""
+    out, match, _ = _paint(mesh, picture, {"back": back, "left": left, "right": right},
+                           samples, min_match, upright)
+    return out, match
+
+
+def _load_shape(mesh):
     trimesh = _trimesh()
     if not isinstance(mesh, trimesh.Trimesh):
         loaded = trimesh.load(io.BytesIO(mesh), file_type="glb") if isinstance(mesh, bytes) \
             else trimesh.load(str(mesh))
         mesh = loaded if isinstance(loaded, trimesh.Trimesh) else loaded.to_geometry()
     mesh = trimesh.Trimesh(np.asarray(mesh.vertices, float), np.asarray(mesh.faces), process=True)
-    mesh = _dense(mesh)
+    return _dense(mesh)
+
+
+# view weights: a part seen square-on in two pictures takes the front one first
+_VIEW_WEIGHT = {"front": 1.0, "back": 0.9, "left": 0.8, "right": 0.8}
+
+
+def _paint(mesh, picture: np.ndarray, others: dict, samples: int = 400_000,
+           min_match: float = 0.5, upright: bool = True):
+    """paint_from_picture + the camera tilt it found: (mesh, match, tilt)."""
+    trimesh = _trimesh()
+    mesh = _load_shape(mesh)
     rng = np.random.default_rng(0)
     pts, _, _ = _sample_mesh(mesh, samples, rng)
     if upright:
@@ -457,20 +503,173 @@ def paint_from_picture(mesh, picture: np.ndarray, back: np.ndarray | None = None
     front = _View(picture, cp)
     colours = front.colours(cv, sharp=False)                  # guess for every vertex
     seen = front.visible(cv, cn)
-    colours[seen] = front.colours(cv[seen], sharp=True)
-    if back is not None:
-        # the back picture: the same camera after walking round to the other side
-        turn = tilt @ _ry(180)
-        bv, bp, bn = verts @ turn.T, pts @ turn.T, normals @ turn.T
-        rear = _View(back, bp)
-        rear_seen = rear.visible(bv, bn) & ~seen
-        colours[rear_seen] = rear.colours(bv[rear_seen], sharp=True)
-        seen |= rear_seen
+    colours[seen] = front.colours(cv[seen], sharp=True)       # what the picture shows, sharp
+    best = np.where(seen, cn[:, 2] * _VIEW_WEIGHT["front"], -np.inf)
+    owner = np.where(seen, 0, -1)
+    views = [(name, pic) for name, pic in others.items() if pic is not None]
+    for k, (name, pic) in enumerate(views, 1):
+        # the same camera after walking round the model
+        turn = tilt @ _ry(VIEW_TURN[name])
+        vv, vp, vn = verts @ turn.T, pts @ turn.T, normals @ turn.T
+        view = _View(pic, vp)
+        vis = view.visible(vv, vn)
+        score = np.where(vis, vn[:, 2] * _VIEW_WEIGHT[name], -np.inf)
+        win = score > best
+        if win.any():
+            colours[win] = view.colours(vv[win], sharp=True)
+        best, owner = np.maximum(best, score), np.where(win, k, owner)
+    seen = owner >= 0
     match = max(match, front.match)
     colours = _smooth_hidden(out, colours, seen)
     rgba = np.concatenate([np.clip(colours, 0, 255), np.full((len(verts), 1), 255.0)], 1)
     out.visual = trimesh.visual.ColorVisuals(out, vertex_colors=np.rint(rgba).astype(np.uint8))
-    return out, match
+    return out, match, tilt
+
+
+# --------------------------------------------------------------------------- back + side views
+
+def _render_view(pts: np.ndarray, cols: np.ndarray, nrm: np.ndarray, size: int = 768,
+                 light: float = 0.45) -> np.ndarray:
+    """Orthographic render of coloured points seen from +z (x right, y up): RGBA, the subject
+    filling 90% of the height, grey shading from the upper left mixed into the colours."""
+    from .turnaround import _fill_holes
+    lo, hi = pts.min(0), pts.max(0)
+    k = 0.9 * size / max(float(hi[1] - lo[1]), float(hi[0] - lo[0]), 1e-9)
+    cx, cy = (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2
+    ix = np.floor(size / 2 + (pts[:, 0] - cx) * k).astype(np.int64)
+    iy = np.floor(size / 2 - (pts[:, 1] - cy) * k).astype(np.int64)
+    ok = (ix >= 0) & (ix < size) & (iy >= 0) & (iy < size)
+    lin = iy[ok] * size + ix[ok]
+    depth = -pts[ok, 2]                                    # smaller = nearer the camera
+    zbuf = np.full(size * size, np.inf)
+    np.minimum.at(zbuf, lin, depth)
+    near = depth <= zbuf[lin]
+    pick, lin = np.nonzero(ok)[0][near], lin[near]
+    ldir = np.array([-0.4, 0.55, 0.73])
+    ldir /= np.linalg.norm(ldir)
+    lam = np.abs(nrm[pick] @ ldir)
+    rgb = np.zeros((size * size, 3), np.float32)
+    alpha = np.zeros(size * size, np.uint8)
+    rgb[lin] = cols[pick].astype(np.float32) * ((1 - light) + light * lam)[:, None]
+    alpha[lin] = 1
+    rgb, alpha = rgb.reshape(size, size, 3), alpha.reshape(size, size)
+    _fill_holes(rgb, alpha, passes=4)
+    closed = cv2.morphologyEx(alpha, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    if (closed > alpha).any():                             # gaps the hole fill missed
+        grown = cv2.dilate(rgb * alpha[..., None], np.ones((5, 5), np.uint8))
+        cnt = cv2.dilate(alpha.astype(np.float32), np.ones((5, 5), np.uint8))
+        add = (closed > 0) & (alpha == 0)
+        rgb[add] = grown[add] / np.maximum(cnt[add], 1)[:, None]
+        alpha = closed
+    rgb = cv2.GaussianBlur(rgb, (0, 0), 0.8)
+    out = np.zeros((size, size, 4), np.uint8)
+    out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    out[..., 3] = alpha * 255
+    return out
+
+
+def _keep_outline(drawn: np.ndarray, init: np.ndarray) -> np.ndarray:
+    """The AI's colours inside the shape's own outline (init alpha): where the AI drew
+    background inside it, the nearest colour it drew; if it drew nothing usable, the init."""
+    inside = init[..., 3] >= 128
+    mine = drawn[..., 3] >= 128
+    out = init.copy()
+    if (mine & inside).sum() < 0.3 * max(1, inside.sum()):
+        return out
+    rgb = drawn[..., :3].copy()
+    lost = inside & ~mine
+    if lost.any():
+        _, near = cv2.distanceTransformWithLabels((~mine).astype(np.uint8), cv2.DIST_L2, 5,
+                                                  labelType=cv2.DIST_LABEL_PIXEL)
+        ky, kx = np.nonzero(mine)
+        lut = np.zeros((int(near.max()) + 1, 3), np.uint8)
+        lut[near[ky, kx]] = rgb[ky, kx]
+        rgb[lost] = lut[near[lost]]
+    out[..., :3] = np.where(inside[..., None], rgb, 0)
+    out[..., 3] = np.where(inside, 255, 0)
+    return out
+
+
+def view_inits(shape, front_picture: np.ndarray, which=("back",), samples: int = 400_000,
+               size: int = 768) -> dict[str, np.ndarray]:
+    """The starting pictures for views_for_model: the shape seen from behind / the side by
+    the front picture's camera walked round, grey-shaded and tinted with the colours the
+    front picture gives it (RGBA, subject centred)."""
+    from .turnaround import _sample_mesh
+    painted, _, tilt = _paint(shape, front_picture, {}, samples)
+    pts, cols, nrm = _sample_mesh(painted, samples, np.random.default_rng(1))
+    out = {}
+    for name in which:
+        turn = tilt @ _ry(VIEW_TURN[name])
+        out[name] = _render_view(pts @ turn.T, cols, nrm @ turn.T, size)
+    return out
+
+
+def view_prompt(prompt: str, view: str, subject: str = "person") -> tuple[str, str]:
+    prompt = (prompt or "").strip().rstrip(".") or {"person": "a character", "animal": "an animal"}.get(
+        subject, "an object")
+    what, kind = {"person": ("character", "character"), "animal": ("animal", "creature")}.get(
+        subject, ("object", "prop"))
+    return (VIEW_PROMPTS[view].format(prompt=prompt, what=what, kind=kind),
+            VIEW_NEGATIVE[view] + MODEL_NEGATIVE)
+
+
+def views_for_model(front_picture, prompt: str | None, subject: str = "person",
+                    client: ComfyClient | None = None, *, shape, which=("back",),
+                    seed: int | None = None, denoise: float = 0.65, cutout_model: str = "isnet-general-use",
+                    progress=None, inits: dict | None = None, **gen_opts) -> dict[str, np.ndarray]:
+    """Matching back (and left / right side) pictures of a character for painting its shape.
+
+    front_picture: the front picture (RGBA, background removed). shape: the uncoloured
+    model (.glb path or bytes) built from it. which: any of back, left, right. Each view
+    starts from the shape rendered from there (view_inits: keeps the outline and puts the
+    front's colours roughly in place) and SDXL redraws it from words, img2img at `denoise`
+    with the same seed and no pixel-art LoRA. Returns {view: RGBA} in the shape's own
+    outline, ready for paint_from_picture(back=, left=, right=). inits: filled with the
+    starting pictures (to look at)."""
+    from .generate import generate_images
+    front = load_image(front_picture)
+    bad = [w for w in which if w not in VIEW_TURN]
+    if bad:
+        raise ValueError(f"Unknown view(s) {', '.join(bad)} (use back, left, right)")
+    say = progress or (lambda text: log.info("%s", text))
+    starts = view_inits(shape, front, which)
+    if inits is not None:
+        inits.update(starts)
+    seed = random.randrange(2**32) if seed is None else int(seed)
+    out = {}
+    for name, init in starts.items():
+        say(f"Drawing the {name if name == 'back' else name + ' side'} of it on your GPU…")
+        framed = np.asarray(framed_on_white(init, 1024).convert("RGB"))
+        mask = np.asarray(framed_on_white(_white_mask(init), 1024).convert("L")) < 128
+        positive, negative = view_prompt(prompt, name, subject)
+        (img, _), = generate_images(positive, negative, client=client, seed=seed,
+                                    init_image=Image.fromarray(framed), denoise=denoise,
+                                    aspect=1.0, **{"lora": "none", **gen_opts})
+        img = np.asarray(img.convert("RGB"))
+        if img.shape[:2] != framed.shape[:2]:
+            img = cv2.resize(img, (framed.shape[1], framed.shape[0]), interpolation=cv2.INTER_AREA)
+        drawn = cut_out(img, cutout_model)
+        start = np.dstack([framed, np.where(mask, 255, 0).astype(np.uint8)])
+        out[name] = _keep_outline(drawn, start)
+    return out
+
+
+def _white_mask(rgba: np.ndarray) -> np.ndarray:
+    """The subject black on white (framed like the picture by framed_on_white)."""
+    out = np.zeros_like(rgba)
+    out[..., 3] = rgba[..., 3]
+    return out
+
+
+def views_to_make(views: str | None, from_words: bool, back_given: bool) -> tuple[str, ...]:
+    """Which pictures prompt_to_model has the GPU draw: views front / front+back / all
+    (None = front+back from words, front for your own picture); a back you gave wins."""
+    views = views or ("front+back" if from_words else "front")
+    if views not in VIEWS:
+        raise ValueError(f"views must be one of {', '.join(VIEWS)}")
+    want = {"front": (), "front+back": ("back",), "all": ("back", "left", "right")}[views]
+    return tuple(v for v in want if not (v == "back" and back_given))
 
 
 def _dense(mesh, detail: int = 120, max_faces: int = 3_000_000):
@@ -642,18 +841,25 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
                     shape: bytes | str | Path | None = None, client: ComfyClient | None = None,
                     seed: int | None = None, shape_options: ShapeOptions | None = None,
                     cutout_model: str = "isnet-general-use", progress=None,
-                    mirror_back: bool = False, colours=None, **gen_opts) -> ModelResult:
+                    mirror_back: bool = False, colours=None, views: str | None = None,
+                    left: ImageSource | None = None, right: ImageSource | None = None,
+                    view_denoise: float = 0.65, **gen_opts) -> ModelResult:
     """Prompt (or a picture, or a picture + a ready shape) -> coloured .glb.
 
     Writes <out>.glb (coloured), <out>.front.png (the picture) and <out>.shape.glb (the
     shape as ComfyUI made it). progress(step, text) is called as each step starts.
     mirror_back: no back picture -> paint the far side from the picture mirrored (animals
     and people seen from the side, marked about the same on both sides). colours: only
-    these colours ('black, white', hex), e.g. a black-and-white dog photographed in shade."""
+    these colours ('black, white', hex), e.g. a black-and-white dog photographed in shade.
+    views: front / front+back / all: the GPU also draws the back (and both sides) from the
+    shape (views_for_model), saved as <out>.back.png etc. Default front+back when made from
+    words, front for your own picture. left / right: side pictures you already have."""
     out = Path(out_glb)
     out.parent.mkdir(parents=True, exist_ok=True)
     say = progress or (lambda step, text: log.info("%s: %s", step, text))
     used_seed = seed
+    from_words = picture is None
+    make_views = views_to_make(views, from_words, back is not None or mirror_back)
     if picture is None:
         if not prompt:
             raise ValueError("Give a prompt or a picture.")
@@ -683,18 +889,45 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
     else:
         glb = shape if isinstance(shape, bytes) else Path(shape).read_bytes()
 
+    sides = {"left": cut_out(left, cutout_model) if left is not None else None,
+             "right": cut_out(right, cutout_model) if right is not None else None}
+    made: dict[str, Path] = {}
     if has_colours(glb):
         say("colour", "The model came with its own colours; keeping them.")
         out.write_bytes(glb)
     else:
-        say("colour", "Painting the model from the picture…")
-        mesh, match = paint_from_picture(glb, paint_rgba, back_rgba)
+        make_views = tuple(v for v in make_views if v == "back" or sides[v] is None)
+        if make_views:
+            say("views", "Drawing the back" + (" and sides" if len(make_views) > 1 else "")
+                + " of it on your GPU…")
+            starts: dict = {}
+            drawn = views_for_model(rgba, prompt, subject, client, shape=glb, which=make_views,
+                                    seed=used_seed, denoise=view_denoise,
+                                    cutout_model=cutout_model, inits=starts,
+                                    progress=lambda text: say("views", text), **gen_opts)
+            for name, pic in drawn.items():
+                path = out.with_suffix(f".{name}.png")
+                Image.fromarray(pic).save(path)
+                Image.fromarray(starts[name]).save(out.with_suffix(f".{name}.start.png"))
+                made[name] = path
+                if colours is not None:
+                    pic = picture_to_colours(pic, colours)
+                if name == "back":
+                    back_rgba = pic
+                else:
+                    sides[name] = pic
+        elif colours is not None:
+            sides = {k: picture_to_colours(v, colours) if v is not None else None
+                     for k, v in sides.items()}
+        say("colour", "Painting the model from the picture" + ("s…" if made else "…"))
+        mesh, match = paint_from_picture(glb, paint_rgba, back_rgba, left=sides["left"],
+                                         right=sides["right"])
         if match < 0.5:
             say("colour", f"Warning: the shape only matches the picture {match:.0%}.")
         if colours is not None:
             mesh = snap_to_colours(mesh, colours)
         mesh.export(out)
-    return ModelResult(out, pic_path, raw_path, used_seed)
+    return ModelResult(out, pic_path, raw_path, used_seed, made)
 
 
 def export_for_rigging(model, out_obj) -> Path:

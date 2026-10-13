@@ -442,8 +442,8 @@ signal game_over(winner: int)
 const MAP_PATH := "res://map/map.json"
 const CONF_PATH := "res://iso/iso.json"
 const DIRS: Array[String] = ["E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW", "N", "NNE", "NE", "ENE"]
-const WALKABLE: Array[String] = ["grass", "stone", "cobble", "planks", "dirt", "sand"]
-const BLOCKING: Array[String] = ["crate", "barrel", "post"]
+const WALKABLE: Array[String] = ["grass", "stone", "cobble", "planks", "dirt", "sand", "snow"]
+const BLOCKING: Array[String] = ["crate", "barrel", "post", "tree", "pine", "rock", "house", "wall", "well", "fence"]
 const STEPS: Array[Vector2i] = [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
 const TEAM_NAMES: Array[String] = ["Blue", "Red", "Green", "Gold"]
 const ONCE: Array[String] = ["attack", "hurt", "death", "lie_down"]
@@ -1553,6 +1553,12 @@ def write_iso_scene(diorama: Diorama, project_dir, units: dict | None = None, ti
         "torch": {"png": save(torch, "torch.png"), "frames": 4, "anchor": [tw // 2, torch.shape[0] - 1],
                   "glow": save(glow_sprite(tile * 2), "glow.png")},
     }
+    # props from the map library (trees, rocks, houses, walls, wells, fences…)
+    from .maplib import prop_sprite
+    snowy = "snow" in set(diorama.terrain.ravel())
+    for kind in sorted({k for k, _, _ in diorama.props} - set(conf["props"])):
+        img, anchor = prop_sprite(kind, tile, snow=snowy)
+        conf["props"][kind] = {"png": save(img, f"prop_{kind}.png"), "anchor": [int(anchor[0]), int(anchor[1])]}
 
     udir = iso / "units"
     defs = {}

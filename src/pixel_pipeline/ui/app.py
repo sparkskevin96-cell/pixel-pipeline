@@ -233,6 +233,29 @@ class MainWindow(QMainWindow):
         self.studio.setWindowFlags(Qt.Widget)
         self.game_tab = GameTab(say)
         self.studio.library_changed.connect(self.game_tab.refresh)
+        from .assets_tab import AssetsTab
+        from .effects_tab import EffectsTab
+        from .map_editor import MapEditor
+        from .portraits_tab import PortraitsTab
+        self.map_editor = MapEditor(say)
+        self.portraits_tab = PortraitsTab(say)
+        self.effects_tab = EffectsTab(say)
+        self.assets_tab = AssetsTab(status=say)
+        self.items_tab = self.props_tab = None
+        try:
+            from .objects_tab import ObjectsTab
+            self.items_tab = ObjectsTab(kind="item", status=say)
+            self.props_tab = ObjectsTab(kind="prop", status=say)
+        except ImportError:
+            pass
+        # anything new anywhere shows up everywhere
+        for sig in (self.studio.library_changed, self.map_editor.map_saved, self.portraits_tab.changed,
+                    self.effects_tab.changed, *([w.changed for w in (self.items_tab, self.props_tab)
+                                                 if w is not None and hasattr(w, "changed")])):
+            sig.connect(lambda *_: self.assets_tab.refresh())
+        self.map_editor.map_saved.connect(lambda *_: self.game_tab.refresh())
+        self.assets_tab.library_changed.connect(self._library_changed)
+        self.assets_tab.project_changed.connect(lambda *_: self._library_changed())
 
         def sub(pages):
             t = QTabWidget()
@@ -250,20 +273,42 @@ class MainWindow(QMainWindow):
             (self.directions_tab, "Directions from photos", "Photos or a video walking around a "
                                                             "subject -> 4/8/16 directions"),
             (self.teams_tab, "Team colours", "Player / enemy / ally colours + Godot palette shader"),
-            (self.portrait_tab, "Portrait", "Head-and-shoulders dialogue portrait"),
+            (self.portrait_tab, "Pixel portrait from a photo", "Head-and-shoulders pixel portrait "
+                                                               "from any photo"),
             (self.demo_tab, "Simple 2D demo", "The older flat Godot demo with one unit"),
         ])
+        self.world_tabs = sub([
+            (self.map_editor, "Maps", "Paint height, terrain, props and team starts; save maps to "
+                                      "your library; export to Godot, Tiled or JSON"),
+            (self.map_tab, "Terrain tiles", "Terrain tilesets with transitions + Godot TileSet"),
+        ])
+        self.faces_tabs = sub([
+            (self.portraits_tab, "Portraits", "Painted and pixel portraits of a character, with "
+                                              "expressions"),
+            (self.effects_tab, "Effects", "Slashes, sparks, fire, magic, heal… as sprite sheets"),
+        ])
+        self.objects_tabs = sub([(w, t, tip) for w, t, tip in (
+            (self.items_tab, "Items", "Weapons, potions, keys…: inventory icons + world sprites"),
+            (self.props_tab, "Props & buildings", "Trees, barrels, carts, houses, walls…"),
+        ) if w is not None]) if self.items_tab is not None else None
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         for widget, title, tip in (
-            (self.studio, "1  Characters", "Make characters from words, photos or 3D models; they "
-                                           "animate and go into your Character Library"),
-            (self.map_tab, "2  World", "Ground and terrain tiles"),
-            (self.game_tab, "3  Game", "Pick two teams from your library -> a Godot tactics game"),
+            (self.studio, "Characters", "Make characters from words, photos or 3D models; they "
+                                        "animate and go into your library"),
+            (self.objects_tabs, "Items && props", "Items with inventory icons; props and buildings"),
+            (self.world_tabs, "World", "Maps and terrain tiles"),
+            (self.faces_tabs, "Portraits && effects", "Character portraits with expressions; effects"),
+            (self.assets_tab, "Library", "Everything you've made, by project: search, tag, export "
+                                         "to Godot / Unity / GameMaker / Aseprite, re-skin, queue"),
+            (self.game_tab, "Try in a game", "Drop your characters onto a map in a Godot tactics "
+                                             "test scene"),
             (self.sprite_tabs, "Sprite", "One-off sprites from a photo or from words"),
-            (self.more_tabs, "More tools", "Directions from photos, team colours, portraits, the "
-                                           "older 2D demo"),
+            (self.more_tabs, "More tools", "Directions from photos, team colours, a pixel portrait "
+                                           "from a photo, the older 2D demo"),
         ):
+            if widget is None:
+                continue
             self.tabs.addTab(widget, title)
             self.tabs.setTabToolTip(self.tabs.count() - 1, tip)
         self.setCentralWidget(self.tabs)
@@ -274,12 +319,22 @@ class MainWindow(QMainWindow):
         "prompt": "Describe a sprite and press Make. Your GPU draws it; Open in the Sprite tab to "
                   "tweak it.",
         "map": "Pick terrains (built-in, a photo, or words) and press Make tiles.",
-        "game": "Tick who fights on each side, press Make game, then Play.",
+        "game": "A test bed for your assets: pick a map, tick who stands on each side, press Make "
+                "game, then Play.",
+        "maps": "Pick a map on the left or make one from a template; paint with the tools; Save, "
+                "then Export or use it in Try in a game.",
+        "portraits": "Pick a character, tick expressions, press Make (your GPU paints them).",
+        "effects": "Pick an effect, a theme and a size; it plays live; Make saves it.",
+        "library": "Everything in this project. Search, filter, tag; Export… for any engine; "
+                   "Re-skin… makes colour variants; the queue makes many in a row.",
+        "items": "Describe an item (or use a photo / 3D model) and press Make: icon variations + "
+                 "a world sprite.",
+        "props": "Describe a prop or building, set how tall it is next to a person, press Make.",
         "directions": "Add photos or a video walking around a subject (start in front, walk right), "
                       "then Make sprites.",
         "teams": "Open a sprite or sheet (or use the Sprite tab's), get player/enemy/ally colours.",
         "portrait": "Open a photo or picture: it finds the face and makes a dialogue portrait.",
-        "demo": "The older flat 2D demo. For the full game use 3 Game.",
+        "demo": "The older flat 2D demo. For your own assets use Try in a game.",
     }
 
     def current_tool(self):
@@ -289,10 +344,15 @@ class MainWindow(QMainWindow):
             w = w.currentWidget()
         return w
 
+    def _library_changed(self):
+        self.studio.refresh_library()
+        self.game_tab.refresh()
+
     def show_tool(self, widget):
         """Bring a page to the front, wherever it lives."""
-        for outer in (self.sprite_tabs, self.more_tabs):
-            if outer.indexOf(widget) >= 0:
+        for outer in (self.sprite_tabs, self.more_tabs, self.world_tabs, self.faces_tabs,
+                      self.objects_tabs):
+            if outer is not None and outer.indexOf(widget) >= 0:
                 self.tabs.setCurrentWidget(outer)
                 outer.setCurrentWidget(widget)
                 return
@@ -305,6 +365,9 @@ class MainWindow(QMainWindow):
         else:
             key = {self.sprite_split: "sprite", self.prompt_tab: "prompt", self.map_tab: "map",
                    self.game_tab: "game", self.directions_tab: "directions",
+                   self.map_editor: "maps", self.portraits_tab: "portraits",
+                   self.effects_tab: "effects", self.assets_tab: "library",
+                   self.items_tab: "items", self.props_tab: "props",
                    self.teams_tab: "teams", self.portrait_tab: "portrait",
                    self.demo_tab: "demo"}.get(w)
             text = self.HINTS.get(key, "")

@@ -87,10 +87,17 @@ def test_prompt_to_model_end_to_end(comfy, tmp_path):
     steps = []
     res = prompt_to_model("a knight", tmp_path / "knight.glb", client=client, seed=5,
                           progress=lambda step, text: steps.append(step))
-    assert steps == ["picture", "cutout", "shape", "colour"]
+    assert steps == ["picture", "cutout", "shape", "views", "views", "colour"]
     assert res.model.exists() and res.picture.exists() and res.raw.exists() and res.seed == 5
-    picture_wf, shape_wf = fake.prompts
+    picture_wf, shape_wf, back_wf = fake.prompts             # from words: front + back
     assert not any(n["class_type"] == "LoraLoader" for n in picture_wf.values())   # no pixel LoRA
+    k = next(n["inputs"] for n in back_wf.values() if n["class_type"] == "KSampler")
+    assert k["seed"] == 5 and k["denoise"] == 0.65                   # img2img, same seed
+    assert back_wf[k["latent_image"][0]]["class_type"] == "VAEEncode"
+    assert not any(n["class_type"] == "LoraLoader" for n in back_wf.values())
+    assert "back view of a knight" in next(n for n in back_wf.values()
+                                           if n["_meta"]["title"] == "Prompt")["inputs"]["text"]
+    assert res.views["back"].exists() and res.views["back"].name == "knight.back.png"
     assert "facing the viewer" in next(n for n in picture_wf.values()
                                        if n["_meta"]["title"] == "Prompt")["inputs"]["text"]
     assert next(n for n in shape_wf.values() if n["class_type"] == "ImageOnlyCheckpointLoader")[
@@ -241,3 +248,82 @@ def test_upright_model_is_turned_not_tipped(tmp_path):
     assert np.allclose(rot[1], [0, 1, 0])                     # y stays up
     turned = pts @ rot.T
     assert np.ptp(turned[:, 0]) > np.ptp(turned[:, 2])        # wide side faces the camera again
+
+
+def faced_box(path):
+    """A body box with one colour per side (front +z red, back -z green, left +x blue, right
+    -x yellow) and an off-centre grey head; also writes the uncoloured shape.glb."""
+    body = trimesh.creation.box(extents=[0.6, 1.0, 0.4])
+    body.apply_translation([0, 0.5, 0])
+    body = body.subdivide().subdivide()
+    body.unmerge_vertices()
+    n = body.face_normals
+    fc = np.full((len(n), 4), 200, np.uint8)
+    for axis, sign, rgb in ((2, 1, SIDES["front"]), (2, -1, SIDES["back"]),
+                            (0, 1, SIDES["left"]), (0, -1, SIDES["right"])):
+        fc[(n[:, axis] * sign) > 0.9, :3] = rgb
+    body.visual.face_colors = fc
+    head = trimesh.creation.icosphere(subdivisions=2, radius=0.22)
+    head.apply_translation([0.12, 1.2, 0.05])
+    head.visual.vertex_colors = np.tile([150, 150, 150, 255], (len(head.vertices), 1)).astype(np.uint8)
+    m = trimesh.util.concatenate([body, head])
+    m.export(path)
+    trimesh.Trimesh(m.vertices, m.faces).export(path.with_name("shape.glb"))
+    return render_model(path, 4, elevation=0, size=192, light=0, points=200_000)   # E S W N
+
+
+SIDES = {"front": (220, 40, 40), "back": (40, 200, 60), "left": (40, 60, 220), "right": (230, 210, 40)}
+
+
+def test_back_and_side_pictures_land_on_their_sides(tmp_path):
+    """The back / left / right cameras are the front camera walked round 180 / -90 / 90
+    degrees: each picture paints its own side of the shape."""
+    E, S, W, N = faced_box(tmp_path / "col.glb")
+    mesh, match = paint_from_picture(tmp_path / "shape.glb", S, back=N, left=W, right=E,
+                                     samples=150_000)
+    assert match > 0.9
+    mesh.export(tmp_path / "painted.glb")
+    views = render_model(tmp_path / "painted.glb", 4, elevation=0, size=128, light=0,
+                         points=150_000)
+    for view, side in zip(views, ("right", "front", "left", "back")):
+        ys, xs = np.nonzero(view[..., 3])
+        body = view[int(np.percentile(ys, 70)), int(np.median(xs)), :3].astype(int)
+        assert np.abs(body - SIDES[side]).max() < 50, side
+
+
+def test_view_inits_show_the_shape_from_behind(tmp_path):
+    from pixel_pipeline.model3d import view_inits
+    E, S, W, N = faced_box(tmp_path / "col.glb")
+    inits = view_inits(tmp_path / "shape.glb", S, ("back", "left"), samples=100_000, size=256)
+    back = inits["back"]
+    ys, xs = np.nonzero(back[..., 3])
+    head = xs[ys < np.percentile(ys, 15)].mean()
+    assert head < xs.mean() - 5          # the head sits at +x: on the picture's left from behind
+    assert back[int(np.percentile(ys, 70)), int(xs.mean()), 0] > 150     # front's red, shaded
+    left = inits["left"]
+    assert np.ptp(np.nonzero(left[..., 3])[1]) < 0.85 * np.ptp(xs)       # narrower from the side
+
+
+def test_views_from_words_and_photos(comfy, tmp_path):
+    from pixel_pipeline.model3d import views_to_make
+    assert views_to_make(None, True, False) == ("back",)
+    assert views_to_make(None, False, False) == ()
+    assert views_to_make("all", False, True) == ("left", "right")
+    with pytest.raises(ValueError, match="views"):
+        views_to_make("sideways", True, False)
+    fake, client = comfy
+    pic = front_picture(tmp_path)
+    figure(tmp_path / "shape.glb", colours=False)
+    res = prompt_to_model(None, tmp_path / "p.glb", picture=pic, shape=tmp_path / "shape.glb",
+                          client=client)
+    assert res.views == {} and not fake.prompts                      # a photo: front only
+    res = prompt_to_model("a knight", tmp_path / "a.glb", picture=pic, shape=tmp_path / "shape.glb",
+                          client=client, views="all", seed=3)
+    assert set(res.views) == {"back", "left", "right"} and len(fake.prompts) == 3
+    texts = [next(n for n in wf.values() if n["_meta"]["title"] == "Prompt")["inputs"]["text"]
+             for wf in fake.prompts]
+    assert "back view" in texts[0] and "facing left" in texts[1] and "facing right" in texts[2]
+    for name, path in res.views.items():
+        drawn = np.asarray(Image.open(path))
+        start = np.asarray(Image.open(tmp_path / f"a.{name}.start.png"))
+        assert drawn.shape[2] == 4 and (drawn[..., 3] > 0).any() and start.shape[2] == 4

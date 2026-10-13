@@ -651,10 +651,12 @@ def clip_times(clip: Clip, frames: int) -> list[float]:
 
 
 def animated_poses(rig: Rig, clips: list[Clip], frames: int = 8, points: int = 1_000_000,
-                   seed: int = 0, in_place: bool = True, colours_from=None):
+                   seed: int = 0, in_place: bool = True, colours_from=None,
+                   ground_from: list[int] | None = None):
     """Every clip's poses as (points, normals), centred like load_model_points.
     in_place: remove steady root motion (a walk that moves forward walks on the spot).
-    colours_from: a coloured model of the same shape to take colours from."""
+    colours_from: a coloured model of the same shape to take colours from.
+    ground_from: indices of the clips whose lowest point is the ground (None = all)."""
     surface = sample_surface(rig, points, seed)
     rest_pts, _ = surface_pose(rig, surface, rig.worlds())
     if colours_from is not None:
@@ -676,9 +678,26 @@ def animated_poses(rig: Rig, clips: list[Clip], frames: int = 8, points: int = 1
             row.append(((pts - centre - drift * (t - clip.start)).astype(np.float32),
                         nrm.astype(np.float32)))
         poses.append(row)
-    ground = min(float(p[:, 1].min()) for row in poses for p, _ in row)
+    rows = poses if ground_from is None else [poses[i] for i in ground_from]
+    ground = min(float(p[:, 1].min()) for row in rows for p, _ in row)
     poses = [[(p - np.float32([0.0, ground, 0.0]), n) for p, n in row] for row in poses]
     return poses, surface.colours
+
+
+def _sprites_palette_from(views, settings: Settings, normal_views, use: list[bool]):
+    """turnaround_sprites, with the shared palette made from the views marked `use` only."""
+    from .pipeline import _map, finish, prepare, resolve_palette
+    s = Settings(**{**settings.to_dict(), "crop_to_subject": False})
+    preps = _map(lambda rgba: prepare(rgba, s), views)
+    chosen = [p for p, u in zip(preps, use) if u] or preps
+    pixels = np.concatenate([p.rgb[p.mask] if p.mask.any() else p.rgb.reshape(-1, 3)
+                             for p in chosen])
+    palette = resolve_palette(s, pixels)
+    sprites = _map(lambda p: finish(p, s, palette), preps)
+    if normal_views is not None:
+        from .normals import attach_normals
+        attach_normals(sprites, normal_views, s)
+    return sprites
 
 
 @dataclass
@@ -696,36 +715,110 @@ class AnimatedSet:
         return [s for a in self.sprites for d in a for s in d]
 
 
+def _render_framed(poses, frame_poses, colours, directions, elevation, size, yaw, light,
+                   normals):
+    """turnaround.render_points, but framed (scale, ground row) by frame_poses only."""
+    from .turnaround import _splat
+    names = direction_names(directions)
+    e = math.radians(elevation)
+    ce, se = math.cos(e), math.sin(e)
+    radius = max(float(np.sqrt(p[:, 0] ** 2 + p[:, 2] ** 2).max()) for p, _ in frame_poses)
+    top = max(float(p[:, 1].max()) for p, _ in frame_poses) * ce + radius * se
+    bottom = min(float(p[:, 1].min()) for p, _ in frame_poses) * ce - radius * se
+    scale = size * 0.94 / max(2 * radius, top - bottom, 1e-9)
+    ox = size / 2
+    oy = (size - (top - bottom) * scale) / 2 + top * scale
+    light_dir = np.array([-0.45, 0.6, 0.66])
+    light_dir /= np.linalg.norm(light_dir)
+    base = colours.astype(np.float32)
+    views, nviews = [], []
+    for k in range(len(names)):
+        t = math.radians(90.0 - k * 360.0 / len(names) + yaw)
+        ct, st = math.cos(t), math.sin(t)
+        row = [_splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir,
+                      normals) for pts, nrm in poses]
+        if normals:
+            views.append([r[0] for r in row])
+            nviews.append([r[1] for r in row])
+        else:
+            views.append(row)
+    return (views, nviews) if normals else views
+
+
+def _crop_box(views, margin, threshold):
+    mask = np.zeros(views[0].shape[:2], bool)
+    for v in views:
+        mask |= v[..., 3] >= threshold
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        return 0, 0, views[0].shape[1], views[0].shape[0]
+    m = int(round(max(xs.max() - xs.min(), ys.max() - ys.min()) * margin))
+    return xs.min() - m, ys.min() - m, xs.max() + 1 + m, ys.max() + 1 + m
+
+
 def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: int = 8,
                         animations: list[str] | None = None, *, elevation: float = 30.0,
                         yaw: float = 0.0, light: float = 0.35, in_place: bool = True,
                         size: int | None = None, points: int | None = None,
                         seed: int = 0, colours_from=None,
-                        normals: bool = False) -> tuple[AnimatedSet, str]:
+                        normals: bool = False, clean: bool | dict = False,
+                        frame_with: list[str] | None = None) -> tuple[AnimatedSet, str]:
     """Rigged + animated glTF file(s) -> AnimatedSet and a description of what was read.
     colours_from: the original coloured model, when rigging (Mixamo) dropped its colours.
-    normals: also give every sprite a normal map (sprite.normal, see normals.py)."""
+    normals: also give every sprite a normal map (sprite.normal, see normals.py).
+    clean: pixel clean-up of every frame (pixelclean.py: specks, colour islands,
+    pixel-perfect outline); a dict = clean_sprites options (e.g. {"palette": "pico8"}).
+    frame_with: clip names that alone set the scale, crop and palette (None = all clips).
+    Adding clips to a character with frame_with=<its old clips> leaves the old clips'
+    sprites exactly as they were; a new clip that reaches further out is cut at the frame."""
     rig = load_rig(paths)
     clips = select_clips(rig, animations)
     names = direction_names(directions)
     size = size or int(min(512, max(192, 4 * max(settings.width, settings.height or 0))))
+    keep = list(range(len(clips)))
+    if frame_with:
+        missing = [n for n in frame_with if n not in {c.name for c in clips}]
+        if missing:
+            raise ValueError(f"frame_with: no animation {', '.join(missing)}")
+        keep = [i for i, c in enumerate(clips) if c.name in frame_with]
     poses, colours = animated_poses(rig, clips, frames, points or 6 * size * size, seed, in_place,
-                                    colours_from)
+                                    colours_from, ground_from=keep if frame_with else None)
     flat = [p for row in poses for p in row]
-    views = render_points(flat, colours, directions, elevation, size, yaw, light, normals)
+    if frame_with:
+        frame_poses = [p for i in keep for p in poses[i]]
+        views = _render_framed(flat, frame_poses, colours, directions, elevation, size, yaw,
+                               light, normals)
+    else:
+        views = render_points(flat, colours, directions, elevation, size, yaw, light, normals)
     nviews = None
     if normals:
         views, nviews = views                                          # [dir][pose] each
     order = [(d, a * frames + f) for a in range(len(clips)) for d in range(len(names))
              for f in range(frames)]
     cropped = [views[d][i] for d, i in order]
-    if normals:
-        cropped, nviews = union_crop(cropped, settings.margin, settings.alpha_threshold,
-                                     [nviews[d][i] for d, i in order])
+    nlist = [nviews[d][i] for d, i in order] if normals else None
+    if frame_with:
+        from .turnaround import _crop_pad
+        framing = [v for v, (d, i) in zip(cropped, order) if i // frames in keep]
+        box = _crop_box(framing, settings.margin, settings.alpha_threshold)
+        cropped = [_crop_pad(v, *box) for v in cropped]
+        nviews = [_crop_pad(v, *box) for v in nlist] if normals else None
+    elif normals:
+        cropped, nviews = union_crop(cropped, settings.margin, settings.alpha_threshold, nlist)
     else:
         cropped = union_crop(cropped, settings.margin, settings.alpha_threshold)
     del views
-    sprites = turnaround_sprites(cropped, settings, nviews)
+    if frame_with:
+        sprites = _sprites_palette_from(cropped, settings, nviews,
+                                        [i // frames in keep for _, i in order])
+    else:
+        sprites = turnaround_sprites(cropped, settings, nviews)
+    if clean:
+        from .pixelclean import clean_sprites, outline_style
+        opts = dict(clean) if isinstance(clean, dict) else {}
+        if settings.dither != "none":
+            opts.setdefault("islands", 0)          # dither patterns are meant to be "noisy"
+        sprites = clean_sprites(sprites, opts.pop("outline", outline_style(settings)), **opts)
     per = len(names) * frames
     nested = [[sprites[a * per + d * frames: a * per + (d + 1) * frames] for d in range(len(names))]
               for a in range(len(clips))]

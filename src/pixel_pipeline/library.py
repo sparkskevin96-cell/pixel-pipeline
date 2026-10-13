@@ -66,6 +66,7 @@ class Character:
     role: str = ""                       # stats class (diorama.CLASSES); "" = by name or default
     created: float = 0.0
     folder: Path = field(default=Path("."), compare=False, repr=False)
+    prompt: str = ""                     # the words it was made from (portraits reuse them)
 
     @property
     def model(self) -> Path:
@@ -101,7 +102,7 @@ class Character:
     def save(self) -> Path:
         self.folder.mkdir(parents=True, exist_ok=True)
         data = {"name": self.name, "kind": self.kind, "size": self.size, "role": self.role,
-                "created": self.created or time.time()}
+                "created": self.created or time.time(), "prompt": self.prompt}
         p = self.folder / "character.json"
         p.write_text(json.dumps(data, indent=1), encoding="utf-8")
         # the asset store's record too (keeps tags/collections set elsewhere)
@@ -115,7 +116,8 @@ class Character:
         meta.write_text(json.dumps({
             "kind": "character", "name": self.name, "tags": old.get("tags", []),
             "collections": old.get("collections", []), "created": data["created"],
-            "extra": {"body": self.kind, "size": self.size, "role": self.role}}, indent=1),
+            "extra": {**old.get("extra", {}),       # keeps e.g. reskin_of (reskin.py)
+                      "body": self.kind, "size": self.size, "role": self.role}}, indent=1),
             encoding="utf-8")
         return p
 
@@ -131,7 +133,7 @@ def list_characters(folder: Path | None = None) -> list[Character]:
             continue
         out.append(Character(d.get("name", meta.parent.name), d.get("kind", "person"),
                              d.get("size", "normal"), d.get("role", ""), d.get("created", 0.0),
-                             meta.parent))
+                             meta.parent, d.get("prompt", "")))
     return sorted(out, key=lambda c: -c.created)
 
 
@@ -178,7 +180,7 @@ def make_thumb(sheet_png: Path, out: Path, px: int = 96) -> Path:
 
 
 def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int = 8,
-                  progress=None) -> list[Path]:
+                  progress=None, clean=True) -> list[Path]:
     """All animations x 16 directions at the library scale, with normal maps."""
     from .anim3d import animated_turnaround, write_animated
     from .settings import settings_for
@@ -193,20 +195,22 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int
     if st.palette != "auto":
         s.palette = st.palette
     (progress or (lambda t: None))(f"Rendering every animation from {st.directions} directions…")
+    if clean is True and st.palette != "auto":                          # hand-made look,
+        clean = {"palette": st.palette}                                  # one palette for all
     anim, _ = animated_turnaround([rigged], s, st.directions, frames, elevation=st.elevation,
-                                  light=st.light, normals=True)
+                                  light=st.light, normals=True, clean=clean)
     return write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
 
 
 def add_character(name: str, model, *, kind: str = "person", size: str | None = None,
                   picture=None, role: str = "", folder: Path | None = None,
-                  progress=None) -> Character:
+                  progress=None, prompt: str = "") -> Character:
     """A coloured 3D model -> a library character: skeleton + animations (people: idle walk run
     attack hurt death; animals: idle walk run sit happy lie_down death), sheets, thumbnail."""
     say = progress or (lambda t: None)
     size = size or DEFAULT_SIZE.get(kind, "normal")
     base = Path(folder) if folder else root()
-    ch = Character(name, kind, size, role, time.time(), _free_folder(name, base))
+    ch = Character(name, kind, size, role, time.time(), _free_folder(name, base), prompt)
     ch.folder.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(model, ch.model)
     if picture is not None and Path(picture).exists():
@@ -305,3 +309,68 @@ def rebuild(ch: Character, model, progress=None) -> Character:
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
     return ch
+
+
+# --------------------------------------------------------------------------- more clips later
+
+def add_character_animations(ch: Character, names, progress=None, *, replace: bool = False,
+                             clean: bool | None = None) -> Character:
+    """Give a library character more animations later (motions.py: people cast, shoot, block,
+    thrust, jump, wave, kneel, victory; animals bark, howl, jump, eat). 'attack=shoot' with
+    replace=True changes what its attack looks like.
+
+    rigged.glb keeps every old clip byte for byte (the new ones are appended), and the sheet is
+    re-rendered with every clip but framed and coloured from the old clips only, so the old
+    clips' frames come out exactly as before and the scale doesn't change (a new clip that
+    reaches past the old frame, e.g. arms over the head, is cut at its edge). clean: pixel
+    clean-up of the frames; None = whatever render_sheets does by default (keep them alike)."""
+    import inspect
+
+    from .anim3d import Gltf, animated_turnaround, write_animated
+    from .motions import add_animations, parse_actions
+    from .settings import settings_for
+    say = progress or (lambda t: None)
+    if not ch.rigged.exists():
+        raise ValueError(f"{ch.name} has no rigged.glb (add it to the library again first)")
+    old = [a.get("name") for a in Gltf(ch.rigged).doc.get("animations", [])]
+    if clean is None:
+        p = inspect.signature(render_sheets).parameters.get("clean")
+        clean = bool(p.default) if p is not None and p.default is not inspect.Parameter.empty else False
+    say(f"{ch.name}: adding {', '.join(str(n) for n in names)}…")
+    tmp = ch.rigged.with_name("rigged.new.glb")
+    add_animations(ch.rigged, names, tmp, replace=replace)
+    redone = {n for n, _ in parse_actions(names, _known_motions(ch.kind))} if replace else set()
+    keep = [n for n in old if n not in redone] or None
+    try:
+        st = style()
+        w, h = frame_size(ch.kind, ch.size, st)
+        colours = st.colours if ch.kind == "person" else max(8, round(st.colours * 2 / 3))
+        s = settings_for(ch.kind if ch.kind == "animal" else "person", width=w, height=h,
+                         colors=colours)
+        if st.outline == "none":
+            s.outline = False
+        elif st.outline in ("selout", "solid"):
+            s.outline_style = st.outline
+        if st.palette != "auto":
+            s.palette = st.palette
+        if clean is True and st.palette != "auto":       # the same clean-up render_sheets did
+            clean = {"palette": st.palette}
+        say(f"Rendering every animation from {st.directions} directions…")
+        anim, _ = animated_turnaround([tmp], s, st.directions, 8, elevation=st.elevation,
+                                      light=st.light, normals=True, clean=clean, frame_with=keep)
+        tmp.replace(ch.rigged)
+        write_animated(anim, ch.sheet, aseprite=True, godot=True, normals=True)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    make_thumb(ch.sheet, ch.thumb)
+    ch.save()
+    return ch
+
+
+def _known_motions(kind: str):
+    if kind == "animal":
+        from .quadruped import all_actions
+    else:
+        from .autorig import all_actions
+    return all_actions()

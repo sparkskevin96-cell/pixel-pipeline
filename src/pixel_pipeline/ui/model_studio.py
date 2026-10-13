@@ -39,6 +39,7 @@ from .common import checkerboard, to_pixmap
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
 MODEL_FILTER = "3D models (*.glb *.gltf *.obj *.ply *.stl)"
 PANEL = 300
+VIEW_CHOICES = {"auto": None, "front": "front", "front+back": "front+back", "all four": "all"}
 
 
 class _Worker(QObject):
@@ -136,9 +137,15 @@ class ModelStudio(QMainWindow):
         model_btn = QPushButton("From a 3D model…")
         model_btn.setToolTip("A .glb/.gltf/.obj from Blender, Tripo, Meshy… (no GPU needed)")
         model_btn.clicked.connect(self.open_model)
+        self.views = QComboBox()
+        self.views.addItems(list(VIEW_CHOICES))
+        self.views.setToolTip("Which sides your GPU draws to paint the model: auto = front + back "
+                              "from words, front only for your own photo. The back and sides are "
+                              "drawn from the 3D shape, so they match it.")
         top = QHBoxLayout()
         top.addWidget(self.prompt, 1)
-        for w in (QLabel("Kind"), self.subject, self.make_btn, pic_btn, model_btn):
+        for w in (QLabel("Kind"), self.subject, QLabel("Views"), self.views, self.make_btn,
+                  pic_btn, model_btn):
             top.addWidget(w)
         self.seed.setToolTip("The same words + seed make the same picture again")
 
@@ -227,8 +234,16 @@ class ModelStudio(QMainWindow):
         self.more_btn = QPushButton("More settings ▸")
         self.more_btn.setCheckable(True)
         self.more_btn.toggled.connect(self._toggle_more)
+        self.more_anim = QComboBox()
+        self.more_anim.setToolTip("Another animation for the character on show (people: cast, "
+                                  "shoot, block, thrust, jump, wave, kneel, victory; animals: "
+                                  "bark, howl, jump, eat). Its other animations stay as they are.")
+        self.add_anim_btn = QPushButton("Add animation")
+        self.add_anim_btn.clicked.connect(self._add_anim_clicked)
+        self.add_anim_btn.setEnabled(False)
         keep = QHBoxLayout()
-        for w in (QLabel("Name"), self.name, QLabel("Size"), self.size_, self.add_btn):
+        for w in (QLabel("Name"), self.name, QLabel("Size"), self.size_, self.add_btn,
+                  self.more_anim, self.add_anim_btn):
             keep.addWidget(w, 1 if w is self.name else 0)
         keep.addStretch(1)
         keep.addWidget(self.more_btn)
@@ -373,9 +388,34 @@ class ModelStudio(QMainWindow):
     def _show_character(self, payload):
         self._show(payload)
         ch = self.character
+        self._fill_more_anim()
         self.statusBar().showMessage(
             f"{ch.name}: {ch.kind}, {ch.size}, playing {len(self.anim_names)} animations from every "
             f"direction. It's ready for the Game tab. Files: {ch.folder}")
+
+    def _fill_more_anim(self):
+        from ..library import _known_motions
+        self.more_anim.clear()
+        ch = self.character
+        if ch is not None:
+            have = set(self.anim_names)
+            self.more_anim.addItems([m for m in _known_motions(ch.kind) if m not in have])
+        self._busy(False)
+
+    def _add_anim_clicked(self, _checked=False):
+        self.add_animation()
+
+    def add_animation(self, name: str | None = None):
+        """Append an animation to the library character on show and re-render its sheet."""
+        from ..library import add_character_animations
+        ch = self.character
+        name = name or self.more_anim.currentText()
+        if ch is None or not name:
+            return
+
+        def job(say):
+            return add_character_animations(ch, [name], progress=say)
+        self._run(job, self.open_character)
 
     def add_to_library(self):
         """Rig + animate + render the current model at the library scale, then keep it."""
@@ -383,6 +423,7 @@ class ModelStudio(QMainWindow):
         if self.result is None:
             return
         name = self.name.text().strip() or (self.prompt.text().strip()[:30] or "Character")
+        prompt = self.prompt.text().strip()
         kind = self.subject.currentText()
         size = self.size_.currentText()
         model = self.result.model
@@ -390,7 +431,8 @@ class ModelStudio(QMainWindow):
             Path(self.result.picture).suffix.lower() == ".png" else None
 
         def job(say):
-            return add_character(name, model, kind=kind, size=size, picture=picture, progress=say)
+            return add_character(name, model, kind=kind, size=size, picture=picture, progress=say,
+                                 prompt=prompt)
 
         def done(ch):
             self.refresh_library(select=ch)
@@ -432,6 +474,9 @@ class ModelStudio(QMainWindow):
             self.add_btn.setEnabled(not busy and self.result is not None and can_rig
                                     and self.character is None)
             self.add_btn.setText("In your library" if self.character is not None else "Add to library")
+        if hasattr(self, "add_anim_btn"):
+            self.add_anim_btn.setEnabled(not busy and self.character is not None
+                                         and self.more_anim.count() > 0)
         has_pic = self.result is not None and self.result.picture is not None \
             and Path(self.result.picture).suffix.lower() == ".png"
         self.edit_btn.setEnabled(not busy and has_pic)
@@ -447,13 +492,17 @@ class ModelStudio(QMainWindow):
         if not self.sync:                     # tests (sync) can't click a message box away
             QMessageBox.warning(self, "Couldn't make the model", message)
 
-    def _model_job(self, prompt=None, picture=None, shape=None):
+    def _model_job(self, prompt=None, picture=None, shape=None, reuse=None):
         from ..model3d import prompt_to_model
         seed = self.seed.value() or None
         subject = self.subject.currentText()
         name = "-".join("".join(c if c.isalnum() else " " for c in (prompt or "model").lower()).split())[:40]
         out = self.work / f"{name or 'model'}.glb"
         paint = self._paint_options()
+        for view, path in (reuse or {}).items():      # repaint: the back/sides drawn before
+            if view in ("left", "right") or (view == "back" and not paint["back"]
+                                             and not paint["mirror_back"]):
+                paint[view] = str(path)
 
         def job(say):
             res = prompt_to_model(prompt, out, subject=subject, picture=picture, shape=shape,
@@ -495,7 +544,8 @@ class ModelStudio(QMainWindow):
         text = self.only_colours.text().strip()
         colours = parse_colours(text) if text else None      # a typo shows before any GPU work
         return {"back": str(self.back_path) if self.back_path else None,
-                "mirror_back": self.mirror.isChecked(), "colours": colours}
+                "mirror_back": self.mirror.isChecked(), "colours": colours,
+                "views": VIEW_CHOICES[self.views.currentText()]}
 
     def _shape(self) -> Path | None:
         """The uncoloured shape of the current model (to repaint without the GPU)."""
@@ -526,12 +576,15 @@ class ModelStudio(QMainWindow):
         if shape is None or not self._checked_options():
             return
         picture, seed = self.result.picture, self.result.seed
+        drawn = {k: v for k, v in (getattr(self.result, "views", None) or {}).items()
+                 if v and Path(v).exists()}
         job = self._model_job(prompt=self.prompt.text().strip() or None, picture=picture,
-                              shape=shape)
+                              shape=shape, reuse=drawn)
 
         def keep_shape(say):
             res, *rest = job(say)
             res.raw, res.seed = shape, seed
+            res.views = {**drawn, **res.views}
             return (res, *rest)
         self._run(keep_shape, self._show)
 

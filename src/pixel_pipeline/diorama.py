@@ -19,8 +19,8 @@ import numpy as np
 
 from .maptiles import builtin_texture
 
-TERRAINS = ("grass", "stone", "cobble", "planks", "dirt", "sand", "water")
-WALKABLE = {"grass", "stone", "cobble", "planks", "dirt", "sand"}
+TERRAINS = ("grass", "stone", "cobble", "planks", "dirt", "sand", "water", "snow")
+WALKABLE = {"grass", "stone", "cobble", "planks", "dirt", "sand", "snow"}
 LEVEL = 0.5          # one height level in tiles (world units: 1 tile = 1.0)
 
 
@@ -75,6 +75,7 @@ class Diorama:
     units: list = field(default_factory=list)    # [Unit]
     water_level: float = 0.15          # world y of the water surface (levels * LEVEL)
     name: str = "map"
+    sea: bool = True                   # False: water only inside the map (no sea around it)
 
     def walkable(self, c: int, r: int) -> bool:
         return (0 <= c < self.cols and 0 <= r < self.rows
@@ -89,6 +90,7 @@ class Diorama:
             "terrain": self.terrain.tolist(),
             "props": [{"kind": k, "col": c, "row": r} for k, c, r in self.props],
             "units": [vars(u) for u in self.units],
+            "sea": bool(self.sea),
         }
 
     def save(self, path) -> Path:
@@ -103,10 +105,10 @@ class Diorama:
         return cls(d["cols"], d["rows"], np.array(d["height"], int), np.array(d["terrain"], object),
                    [(p["kind"], p["col"], p["row"]) for p in d.get("props", [])],
                    [Unit(**u) for u in d.get("units", [])], d.get("water_level", 0.15),
-                   d.get("name", "map"))
+                   d.get("name", "map"), bool(d.get("sea", True)))
 
 
-BLOCKING_PROPS = {"crate", "barrel", "post"}
+BLOCKING_PROPS = {"crate", "barrel", "post", "tree", "rock", "house", "wall", "well", "fence"}
 
 
 def place_units(d: Diorama, blue: list[str], red: list[str]) -> Diorama:

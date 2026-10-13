@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QPushButton, QVBoxLayout,
 )
 
@@ -61,6 +61,8 @@ class GameTab(ToolTab):
             lay.addWidget(lst)
             teams.addWidget(box, 1)
         self.name = QLineEdit("Harbour Skirmish")
+        self.map_pick = QComboBox()
+        self.map_pick.setToolTip("Any map from your Map Library (2 World), or the built-in harbour")
         self.iso = QCheckBox("Also the isometric 2D look")
         self.iso.setChecked(True)
         self.make_btn = QPushButton("Make game")
@@ -73,7 +75,7 @@ class GameTab(ToolTab):
         for b in (self.play_btn, self.folder_btn):
             b.setEnabled(False)
         self.busy_widgets = [self.make_btn, self.play_btn]
-        self.note = QLabel("The harbour map: blue starts on the pier and quay, red in the town. "
+        self.note = QLabel("Pick a map (yours from 2 World, or the harbour), tick each side. "
                            "Real 3D (lit diorama, tilt-shift), fake 3D (pixel camera) and "
                            "isometric 2D, all playable: click a unit, a purple cell to move, a red "
                            "enemy to attack. Stats come from each character's class.")
@@ -81,7 +83,8 @@ class GameTab(ToolTab):
         self.godot_label = QLabel()
         self.godot_label.setWordWrap(True)
         row = QHBoxLayout()
-        for w in (QLabel("Game name"), self.name, self.iso, self.make_btn, self.play_btn, self.folder_btn):
+        for w in (QLabel("Map"), self.map_pick, QLabel("Game name"), self.name, self.iso, self.make_btn,
+                  self.play_btn, self.folder_btn):
             row.addWidget(w, 1 if w is self.name else 0)
         lay = QVBoxLayout(self)
         lay.addWidget(self.note)
@@ -124,6 +127,16 @@ class GameTab(ToolTab):
                 lst.addItem(item)
             lst.blockSignals(False)
         self._count()
+        from ..maplib import list_maps
+        current = self.map_pick.currentText()
+        self.map_pick.blockSignals(True)
+        self.map_pick.clear()
+        self.map_pick.addItem("Harbour (built-in)", None)
+        for asset in list_maps():
+            self.map_pick.addItem(asset.name, asset)
+        if self.map_pick.findText(current) >= 0:
+            self.map_pick.setCurrentText(current)
+        self.map_pick.blockSignals(False)
         godot = find_godot()
         self.godot_label.setText(f"Godot: {godot}" if godot else
                                  "Godot 4 isn't installed, so Play can't open the game. Get it with: "
@@ -149,6 +162,7 @@ class GameTab(ToolTab):
         blue, red = self.team(self.blue), self.team(self.red)
         out = games_root() / slug(self.name.text() or "game")
         iso = self.iso.isChecked()
+        map_asset = self.map_pick.currentData()
 
         def job(say):
             say("Writing the game…")
@@ -156,10 +170,18 @@ class GameTab(ToolTab):
             for ch in blue + red:
                 sheets[slug(ch.name)] = ch.sheet
                 stats[slug(ch.name)] = ch.stats()
-            d = place_units(harbour(), [slug(c.name) for c in blue], [slug(c.name) for c in red])
+            blue_names, red_names = [slug(c.name) for c in blue], [slug(c.name) for c in red]
+            if map_asset is not None:
+                from ..maplib import load_diorama
+                d = load_diorama(map_asset, blue=blue_names, red=red_names)
+            else:
+                d = place_units(harbour(), blue_names, red_names)
             for u in d.units:
                 u.hp, u.attack, u.defence, u.move, u.jump, u.reach = stats[u.name]
             make_hd2d(out, sheets, d, name=self.name.text() or "Tactics", iso=iso)
+            from ..assets import current_project
+            from ..maplib import install_board_extras
+            install_board_extras(out, current_project().style.tile)   # trees, houses, walls in 3D
             godot = find_godot()
             if godot and iso:
                 say("Letting Godot import the pictures (once)…")

@@ -338,7 +338,7 @@ func _environment() -> void:
 
 func _materials() -> Dictionary:
 	var mats := {}
-	for name in ["grass", "stone", "cobble", "planks", "dirt", "sand", "water"]:
+	for name in ["grass", "stone", "cobble", "planks", "dirt", "sand", "water", "snow"]:
 		var top := _tex("res://map/tex/%s_top.png" % name)
 		if top == null:
 			continue
@@ -438,7 +438,7 @@ func _build_terrain() -> void:
 func _build_water() -> void:
 	var water := MeshInstance3D.new()
 	var pm := PlaneMesh.new()
-	pm.size = Vector2(cols + 40, rows + 40)
+	pm.size = Vector2(cols + 40, rows + 40) if map.get("sea", true) else Vector2(cols, rows)
 	pm.subdivide_width = 60
 	pm.subdivide_depth = 60
 	water.mesh = pm
@@ -461,10 +461,16 @@ func _build_props() -> void:
 	wood.albedo_texture = _tex("res://map/tex/planks_top.png")
 	wood.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	var i := 0
+	var ext = null                        # optional: res://map/props3d.gd builds more prop kinds
+	if FileAccess.file_exists("res://map/props3d.gd"):
+		ext = load("res://map/props3d.gd").new()
 	for p in map.get("props", []):
 		var c := int(p["col"]); var r := int(p["row"])
 		var base := cell_pos(c, r)
 		var kind: String = p["kind"]
+		if ext != null and ext.build(self, kind, c, r, base, i):
+			i += 1
+			continue
 		if kind in ["crate", "barrel", "post"]:
 			blocked[Vector2i(c, r)] = true
 		var mi := MeshInstance3D.new()
@@ -495,6 +501,9 @@ func _build_props() -> void:
 				light.position = flame.position
 				light.set_meta("flicker", float(i))
 				add_child(light)
+			_:                                # unknown kind: a plain box so it still shows
+				var ub := BoxMesh.new(); ub.size = Vector3(0.6, 0.6, 0.6); mi.mesh = ub
+				mi.position = base + Vector3(0, 0.3, 0)
 		mi.material_override = wood
 		add_child(mi)
 		i += 1

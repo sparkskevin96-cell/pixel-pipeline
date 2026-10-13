@@ -533,6 +533,8 @@ class _Moves:
         self.leg = float(np.mean([j[f"thigh_{s}"][1] - j[f"foot_{s}"][1] + 0.04 * self.H for s in "lr"]))
         back = j["hips"][2] - min(sk.tips["head_top"][2], j["chest"][2] - 0.08 * self.H)
         self.back = float(max(0.05 * self.H, back))
+        # arms the rig couldn't separate (robe, cape): new motions move them gently
+        self.weak = {s: any(n.startswith(f"arm {s}: not separate") for n in sk.notes) for s in "lr"}
 
     def arm(self, s, swing=0.0, out=0.0, bend=-10.0):
         sign = 1 if s == "l" else -1
@@ -561,6 +563,9 @@ class _Moves:
                    **self.arm("l", arm * s, 0, bend), **self.arm("r", -arm * s, 0, bend)}
             lift = 0.012 * self.H * abs(c) if run else 0.0
             return rot, np.array([0, self.drop(th) + lift, 0])
+        if action not in ACTIONS:
+            from .motions import human_pose
+            return human_pose(self, action, p)
         return self._keyed(action, p)
 
     def _keyed(self, action, p):
@@ -590,6 +595,12 @@ class _Moves:
                       (1.0, {"hips": [("x", -88)], **self.arm("l", 0, 60, 0), **self.arm("r", 0, 60, 0),
                              "head": [("x", -5)]}, "flat")],
         }[action]
+        return self.interp(keys, p)
+
+    def interp(self, keys, p):
+        """Key poses [(time 0-1, {joint: [(axis, degrees)]}, hips offset)] blended with
+        smoothstep at p. The offset is a height (x the model's height), (x, y, z) x height,
+        "flat" (lying on the back) or "mid"; joints a key leaves out are at rest."""
         rest_y = self.sk.joints["hips"][1]
         flat = self.back + 0.01 * self.H - rest_y
         for i in range(len(keys) - 1):
@@ -599,15 +610,15 @@ class _Moves:
         u = _smooth(min(1.0, max(0.0, (p - t0) / max(t1 - t0, 1e-9))))
 
         def y(v):
-            if v == "flat":
-                return flat
-            if v == "mid":
-                return 0.55 * flat
-            return v * self.H
+            if isinstance(v, str):
+                return np.array([0, flat if v == "flat" else 0.55 * flat, 0])
+            if isinstance(v, (tuple, list, np.ndarray)):
+                return np.asarray(v, np.float64) * self.H
+            return np.array([0, v * self.H, 0])
         names = set(a) | set(b)
         rot = {n: ("blend", self._q(a.get(n, self._rest(n))), self._q(b.get(n, self._rest(n))), u)
                for n in names}
-        return rot, np.array([0, y(ya) + (y(yb) - y(ya)) * u, 0])
+        return rot, y(ya) + (y(yb) - y(ya)) * u
 
     def _rest(self, n):
         for s in "lr":
@@ -619,6 +630,8 @@ class _Moves:
 
     @staticmethod
     def _q(spec):
+        if isinstance(spec, np.ndarray):          # already a quaternion (motions.aim_arm)
+            return spec
         q = np.array([0.0, 0.0, 0.0, 1.0])
         for axis, deg in spec:
             q = _qmul(q, _q(axis, deg))
@@ -645,24 +658,58 @@ def _srgb_to_linear(c):
     return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
 
 
+def all_actions() -> tuple[str, ...]:
+    """Every humanoid clip: the built-in six and the motions library (motions.py)."""
+    from .motions import HUMAN
+    return ACTIONS + tuple(HUMAN)
+
+
+def clip_info(motion: str) -> tuple[float, bool]:
+    """(seconds, loops) of a humanoid motion."""
+    if motion in DURATION:
+        return DURATION[motion], LOOPS[motion]
+    from .motions import HUMAN
+    return HUMAN[motion]
+
+
+def human_clips(sk: Skeleton, actions, weapon: str = "r", keys: int = 25) -> list:
+    """[(clip name, times, poses, loop)] for write_skinned / append_clips. actions may rename:
+    'attack=shoot' is a clip called attack that moves like shoot."""
+    from .motions import parse_actions
+    moves = _Moves(sk, weapon)
+    clips = []
+    for name, motion in parse_actions(actions, all_actions()):
+        dur, loop = clip_info(motion)
+        times = np.linspace(0, dur, keys)
+        clips.append((name, times, [moves.quats(motion, t / dur) for t in times], loop))
+    return clips
+
+
+def skeleton_extras(sk, kind: str, **more) -> dict:
+    """The skeleton as glTF extras (add_animations reads it back to pose new clips)."""
+    def tolist(d):
+        return {k: [float(x) for x in v] for k, v in d.items()}
+    out = {"kind": kind, "joints": tolist(sk.joints), "tips": tolist(sk.tips),
+           "height": float(sk.height), "notes": list(sk.notes)}
+    out.update(more)
+    return {"pixel_pipeline_rig": out}
+
+
 def write_rigged(parts, sk: Skeleton, out_glb, actions=ACTIONS, weapon: str = "r",
                  keys: int = 25) -> Path:
     """Mesh + skeleton + skin + animations as one .glb."""
-    moves = _Moves(sk, weapon)
-    clips = []
-    for action in actions:
-        dur = DURATION[action]
-        times = np.linspace(0, dur, keys)
-        clips.append((action, times, [moves.quats(action, t / dur) for t in times], LOOPS[action]))
-    return write_skinned(parts, JOINTS, sk.joints, lambda v: skin_weights(v, sk), clips, out_glb)
+    clips = human_clips(sk, actions, weapon, keys)
+    return write_skinned(parts, JOINTS, sk.joints, lambda v: skin_weights(v, sk), clips, out_glb,
+                         extras=skeleton_extras(sk, "humanoid", weapon=weapon))
 
 
-def write_skinned(parts, joints, positions: dict, weights, clips, out_glb) -> Path:
+def write_skinned(parts, joints, positions: dict, weights, clips, out_glb,
+                  extras: dict | None = None) -> Path:
     """Meshes + a world-aligned skeleton + skin + rotation animations as one .glb.
     joints: [(name, parent)], parents first, the first one is the root. positions: name -> rest
     position. weights(vertices) -> (joint indices, weights). clips: [(name, times, poses, loop)]
     with poses = [({joint: quaternion}, root offset)]. Vertex colours and base colour textures
-    are kept."""
+    are kept. extras: stored on the skin (glTF extras)."""
     from .turnaround import _texture
     g = GlbWriter()
     j = positions
@@ -684,6 +731,8 @@ def write_skinned(parts, joints, positions: dict, weights, clips, out_glb) -> Pa
         ibm[i, :3, 3] = -j[n]
     g.doc["skins"] = [{"joints": [index[n] for n in names], "skeleton": index[root],
                        "inverseBindMatrices": g.accessor(ibm.transpose(0, 2, 1).reshape(-1, 16), "MAT4")}]
+    if extras:
+        g.doc["skins"][0]["extras"] = extras
     prims, materials, images, textures = [], [], [], []
     for m, v in parts:
         idx, wts = weights(v)
@@ -722,6 +771,12 @@ def write_skinned(parts, joints, positions: dict, weights, clips, out_glb) -> Pa
     g.doc["scenes"] = [{"nodes": [0, len(nodes) - 1]}]
     g.doc["scene"] = 0
 
+    g.doc["animations"] = _clips_json(g, clips, names, index, root, j)
+    return g.save(out_glb)
+
+
+def _clips_json(g: GlbWriter, clips, names, index: dict, root: str, j: dict) -> list[dict]:
+    """glTF animations (rotation of every joint + root translation) for clips."""
     anims = []
     for name, times, poses, loop in clips:
         t_acc = g.accessor(np.asarray(times, np.float32), "SCALAR")
@@ -738,8 +793,7 @@ def write_skinned(parts, joints, positions: dict, weights, clips, out_glb) -> Pa
         channels.append({"sampler": len(samplers) - 1, "target": {"node": index[root], "path": "translation"}})
         anims.append({"name": name, "samplers": samplers, "channels": channels,
                       "extras": {"loop": bool(loop)}})
-    g.doc["animations"] = anims
-    return g.save(out_glb)
+    return anims
 
 
 # --------------------------------------------------------------------------- preview + one call
@@ -769,14 +823,17 @@ def rig_preview(grid: _Grid, skel_px: np.ndarray, sk: Skeleton, scale: int = 2) 
 
 def auto_rig(model, out_glb=None, *, actions=ACTIONS, weapon_hand: str = "right", up: str = "y",
              yaw: float = 0.0, points: int = 400_000) -> RigResult:
-    """A standing humanoid model -> rigged, animated .glb (default <name>.rigged.glb)."""
-    unknown = [a for a in actions if a not in ACTIONS]
-    if unknown:
-        raise ValueError(f"Unknown animation(s) {', '.join(unknown)} (have: {', '.join(ACTIONS)})")
+    """A standing humanoid model -> rigged, animated .glb (default <name>.rigged.glb).
+    actions: any of all_actions() (the built-in six and motions.py's cast, shoot, block,
+    thrust, jump, wave, kneel, victory); 'attack=shoot' names a clip attack that moves like
+    shoot (motions.actions_for_role gives the role's set)."""
+    from .motions import parse_actions
+    parse_actions(actions, all_actions())               # unknown names fail before any work
     model = Path(model)
     out = Path(out_glb) if out_glb else model.with_name(model.stem + ".rigged.glb")
     parts = _load(model, up, yaw)
     pts = _surface_points(parts, points)
     sk, grid, skel_px = find_skeleton(pts)
     write_rigged(parts, sk, out, actions, "r" if weapon_hand.startswith("r") else "l")
-    return RigResult(out, sk, rig_preview(grid, skel_px, sk), list(actions))
+    return RigResult(out, sk, rig_preview(grid, skel_px, sk),
+                     [n for n, _ in parse_actions(actions, all_actions())])

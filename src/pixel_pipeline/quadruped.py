@@ -564,7 +564,8 @@ class _Poser:
             return self._lie(p)
         if action == "death":
             return self._death(p)
-        raise ValueError(f"Unknown animation {action}")
+        from .motions import quad_pose        # bark, howl, jump, eat
+        return quad_pose(self, action, p)
 
     def _sit_target(self):
         if hasattr(self, "_sit_cache"):
@@ -654,14 +655,48 @@ class _Poser:
 
 # --------------------------------------------------------------------------- glTF out + preview
 
-def write_quadruped(parts, sk: QuadSkeleton, out_glb, actions=ACTIONS, keys: int = 25) -> Path:
+def all_actions() -> tuple[str, ...]:
+    """Every animal clip: the built-in seven and motions.py's bark, howl, jump, eat."""
+    from .motions import QUAD
+    return ACTIONS + tuple(QUAD)
+
+
+def clip_info(motion: str) -> tuple[float, bool]:
+    if motion in DURATION:
+        return DURATION[motion], LOOPS[motion]
+    from .motions import QUAD
+    return QUAD[motion]
+
+
+def quad_clips(sk: QuadSkeleton, actions, keys: int = 25) -> list:
+    """[(clip name, times, poses, loop)]; 'name=motion' renames like the humanoid rig."""
+    from .motions import parse_actions
     poser = _Poser(sk)
     clips = []
-    for action in actions:
-        dur = DURATION[action]
+    for name, motion in parse_actions(actions, all_actions()):
+        dur, loop = clip_info(motion)
         times = np.linspace(0, dur, keys)
-        clips.append((action, times, [poser.quats(action, t / dur) for t in times], LOOPS[action]))
-    return write_skinned(parts, JOINTS, sk.joints, lambda v: skin_weights(v, sk), clips, out_glb)
+        clips.append((name, times, [poser.quats(motion, t / dur) for t in times], loop))
+    return clips
+
+
+def quad_extras(sk: QuadSkeleton, body_points: int = 1500) -> dict:
+    from .autorig import skeleton_extras
+    body = sk.body if sk.body is not None else np.zeros((0, 3))
+    if len(body) > body_points:
+        body = body[np.linspace(0, len(body) - 1, body_points).astype(int)]
+    return skeleton_extras(sk, "quadruped", yaw=float(sk.yaw), head=sk.head,
+                           length=float(sk.length), belly=float(sk.belly),
+                           pair_z=float(sk.pair_z),
+                           split_x={k: float(v) for k, v in sk.split_x.items()},
+                           has_tail=bool(sk.has_tail),
+                           body=np.round(body, 5).tolist())
+
+
+def write_quadruped(parts, sk: QuadSkeleton, out_glb, actions=ACTIONS, keys: int = 25) -> Path:
+    clips = quad_clips(sk, actions, keys)
+    return write_skinned(parts, JOINTS, sk.joints, lambda v: skin_weights(v, sk), clips, out_glb,
+                         extras=quad_extras(sk))
 
 
 def rig_preview(grid: _Grid, sk: QuadSkeleton, scale: int = 2) -> np.ndarray:
@@ -690,10 +725,10 @@ def auto_rig_quadruped(model, out_glb=None, *, actions=ACTIONS, head: str = "aut
                        yaw: float = 0.0, points: int = 400_000) -> QuadRigResult:
     """A standing four-legged animal -> rigged, animated .glb (default <name>.rigged.glb),
     turned so its head faces +z. head: auto, or which end of the model is the head
-    (+x, -x, +z, -z after `up`/`yaw`)."""
-    unknown = [a for a in actions if a not in ACTIONS]
-    if unknown:
-        raise ValueError(f"Unknown animation(s) {', '.join(unknown)} (have: {', '.join(ACTIONS)})")
+    (+x, -x, +z, -z after `up`/`yaw`). actions: any of all_actions() (also bark, howl, jump,
+    eat from motions.py), 'name=motion' to rename."""
+    from .motions import parse_actions
+    parse_actions(actions, all_actions())
     model = Path(model)
     out = Path(out_glb) if out_glb else model.with_name(model.stem + ".rigged.glb")
     parts = _load(model, up, yaw)
@@ -706,4 +741,5 @@ def auto_rig_quadruped(model, out_glb=None, *, actions=ACTIONS, head: str = "aut
     sk.yaw, sk.head = turn, name
     sk.notes = notes + sk.notes
     write_quadruped(parts, sk, out, actions)
-    return QuadRigResult(out, sk, rig_preview(grid, sk), list(actions))
+    return QuadRigResult(out, sk, rig_preview(grid, sk),
+                         [n for n, _ in parse_actions(actions, all_actions())])

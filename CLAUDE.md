@@ -95,6 +95,29 @@ wants terse answers and fixes over polish.
   api-examples repo; the cloud container's network blocks both hosts, so they were only tested
   against fakes (tests/test_online.py). Results at sprite size are snapped to the palette
   (`to_sprite`, no resampling). Keys: env or ~/.pixel-pipeline/keys.json.
+- **Asset studio (2026-10-12, Kevin: "a tool to build games… characters, items, maps etc. to put
+  into many games", not one game)**. Tabs: Characters, Items & props, World (Maps | Terrain
+  tiles), Portraits & effects, Library, Try in a game (hd2d test bed), Sprite, More tools.
+  `assets.py`: projects (~/Pixel Pipeline/Projects/<p>, PIXEL_HOME) with `Style` (palette,
+  colours, outline, person_height, elevation, directions, light, tile, ppu, icon) that library
+  /objects/effects/portraits/maps render with; asset store (asset.json: kind, tags,
+  collections, extra) + search. `objects.py` (items: SDXL icon variations at Style.icon, world
+  sprite from a 3D model of the chosen icon; props/buildings: Hunyuan model, height in people,
+  directions) + `ui/objects_tab.py`. `maplib.py` (templates flat/harbour/forest/castle/
+  snowfield/village, MapEdit with undo, save/load as map assets, exports godot-3d/
+  godot-tilemap/godot-iso/tiled/json, load_diorama for the Game tab, install_board_extras =
+  3D props) + `ui/map_editor.py`. `exports.py` presets godot-2d/godot-hd2d/unity(.meta, y
+  flipped)/gamemaker(_stripN)/aseprite/generic; `reskin.py` (recolour variants);
+  `jobqueue.py` (paced creation queue, variations); `ui/assets_tab.py` (Library page).
+  `portraits.py` (painted busts by SDXL img2img from picture.png, expressions at 0.58 denoise:
+  still subtle, a face-only inpaint would be stronger; pixel versions) + `effects.py` (13
+  procedural effects, themes) and their tabs. Character quality: `model3d.views_for_model`
+  (back/side pictures by img2img over the shape rendered from that side; prompt_to_model
+  views= default front+back from words) and paint_from_picture back/left/right;
+  `motions.py` (cast shoot block thrust jump wave kneel victory; animal bark howl jump eat;
+  add_animations; library.add_character_animations keeps old frames identical);
+  `pixelclean.py` (specks, islands, nubs; on in library.render_sheets). Characters store
+  their prompt. GPU verified 2026-10-12: all-four-views swordswoman (3.5 min), portraits.
 - **App layout (2026-10-12, Kevin: "make it feel intuitive")**: tabs in the order you make a
   game: `1 Characters` (ModelStudio + Character Library list on the left; Kind person/animal/
   object, Size words not numbers, Name, Add to library = rig + all clips x16 + normals at the
