@@ -55,7 +55,7 @@ def test_orientation_is_found_for_a_tipped_over_model(tmp_path):
     mesh = figure(tmp_path / "shape.glb", colours=False)
     mesh.apply_transform(R(np.radians(90), [1, 0, 0]) @ R(np.radians(90), [0, 1, 0]))
     pts = mesh.sample(100_000)
-    rot, match = orient_to_picture(pts, pic[..., 3])
+    rot, match = orient_to_picture(pts, pic[..., 3], upright=False)   # any file: 24 axis turns
     assert match > 0.9
     turned = (np.asarray(mesh.vertices) @ rot.T)
     # back to glTF: standing along y, the sword on the picture's left (-x)
@@ -226,3 +226,18 @@ def test_mirror_back_and_colours_paint_only_those_colours(tmp_path):
     m = trimesh.load(res.model, force="mesh")
     cols = {tuple(c) for c in np.asarray(m.visual.vertex_colors)[:, :3].tolist()}
     assert cols <= {(28, 28, 32), (238, 238, 236)} and len(cols) == 2
+
+
+def test_upright_model_is_turned_not_tipped(tmp_path):
+    """An image-to-3D model is upright; a three-quarter picture must be matched by turning it
+    about y at the real angle (not the nearest 90 degrees, and never tipped over)."""
+    from pixel_pipeline.model3d import _ry, orient_to_picture_view
+    pic = front_picture(tmp_path)
+    mesh = figure(tmp_path / "shape.glb", colours=False)
+    mesh.apply_transform(np.vstack([np.hstack([_ry(35), np.zeros((3, 1))]), [0, 0, 0, 1]]))
+    pts = mesh.sample(100_000)
+    rot, tilt, match = orient_to_picture_view(pts, pic[..., 3])
+    assert match > 0.9
+    assert np.allclose(rot[1], [0, 1, 0])                     # y stays up
+    turned = pts @ rot.T
+    assert np.ptp(turned[:, 0]) > np.ptp(turned[:, 2])        # wide side faces the camera again

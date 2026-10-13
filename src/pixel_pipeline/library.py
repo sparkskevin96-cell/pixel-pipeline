@@ -253,3 +253,22 @@ def load_animated(ch: Character):
     actions = [Action(a, a not in once, int(groups[a][dirs[0]][0][1])) for a in order]
     nested = [[[s for s, _ in groups[a][d]] for d in dirs] for a in order]
     return AnimatedSet(actions, dirs, nested)
+
+
+def rebuild(ch: Character, model, progress=None) -> Character:
+    """Give a library character a new coloured model (e.g. repainted) and redo its skeleton,
+    sheets and thumbnail, keeping its name, kind, size and role."""
+    say = progress or (lambda t: None)
+    if Path(model).resolve() != ch.model.resolve():
+        shutil.copyfile(model, ch.model)
+    say(f"{ch.name}: adding a skeleton and animations…")
+    if ch.kind == "animal":
+        from .quadruped import auto_rig_quadruped
+        auto_rig_quadruped(ch.model, ch.rigged)
+    else:
+        from .autorig import auto_rig
+        auto_rig(ch.model, ch.rigged)
+    render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say)
+    make_thumb(ch.sheet, ch.thumb)
+    ch.save()
+    return ch

@@ -245,20 +245,63 @@ def _picture_silhouette(alpha: np.ndarray, size: int = 96) -> np.ndarray:
     return _silhouette(pts[::step], size)
 
 
-def orient_to_picture(points: np.ndarray, alpha: np.ndarray) -> tuple[np.ndarray, float]:
+def _iou(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.logical_and(a, b).sum() / max(1, np.logical_or(a, b).sum()))
+
+
+def _ry(deg: float) -> np.ndarray:
+    a = np.radians(deg)
+    return np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
+
+
+def _rx(deg: float) -> np.ndarray:
+    """Tilt for a camera `deg` above the horizon: the top of the model leans toward it."""
+    a = np.radians(deg)
+    return np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+
+
+def orient_to_picture(points: np.ndarray, alpha: np.ndarray, upright: bool = True
+                      ) -> tuple[np.ndarray, float]:
     """Rotation (3x3) that turns the model so the picture is its front view (front +z,
-    up +y), found by matching silhouettes; and the match (IoU, 0-1). Ties go to the usual
-    file conventions (glTF first)."""
+    up +y), found by matching silhouettes; and the match (IoU, 0-1).
+
+    upright (models from an image-to-3D AI: y is up): only turns about the vertical axis, in
+    5 degree steps, so a three-quarter picture is matched at its real angle and the model is
+    never tipped over (a wolf that matched better standing on end). Use
+    orient_to_picture_view for the camera height too. upright=False: the 24 axis-aligned
+    orientations of an arbitrary file (ties go to the usual conventions, glTF first)."""
+    if upright:
+        rot, _, iou = orient_to_picture_view(points, alpha)
+        return rot, iou
     target = _picture_silhouette(alpha)
     best, best_iou = None, -1.0
     for _, rot in _orientations():
         p = points @ rot.T
-        sil = _silhouette(p[:, :2])
-        inter = np.logical_and(sil, target).sum()
-        iou = inter / max(1, np.logical_or(sil, target).sum())
+        iou = _iou(_silhouette(p[:, :2]), target)
         if iou > best_iou + 0.01:
             best, best_iou = rot, iou
     return best, float(best_iou)
+
+
+def orient_to_picture_view(points: np.ndarray, alpha: np.ndarray,
+                           elevations=(0, 10, 20, 30, 40)) -> tuple[np.ndarray, np.ndarray, float]:
+    """For an upright model: (turn about y, camera tilt, IoU) that make the model's outline
+    match the picture: the picture is the model seen from the front (+z) by a camera
+    `tilt` degrees above it (photos are often taken from above, e.g. a dog on a leash)."""
+    target = _picture_silhouette(alpha)
+    step = max(1, len(points) // 40000)
+    pts = points[::step]
+
+    def score(yaw, elev):
+        p = pts @ (_rx(elev) @ _ry(yaw)).T
+        return _iou(_silhouette(p[:, :2]), target)
+    best = max(((score(y, e), y, e) for e in elevations for y in range(0, 360, 5)))
+    _, y0, e0 = best
+    best = max([best] + [(score(y0 + dy, e0 + de), y0 + dy, e0 + de)
+                         for dy in (-4, -2, 2, 4) for de in (-5, -2.5, 0, 2.5, 5)
+                         if 0 <= e0 + de <= 60])
+    iou, yaw, elev = best
+    return _ry(yaw), _rx(elev), float(iou)
 
 
 def _bilinear(img: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
@@ -292,6 +335,7 @@ class _View:
         self.scale = (ys.max() - ys.min() + 1) / max(hi[1] - lo[1], 1e-9)
         self.px0 = (xs.min() + xs.max() + 1) / 2 - self.scale * (lo[0] + hi[0]) / 2
         self.py0 = ys.max() + 1 + self.scale * lo[1]
+        self._refine_fit(samples, alpha >= 128)
         a = alpha.astype(np.float32) / 255
         sigma = max(1.0, 0.03 * (ys.max() - ys.min()))
         pre = cv2.GaussianBlur(rgba[..., :3].astype(np.float32) * a[..., None], (0, 0), sigma)
@@ -327,6 +371,39 @@ class _View:
                                np.ones((3, 3), np.uint8))
         self.eps = 0.02 * float(samples[:, 2].max() - samples[:, 2].min() + 1e-9)
 
+    def _refine_fit(self, samples: np.ndarray, inside: np.ndarray, work: int = 160):
+        """Nudge scale and position so the model's outline lies on the picture's (bounding
+        boxes alone are off when, say, a tail or a far leg sticks out in one of them)."""
+        h, w = inside.shape
+        k = work / max(h, w)
+        small = cv2.resize(inside.astype(np.uint8), (max(1, round(w * k)), max(1, round(h * k))),
+                           interpolation=cv2.INTER_AREA) > 0
+        sh, sw = small.shape
+        pts = samples[::max(1, len(samples) // 30000)]
+        cx, cy = (pts[:, 0].min() + pts[:, 0].max()) / 2, (pts[:, 1].min() + pts[:, 1].max()) / 2
+
+        def mask(scale, px0, py0):
+            u = np.round((px0 + scale * pts[:, 0]) * k).astype(int)
+            v = np.round((py0 - scale * pts[:, 1]) * k).astype(int)
+            ok = (u >= 0) & (u < sw) & (v >= 0) & (v < sh)
+            m = np.zeros((sh, sw), np.uint8)
+            m[v[ok], u[ok]] = 1
+            return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
+        best = (_iou(mask(self.scale, self.px0, self.py0), small), self.scale, self.px0, self.py0)
+        base = best
+        for f in np.linspace(0.9, 1.1, 9):
+            sc = base[1] * f
+            # keep the model's centre where it was, then shift
+            ox = base[2] + base[1] * cx - sc * cx
+            oy = base[3] - base[1] * cy + sc * cy
+            for dx in range(-8, 9, 2):
+                for dy in range(-8, 9, 2):
+                    cand = (sc, ox + dx / k, oy + dy / k)
+                    iou = _iou(mask(*cand), small)
+                    if iou > best[0] + 1e-4:
+                        best = (iou, *cand)
+        self.match, self.scale, self.px0, self.py0 = best
+
     def project(self, p: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         # the back picture is mirrored on load, so +x is to the right in both views
         return self.px0 + self.scale * p[:, 0], self.py0 - self.scale * p[:, 1]
@@ -346,7 +423,7 @@ class _View:
 
 
 def paint_from_picture(mesh, picture: np.ndarray, back: np.ndarray | None = None,
-                       samples: int = 400_000, min_match: float = 0.5):
+                       samples: int = 400_000, min_match: float = 0.5, upright: bool = True):
     """Colour a shape-only mesh from its front picture (RGBA, background removed).
 
     Returns (trimesh with vertex colours, turned to front +z / up +y; silhouette match 0-1).
@@ -360,7 +437,10 @@ def paint_from_picture(mesh, picture: np.ndarray, back: np.ndarray | None = None
     mesh = _dense(mesh)
     rng = np.random.default_rng(0)
     pts, _, _ = _sample_mesh(mesh, samples, rng)
-    rot, match = orient_to_picture(pts, picture[..., 3])
+    if upright:
+        rot, tilt, match = orient_to_picture_view(pts, picture[..., 3])
+    else:
+        (rot, match), tilt = orient_to_picture(pts, picture[..., 3], upright=False), np.eye(3)
     if match < min_match:
         log.warning("The model's outline only matches the picture %.0f%%; colours may be off.",
                     100 * match)
@@ -372,15 +452,21 @@ def paint_from_picture(mesh, picture: np.ndarray, back: np.ndarray | None = None
     out = trimesh.Trimesh(verts, np.asarray(mesh.faces), process=False)
     normals = np.asarray(out.vertex_normals)
 
-    front = _View(picture, pts)
-    colours = front.colours(verts, sharp=False)               # guess for every vertex
-    seen = front.visible(verts, normals)
-    colours[seen] = front.colours(verts[seen], sharp=True)
+    # the picture is the model seen from the front by a camera `tilt` above it
+    cv, cp, cn = verts @ tilt.T, pts @ tilt.T, normals @ tilt.T
+    front = _View(picture, cp)
+    colours = front.colours(cv, sharp=False)                  # guess for every vertex
+    seen = front.visible(cv, cn)
+    colours[seen] = front.colours(cv[seen], sharp=True)
     if back is not None:
-        rear = _View(back, pts, back=True)
-        rear_seen = rear.visible(verts, normals) & ~seen
-        colours[rear_seen] = rear.colours(verts[rear_seen], sharp=True)
+        # the back picture: the same camera after walking round to the other side
+        turn = tilt @ _ry(180)
+        bv, bp, bn = verts @ turn.T, pts @ turn.T, normals @ turn.T
+        rear = _View(back, bp)
+        rear_seen = rear.visible(bv, bn) & ~seen
+        colours[rear_seen] = rear.colours(bv[rear_seen], sharp=True)
         seen |= rear_seen
+    match = max(match, front.match)
     colours = _smooth_hidden(out, colours, seen)
     rgba = np.concatenate([np.clip(colours, 0, 255), np.full((len(verts), 1), 255.0)], 1)
     out.visual = trimesh.visual.ColorVisuals(out, vertex_colors=np.rint(rgba).astype(np.uint8))
