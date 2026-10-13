@@ -58,6 +58,7 @@ def qt_app():
 def _own_library(tmp_path_factory, monkeypatch):
     """Tests never touch the real Character Library."""
     monkeypatch.setenv("PIXEL_LIBRARY", str(tmp_path_factory.mktemp("library")))
+    monkeypatch.setenv("PIXEL_HOME", str(tmp_path_factory.mktemp("home")))
 
 
 _EXIT = [0]

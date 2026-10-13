@@ -40,8 +40,17 @@ SHEET_FILES = (".png", ".json", "_n.png", ".aseprite", ".tres", "_facing.gd")
 
 
 def root() -> Path:
+    """The current project's characters (assets.py), or $PIXEL_LIBRARY."""
     env = os.environ.get("PIXEL_LIBRARY")
-    return Path(env) if env else Path.home() / "Pixel Pipeline" / "Characters"
+    if env:
+        return Path(env)
+    from .assets import current_project
+    return current_project().kind_folder("character")
+
+
+def style():
+    from .assets import Style, current_project
+    return Style() if os.environ.get("PIXEL_LIBRARY") else current_project().style
 
 
 def slug(name: str) -> str:
@@ -95,6 +104,19 @@ class Character:
                 "created": self.created or time.time()}
         p = self.folder / "character.json"
         p.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        # the asset store's record too (keeps tags/collections set elsewhere)
+        meta = self.folder / "asset.json"
+        old = {}
+        if meta.exists():
+            try:
+                old = json.loads(meta.read_text(encoding="utf-8"))
+            except ValueError:
+                old = {}
+        meta.write_text(json.dumps({
+            "kind": "character", "name": self.name, "tags": old.get("tags", []),
+            "collections": old.get("collections", []), "created": data["created"],
+            "extra": {"body": self.kind, "size": self.size, "role": self.role}}, indent=1),
+            encoding="utf-8")
         return p
 
 
@@ -129,9 +151,12 @@ def _free_folder(name: str, base: Path) -> Path:
     return folder
 
 
-def frame_size(kind: str, size: str) -> tuple[int, int]:
+def frame_size(kind: str, size: str, st=None) -> tuple[int, int]:
+    """Frame for a kind and size in the project's scale (SIZES are for a 64 px person)."""
     sizes = SIZES.get(kind, SIZES["person"])
-    return sizes.get(size, sizes[DEFAULT_SIZE.get(kind, "normal")])
+    w, h = sizes.get(size, sizes[DEFAULT_SIZE.get(kind, "normal")])
+    st = st or style()
+    return st.scale(w), st.scale(h)
 
 
 def make_thumb(sheet_png: Path, out: Path, px: int = 96) -> Path:
@@ -157,11 +182,19 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int
     """All animations x 16 directions at the library scale, with normal maps."""
     from .anim3d import animated_turnaround, write_animated
     from .settings import settings_for
-    w, h = frame_size(kind, size)
-    s = settings_for(kind if kind == "animal" else "person", width=w, height=h,
-                     colors=COLOURS.get(kind, 24))
-    (progress or (lambda t: None))("Rendering every animation from 16 directions…")
-    anim, _ = animated_turnaround([rigged], s, 16, frames, light=0.2, normals=True)
+    st = style()
+    w, h = frame_size(kind, size, st)
+    colours = st.colours if kind == "person" else max(8, round(st.colours * 2 / 3))
+    s = settings_for(kind if kind == "animal" else "person", width=w, height=h, colors=colours)
+    if st.outline == "none":
+        s.outline = False
+    elif st.outline in ("selout", "solid"):
+        s.outline_style = st.outline
+    if st.palette != "auto":
+        s.palette = st.palette
+    (progress or (lambda t: None))(f"Rendering every animation from {st.directions} directions…")
+    anim, _ = animated_turnaround([rigged], s, st.directions, frames, elevation=st.elevation,
+                                  light=st.light, normals=True)
     return write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
 
 
