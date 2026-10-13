@@ -49,6 +49,7 @@ class Skeleton:
     tips: dict[str, np.ndarray]             # head_top, finger_l/r, toe_l/r
     height: float
     notes: list[str] = field(default_factory=list)
+    back: float | None = None               # z of the back-most surface at the torso (a cape)
 
 
 @dataclass
@@ -96,6 +97,35 @@ def _surface_points(parts, count: int, seed: int = 0) -> np.ndarray:
     s = np.sqrt(r1)
     bary = np.stack([1 - s, s * (1 - r2), s * r2], 1)
     return (tris[face] * bary[..., None]).sum(1)
+
+
+def _back_z(grid, j3, H) -> float | None:
+    """The back-most surface between the hips and the neck, near the middle."""
+    r0, _ = grid.rc(j3["hips"][0], j3["neck"][1])
+    r1, _ = grid.rc(j3["hips"][0], j3["hips"][1])
+    _, c0 = grid.rc(j3["hips"][0] - 0.12 * H, 0)
+    _, c1 = grid.rc(j3["hips"][0] + 0.12 * H, 0)
+    z = grid.zmin[r0:r1 + 1, c0:c1 + 1]
+    z = z[np.isfinite(z)]
+    return float(z.min()) if len(z) else None
+
+
+def _straighten_torso(j3: dict, H: float, notes: list, head_lean: float = 8.0) -> None:
+    """A cape, cloak or tail behind the body pulls the middle of the depth back (a hood pushes
+    the head forward): the spine then leaned 20-30 degrees and every clip, mocap above all,
+    played hunched. A standing figure's spine runs straight up over its knees and its thighs sit
+    over its shins; only the head may tilt, at most head_lean degrees."""
+    knees = float((j3["shin_l"][2] + j3["shin_r"][2]) / 2)
+    moved = max(abs(j3[n][2] - knees) for n in ("hips", "spine", "chest", "neck"))
+    if moved > 0.04 * H:
+        notes.append(f"spine set straight over the knees (it was off by {moved / H:.0%} of the "
+                     f"height: something behind or in front of the body)")
+    for n in ("hips", "spine", "chest", "neck"):
+        j3[n][2] = knees
+    for s in "lr":
+        j3[f"thigh_{s}"][2] = j3[f"shin_{s}"][2]
+    t = np.tan(np.radians(head_lean)) * max(j3["head"][1] - j3["neck"][1], 1e-6)
+    j3["head"][2] = float(np.clip(j3["head"][2], knees - t, knees + t))
 
 
 # --------------------------------------------------------------------------- silhouette
@@ -445,10 +475,12 @@ def find_skeleton(pts: np.ndarray) -> tuple[Skeleton, _Grid, np.ndarray]:
     j3 = {n: three(joints[n]) for n in NAMES}
     for s in "lr":   # toes point forward from the ankle
         j3[f"foot_{s}"][2] = grid.depth(*joints[f"shin_{s}"])
+    _straighten_torso(j3, H, notes)
+    back = _back_z(grid, j3, H)
     t3 = {n: three(p) for n, p in tips.items()}
     for s in "lr":
         t3[f"toe_{s}"][2] = j3[f"foot_{s}"][2] + 0.07 * H
-    return Skeleton(j3, t3, H, notes), grid, skel
+    return Skeleton(j3, t3, H, notes, back), grid, skel
 
 
 # --------------------------------------------------------------------------- skinning
@@ -532,6 +564,8 @@ class _Moves:
             self.lower[s] = -sign * max(0.0, alpha - 12.0)
         self.leg = float(np.mean([j[f"thigh_{s}"][1] - j[f"foot_{s}"][1] + 0.04 * self.H for s in "lr"]))
         back = j["hips"][2] - min(sk.tips["head_top"][2], j["chest"][2] - 0.08 * self.H)
+        if getattr(sk, "back", None) is not None:      # lying down, a cape goes under the body too
+            back = max(back, j["hips"][2] - sk.back)
         self.back = float(max(0.05 * self.H, back))
         # arms the rig couldn't separate (robe, cape): new motions move them gently
         self.weak = {s: any(n.startswith(f"arm {s}: not separate") for n in sk.notes) for s in "lr"}
@@ -691,6 +725,8 @@ def skeleton_extras(sk, kind: str, **more) -> dict:
         return {k: [float(x) for x in v] for k, v in d.items()}
     out = {"kind": kind, "joints": tolist(sk.joints), "tips": tolist(sk.tips),
            "height": float(sk.height), "notes": list(sk.notes)}
+    if getattr(sk, "back", None) is not None:
+        out["back"] = float(sk.back)
     out.update(more)
     return {"pixel_pipeline_rig": out}
 

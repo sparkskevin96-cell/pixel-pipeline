@@ -22,7 +22,11 @@
    "source": "cmu",
    "description": "Idle",
    "bytes": 2692800,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/140/140_06.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/140/140_06.bvh",
+   "cycle": [
+    1.5,
+    4
+   ]
   },
   "idle alt": {
    "file": "cmu/077/77_02.bvh",
@@ -33,7 +37,11 @@
    "source": "cmu",
    "description": "standing",
    "bytes": 705155,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/077/77_02.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/077/77_02.bvh",
+   "cycle": [
+    1.5,
+    4
+   ]
   },
   "walk": {
    "file": "cmu/035/35_01.bvh",
@@ -44,7 +52,11 @@
    "source": "cmu",
    "description": "walk",
    "bytes": 270282,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/035/35_01.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/035/35_01.bvh",
+   "cycle": [
+    0.8,
+    2
+   ]
   },
   "walk alt": {
    "file": "cmu/002/02_01.bvh",
@@ -55,7 +67,11 @@
    "source": "cmu",
    "description": "walk",
    "bytes": 260091,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/002/02_01.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/002/02_01.bvh",
+   "cycle": [
+    0.8,
+    2
+   ]
   },
   "run": {
    "file": "cmu/009/09_01.bvh",
@@ -110,7 +126,11 @@
    "source": "cmu",
    "description": "Walk Backwards",
    "bytes": 815039,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/143/143_39.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/143/143_39.bvh",
+   "cycle": [
+    0.8,
+    2
+   ]
   },
   "sneak": {
    "file": "cmu/143/143_41.bvh",
@@ -121,7 +141,11 @@
    "source": "cmu",
    "description": "Sneak",
    "bytes": 898184,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/143/143_41.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/143/143_41.bvh",
+   "cycle": [
+    1.0,
+    3
+   ]
   },
   "crouch walk": {
    "file": "cmu/136/136_09.bvh",
@@ -132,7 +156,11 @@
    "source": "cmu",
    "description": "Walk Crouched",
    "bytes": 858754,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/136/136_09.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/136/136_09.bvh",
+   "cycle": [
+    0.8,
+    2.5
+   ]
   },
   "strafe": {
    "file": "cmu/143/143_40.bvh",
@@ -143,7 +171,11 @@
    "source": "cmu",
    "description": "Walk Sideways",
    "bytes": 726122,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/143/143_40.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/143/143_40.bvh",
+   "cycle": [
+    0.8,
+    2
+   ]
   },
   "run strafe": {
    "file": "cmu/127/127_13.bvh",
@@ -451,7 +483,11 @@
    "source": "cmu",
    "description": "Macarena Dance",
    "bytes": 967700,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/143/143_35.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/143/143_35.bvh",
+   "cycle": [
+    1.5,
+    5
+   ]
   },
   "dance twist": {
    "file": "cmu/141/141_12.bvh",
@@ -484,7 +520,11 @@
    "source": "cmu",
    "description": "Walk and carry",
    "bytes": 1126701,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/111/111_36.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/111/111_36.bvh",
+   "cycle": [
+    0.8,
+    2
+   ]
   },
   "limp": {
    "file": "cmu/091/91_16.bvh",
@@ -495,7 +535,11 @@
    "source": "cmu",
    "description": "Limp",
    "bytes": 1442754,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/091/91_16.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/091/91_16.bvh",
+   "cycle": [
+    0.8,
+    2.5
+   ]
   },
   "injured walk": {
    "file": "cmu/139/139_19.bvh",
@@ -506,7 +550,11 @@
    "source": "cmu",
    "description": "Walk Wounded Leg",
    "bytes": 769196,
-   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/139/139_19.bvh"
+   "url": "https://raw.githubusercontent.com/una-dinosauria/cmu-mocap/master/data/139/139_19.bvh",
+   "cycle": [
+    0.8,
+    2.5
+   ]
   },
   "look around": {
    "file": "cmu/139/139_01.bvh",

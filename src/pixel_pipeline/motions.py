@@ -327,7 +327,8 @@ def read_skeleton(rigged):
         tips = {k: np.asarray(v, np.float64) for k, v in saved["tips"].items()}
         if kind == "humanoid":
             from .autorig import Skeleton
-            return kind, Skeleton(joints, tips, saved["height"], saved.get("notes", [])), \
+            return kind, Skeleton(joints, tips, saved["height"], saved.get("notes", []),
+                                  saved.get("back")), \
                 saved.get("weapon", "r")
         from .quadruped import QuadSkeleton
         sk = QuadSkeleton(joints, tips, saved["height"], saved.get("notes", []),

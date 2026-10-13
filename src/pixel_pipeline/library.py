@@ -453,6 +453,7 @@ def add_mocap(ch: Character, bvh_files_or_library_names, progress=None, *, repla
         for it in items:
             say(f"{ch.name}: retargeting {Path(it['path']).name} as {it['name']}…")
             retarget_bvh(it["path"], tmp, it["name"], tmp, start=it["start"], end=it["end"],
+                         cycle=it.get("cycle"),
                          loop=it["loop"], plant_feet=plant_feet, replace=replace)
         from .springs import has_springs, rebake
         if has_springs(tmp):

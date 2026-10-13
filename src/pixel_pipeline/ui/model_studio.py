@@ -241,7 +241,9 @@ class ModelStudio(QMainWindow):
         self.more_anim = QComboBox()
         self.more_anim.setToolTip("Another animation for the character on show (people: cast, "
                                   "shoot, block, thrust, jump, wave, kneel, victory; animals: "
-                                  "bark, howl, jump, eat). Its other animations stay as they are.")
+                                  "bark, howl, jump, eat), or a real motion-captured move (Mocap: "
+                                  "walk, sword slash, dance…; replaces a move of the same name). "
+                                  "Its other animations stay as they are.")
         self.add_anim_btn = QPushButton("Add animation")
         self.add_anim_btn.clicked.connect(self._add_anim_clicked)
         self.add_anim_btn.setEnabled(False)
@@ -405,6 +407,8 @@ class ModelStudio(QMainWindow):
         if ch is not None:
             have = set(self.anim_names)
             self.more_anim.addItems([m for m in _known_motions(ch.kind) if m not in have])
+            if ch.kind != "animal":
+                self.more_anim.addItems([MOCAP + m for m in _mocap_moves()])
         self._busy(False)
 
     def _add_anim_clicked(self, _checked=False):
@@ -419,6 +423,9 @@ class ModelStudio(QMainWindow):
             return
 
         def job(say):
+            if name.startswith(MOCAP):                   # motion capture (mocap.py)
+                from ..library import add_mocap
+                return add_mocap(ch, [name[len(MOCAP):]], progress=say)
             return add_character_animations(ch, [name], progress=say)
         self._run(job, self.open_character)
 
@@ -812,3 +819,16 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+MOCAP = "Mocap: "
+
+
+def _mocap_moves() -> list[str]:
+    """Motion-capture library names whose files are downloaded (mocap_library.json)."""
+    try:
+        from ..mocap import library_index, mocap_root
+        root = mocap_root()
+        return [n for n, e in library_index()["clips"].items() if (root / e["file"]).exists()]
+    except Exception:  # noqa: BLE001 - no index, no mocap
+        return []

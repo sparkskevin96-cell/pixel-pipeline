@@ -422,8 +422,12 @@ def _our_fk(names, parent, rest, local, offset):
 
 
 def retarget(bvh: Bvh, sk, *, start: float | None = None, end: float | None = None,
-             in_place: bool = True, loop: bool | None = None, plant_feet: bool = True) -> tuple[Retargeted, bool]:
-    """BVH -> our humanoid skeleton (autorig.Skeleton). Returns (motion, loops)."""
+             in_place: bool = True, loop: bool | None = None, plant_feet: bool = True,
+             max_shot: float = 2.5, cycle: tuple[float, float] | None = None) -> tuple[Retargeted, bool]:
+    """BVH -> our humanoid skeleton (autorig.Skeleton). Returns (motion, loops).
+    A one-shot longer than max_shot seconds with no end given is cut to its main move
+    (action_window): an 18 s swordplay take squeezed into 8 frames is noise.
+    cycle: (shortest, longest) loop in seconds (default 0.45-3)."""
     from .autorig import NAMES, PARENT
     m = match_joints(bvh)
     notes: list[str] = []
@@ -524,13 +528,16 @@ def retarget(bvh: Bvh, sk, *, start: float | None = None, end: float | None = No
     # ---- the cycle
     loops = False
     if loop is None or loop:
-        cyc = find_cycle(local, hips_pos, bvh.fps, f0, f1)
+        cyc = find_cycle(local, hips_pos, bvh.fps, f0, f1, *(cycle or (0.45, 3.0)))
         if cyc is not None and (loop or cyc[2] < LOOP_OK):
             f0, f1, _ = cyc
             loops = True
         elif loop:
             notes.append("no clean cycle found: the whole range loops with a blended seam")
             loops = True
+    elif end is None and (f1 - f0) / bvh.fps > max_shot:
+        f0, f1 = action_window(local, bvh.fps, f0, f1, max_shot)
+        notes.append(f"one-shot trimmed to {f0 / bvh.fps:.2f}-{f1 / bvh.fps:.2f} s (its main move)")
     sl = slice(f0, f1 + 1)
     local = {n: q[sl] for n, q in local.items()}
     hips_pos = hips_pos[sl]
@@ -561,6 +568,37 @@ def retarget(bvh: Bvh, sk, *, start: float | None = None, end: float | None = No
     return Retargeted(local, offset, bvh.fps, speed, notes), loops
 
 
+def action_window(local, fps, f0, f1, max_s=2.5, lead=0.2):
+    """(first, last) frame of the strongest burst of motion in [f0, f1], at most max_s long:
+    the smoothed joint angular speed peaks, the window grows to where it falls below a quarter
+    of the peak (or the cap), with `lead` seconds of lead-in."""
+    names = [n for n in local if not n.startswith(("hips",))]
+    q = np.stack([local[n][f0:f1 + 1] for n in names], 1)            # (F, J, 4)
+    dots = np.abs(np.sum(q[1:] * q[:-1], -1)).clip(0, 1)
+    speed = np.r_[0.0, (2 * np.arccos(dots)).sum(1)] * fps          # rad / s, all joints
+    k = max(1, int(fps * 0.25))
+    e = np.convolve(speed, np.ones(k) / k, mode="same")
+    n, cap = len(e), max(2, int(max_s * fps))
+    pk = int(np.argmax(e))
+    lo = hi = pk
+    floor = e[pk] * 0.25
+    while hi - lo < cap and (lo > 0 or hi < n - 1):
+        left = e[lo - 1] if lo > 0 else -1
+        right = e[hi + 1] if hi < n - 1 else -1
+        if max(left, right) < floor:
+            break
+        if left >= right:
+            lo -= 1
+        else:
+            hi += 1
+    lo = max(0, lo - int(lead * fps))
+    hi = min(n - 1, hi + int(lead * fps))
+    if hi - lo > cap:
+        c = (lo + hi) // 2
+        lo, hi = max(0, c - cap // 2), min(n - 1, c + cap // 2)
+    return f0 + lo, f0 + hi
+
+
 LOOP_OK = 0.06          # mean pose mismatch (1 - |q.q'| + velocity) below which a clip loops by itself
 
 
@@ -581,12 +619,25 @@ def find_cycle(local, hips_pos, fps, f0, f1, min_s=0.45, max_s=3.0):
         return None
     best = None
     vel = np.diff(Q, axis=0, prepend=Q[:1])
+    # how far the pose wanders inside a window: a still stretch matches itself at any period,
+    # so a window must move about as much as the clip's liveliest stretch of that length
+    D = (1 - np.abs(np.einsum("ijk,ljk->ilj", Q, Q))).mean(-1)              # (T, T)
+    C = np.cumsum(D, axis=1)
+    # weight joints by how much they move in the clip (legs in a sneak, arms in a dance):
+    # a mean over all joints lets the still ones hide a half-stride mismatch
+    mean_q = Q.mean(0)
+    mean_q /= np.linalg.norm(mean_q, axis=-1, keepdims=True) + 1e-12
+    var = (1 - np.abs(np.sum(Q * mean_q, -1))).mean(0)                      # (J,)
+    w = var / (var.sum() + 1e-12)
     for P in range(pmin, pmax + 1):
         a, b = Q[:T - P], Q[P:]
         d = 1 - np.abs(np.sum(a * b, -1))                                    # (S, J)
         dv = np.linalg.norm(vel[:T - P] - vel[P:], axis=-1) * 0.5
         dh = np.abs(hy[:T - P] - hy[P:]) / span * 0.02
-        cost = d.mean(1) + dv.mean(1) + dh
+        cost = (d * w).sum(1) + dv.mean(1) + dh
+        r = np.arange(T - P)
+        spread = (C[r, r + P] - np.where(r > 0, C[r, r - 1], 0)) / (P + 1)
+        cost = np.where(spread >= 0.5 * spread.max(), cost, np.inf)
         s = int(np.argmin(cost))
         c = float(cost[s])
         if best is None or c < best[2] * 0.85 - 0.003:   # a longer period must be clearly better
@@ -715,7 +766,8 @@ def to_clip(motion: Retargeted, name: str, loop: bool, keys: int = 25):
 
 def retarget_bvh(bvh_path, rigged_glb, name: str, out_glb=None, *, start: float | None = None,
                  end: float | None = None, in_place: bool = True, loop: bool | None = None,
-                 plant_feet: bool = True, keys: int = 25, replace: bool = True) -> Path:
+                 plant_feet: bool = True, keys: int = 25, replace: bool = True,
+                 cycle: tuple[float, float] | None = None) -> Path:
     """Append a BVH motion to an auto-rigged humanoid .glb as clip `name`.
     start/end: seconds into the BVH. loop: True = cut the best cycle and close it, False =
     one-shot, None = loop if a clean cycle is found. in_place: remove steady travel (the
@@ -726,7 +778,7 @@ def retarget_bvh(bvh_path, rigged_glb, name: str, out_glb=None, *, start: float 
         raise ValueError("Mocap is retargeted onto the humanoid rig only (this is a four-legged rig)")
     bvh = parse_bvh(bvh_path)
     motion, loops = retarget(bvh, sk, start=start, end=end, in_place=in_place, loop=loop,
-                             plant_feet=plant_feet)
+                             plant_feet=plant_feet, cycle=cycle)
     clip = to_clip(motion, name, loops, keys)
     extras = {"mocap": Path(str(bvh_path)).name if bvh.path else "bvh", "speed": round(motion.speed, 5)}
     return append_clips(rigged_glb, [clip], out_glb, replace=replace, extras={name: extras})
@@ -762,7 +814,7 @@ def resolve(item) -> dict:
     p = Path(str(item))
     if p.suffix.lower() == ".bvh" and p.exists():
         return {"path": p, "name": re.sub(r"[^0-9a-z]+", "_", p.stem.lower()).strip("_"),
-                "start": None, "end": None, "loop": None}
+                "start": None, "end": None, "loop": None, "cycle": None}
     index = library_index()
     clips = index["clips"]
     key = str(item).strip().lower()
@@ -777,4 +829,5 @@ def resolve(item) -> dict:
     if start is None:              # e.g. the CMU conversions' added T-pose first frame
         start = index.get("sources", {}).get(entry.get("source"), {}).get("skip_first")
     return {"path": path, "name": entry.get("clip", re.sub(r"[^0-9a-z]+", "_", key).strip("_")),
-            "start": start, "end": entry.get("end"), "loop": entry.get("loop")}
+            "start": start, "end": entry.get("end"), "loop": entry.get("loop"),
+            "cycle": tuple(entry["cycle"]) if entry.get("cycle") else None}

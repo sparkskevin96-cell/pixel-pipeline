@@ -269,3 +269,13 @@ def test_library_add_mocap(tmp_path, monkeypatch):
     library.add_mocap(ch, [bvh])
     names = [a.name for a in library.load_animated(ch).actions]
     assert names == ["idle", "stroll"]
+
+
+def test_studio_lists_only_downloaded_mocap(tmp_path, monkeypatch):
+    from pixel_pipeline.ui.model_studio import _mocap_moves
+    monkeypatch.setenv("PIXEL_MOCAP", str(tmp_path))
+    assert _mocap_moves() == []
+    entry = library_index()["clips"]["walk"]
+    (tmp_path / entry["file"]).parent.mkdir(parents=True)
+    (tmp_path / entry["file"]).write_text("HIERARCHY")
+    assert "walk" in _mocap_moves() and "sword slash" not in _mocap_moves()
