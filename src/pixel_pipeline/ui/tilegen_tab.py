@@ -146,6 +146,6 @@ class TilegenTab(ToolTab):
         sw = self.swatches[row] if 0 <= row < len(self.swatches) else None
         name = (self.words.text().strip() or self.tileset.terrain).capitalize() + " tiles"
         a = save_tileset(self.tileset, name, swatch=sw, words=self.words.text().strip())
-        self.say(f"Saved {a.name} ({a.folder}). Map exports to godot-tilemap now paint with it.")
+        self.say(f"Saved {a.name} ({a.folder}). The Maps page and its exports now draw with it.")
         self.changed.emit()
         return a

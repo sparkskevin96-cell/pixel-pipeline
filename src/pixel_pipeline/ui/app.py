@@ -260,6 +260,7 @@ class MainWindow(QMainWindow):
                                                  if w is not None and hasattr(w, "changed")])):
             sig.connect(lambda *_: self.assets_tab.refresh())
         self.map_editor.map_saved.connect(lambda *_: self.game_tab.refresh())
+        self.tilegen_tab.changed.connect(self.map_editor.refresh_tiles)
         self.assets_tab.library_changed.connect(self._library_changed)
         self.assets_tab.project_changed.connect(lambda *_: self._library_changed())
 

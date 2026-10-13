@@ -1,6 +1,8 @@
 """Map editor for the World tab: a library of map assets, new maps from templates, a top-down
 paint canvas (height, terrain, props, team starts, fill, undo/redo) and a live isometric
-preview. Maps are saved as "map" assets in the current project (maplib)."""
+preview. Maps are saved as "map" assets in the current project (maplib). The canvas draws with
+the project's generated tilesets (tilegen.MapLook: shores, paths, cliffs, fences) when there
+are any; Tiles picks one per terrain (newest by default, or Built-in) and the map remembers it."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,6 +49,7 @@ class MapCanvas(QWidget):
         super().__init__()
         self.setMouseTracking(True)
         self.zoom = 2
+        self.cell = CELL                     # px per map cell in the picture (a tileset's size)
         self.image: QImage | None = None
         self._down = None
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -65,7 +68,7 @@ class MapCanvas(QWidget):
         self.update()
 
     def cell_at(self, pos) -> tuple[int, int]:
-        k = CELL * self.zoom
+        k = self.cell * self.zoom
         return int(pos.x() // k), int(pos.y() // k)
 
     def paintEvent(self, event):
@@ -107,6 +110,8 @@ class MapEditor(ToolTab):
         super().__init__(status)
         self.project = project
         self.asset: assets.Asset | None = None
+        self.look = None                         # tilegen.MapLook or None (built-in textures)
+        self.tile_combos: dict = {}
         self.doc = maplib.new_map("flat")
         self.edit = maplib.MapEdit(self.doc)
         self.tool = "raise"
@@ -218,9 +223,12 @@ class MapEditor(ToolTab):
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
+        self.tiles_box = QGroupBox("Tiles")
+        self.tiles_form = QFormLayout(self.tiles_box)
         rl.addWidget(self.iso_view, 1)
         rl.addWidget(self.rotate_btn)
         rl.addWidget(self.problems)
+        rl.addWidget(self.tiles_box)
 
         split = QSplitter()
         split.addWidget(left)
@@ -253,6 +261,7 @@ class MapEditor(ToolTab):
             sc.activated.connect(fn)
 
         self._template_changed()
+        self.refresh_tiles()
         self.set_tool("raise")
         self.refresh_library()
         self._redraw()
@@ -309,7 +318,65 @@ class MapEditor(ToolTab):
     def _set_doc(self, doc: maplib.MapDoc) -> None:
         self.doc = doc
         self.edit = maplib.MapEdit(doc)
+        self.refresh_tiles()
         self._changed()
+
+    # ------------------------------------------------------------------ generated tiles
+
+    def refresh_tiles(self) -> None:
+        """The Tiles choices: one row per terrain / cliff / fence / wall the project has saved
+        top-down tilesets for (newest first, then Built-in)."""
+        from ..tilegen import look_options
+        while self.tiles_form.rowCount():
+            self.tiles_form.removeRow(0)
+        self.tile_combos = {}
+        try:
+            opts = look_options(self._project())
+        except Exception:  # noqa: BLE001 - no project yet
+            opts = {}
+        for key, items in sorted(opts.items()):
+            cb = QComboBox()
+            for i, a in enumerate(items):
+                cb.addItem(a.name + (" (newest)" if i == 0 else ""), a.folder.name)
+            cb.addItem("Built-in", "")
+            want = self.doc.tiles.get(key)
+            cb.setCurrentIndex(max(0, cb.findData(want)) if want is not None else 0)
+            cb.currentIndexChanged.connect(lambda _=0, k=key: self._tiles_changed(k))
+            self.tiles_form.addRow(key.title(), cb)
+            self.tile_combos[key] = cb
+        if not opts:
+            note = QLabel("Built-in textures. Tilesets saved in World -> Tile variations draw here.")
+            note.setWordWrap(True)
+            self.tiles_form.addRow(note)
+        self._update_look()
+
+    def choose_tiles(self, key: str, folder_name: str) -> None:
+        """Draw `key` (water, dirt, cliff, fence...) with this saved set ("" = built-in)."""
+        cb = self.tile_combos[key]
+        i = cb.findData(folder_name)
+        if i < 0:
+            raise ValueError(f"No tileset {folder_name!r} for {key}")
+        cb.setCurrentIndex(i)
+
+    def _tiles_changed(self, key: str) -> None:
+        cb = self.tile_combos[key]
+        if cb.currentIndex() == 0:
+            self.doc.tiles.pop(key, None)            # follow the newest set
+        else:
+            self.doc.tiles[key] = cb.currentData()
+        self._update_look()
+        self.set_tool(self.tool)
+        self._changed()
+
+    def _update_look(self) -> None:
+        self.look = maplib.map_look(self.doc, self._project())
+        self.canvas.cell = self.look.tile if self.look is not None else CELL
+        self.canvas.set_zoom(self.canvas.zoom)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh_tiles()                          # sets saved since, another project
+        self._redraw()
 
     # ------------------------------------------------------------------ tools
 
@@ -322,7 +389,8 @@ class MapEditor(ToolTab):
         if tool in ("terrain", "fill"):
             tex = maplib.terrain_textures(16)
             for t in TERRAINS:
-                it = QListWidgetItem(_swatch(tex[t][0]), t.title())
+                sw = self.look.plain(t)[0][0] if self.look is not None else tex[t][0]
+                it = QListWidgetItem(_swatch(sw), t.title())
                 it.setData(Qt.UserRole, t)
                 self.palette.addItem(it)
         elif tool == "props":
@@ -438,7 +506,7 @@ class MapEditor(ToolTab):
         self.map_changed.emit()
 
     def _redraw(self) -> None:
-        self.canvas.show_rgba(maplib.render_topdown(self.doc, CELL, grid=True))
+        self.canvas.show_rgba(maplib.render_topdown(self.doc, self.canvas.cell, grid=True, look=self.look))
         self.undo_btn.setEnabled(bool(self.edit.undo_stack))
         self.redo_btn.setEnabled(bool(self.edit.redo_stack))
         if self.sync:

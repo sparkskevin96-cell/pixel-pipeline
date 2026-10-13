@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -266,3 +267,315 @@ def test_godot_paints_generated_sets(tmp_path):
     assert int(next(x for x in out.splitlines() if x.startswith("COLL ")).split()[1]) >= 2
     corner = _grid(out, "CORNER")
     assert any(c[1] == 1 and c[0] != 14 for row in corner for c in row)   # path edge tiles
+
+
+# --------------------------------------------------------------------------- fewer visible repeats
+
+GPU_SETS = Path(os.environ.get("PIXEL_GPU_TILESETS", r"C:/Users/spark/Pictures/PixelPipeline/"
+                               r"tilegen_gpu_home/Projects/Tilegen GPU/tilesets"))
+
+
+def _repeats(gs: tg.GenTileset) -> dict:
+    """Lattice autocorrelation + blurred repeat contrast of 32x32 tiles of the terrain's full
+    tiles and of its plain base, each placed by the set's own weights (as Godot would)."""
+    full, plain = (255, -1) if gs.kind == "blob" else ((1, 1, 1, 1), (0, 0, 0, 0))
+    out = {}
+    t = gs.tile
+    for name, key in (("terrain", full), ("base", plain)):
+        xys, w = gs.choices()[key]
+        area = tg.fill_area([gs.atlas[r * t:(r + 1) * t, c * t:(c + 1) * t] for c, r in xys], w, 32)
+        assert area.shape == (32 * t, 32 * t, 4)
+        out[name] = (tg.repeat_score(area, t), tg.repeat_contrast(area, t))
+    return out
+
+
+def _old_and_new(terrain: str, raw: np.ndarray, st: assets.Style):
+    """The 2026-10-13 way (no evening out, 1-4 shifted interiors at 0.35) and today's."""
+    pic = tg.seamless(raw)
+    old = tg.build_tileset(terrain, tg.pixel_texture(pic, st.tile, st), picture=pic, style=st,
+                           base=tg.builtin_swatch("grass", st.tile, style=st, even=False).texture, mix=False)
+    pic = tg.even_out(pic)
+    new = tg.build_tileset(terrain, tg.pixel_texture(pic, st.tile, st), picture=pic, style=st,
+                           base=tg.builtin_swatch("grass", st.tile, style=st).texture)
+    return old, new
+
+
+def test_metric_tells_a_copied_tile_from_noise():
+    rng = np.random.default_rng(0)
+    tile = np.dstack([rng.integers(0, 255, (16, 16, 3)), np.full((16, 16), 255)]).astype(np.uint8)
+    copied = tg.fill_area([tile], [1], 16)
+    noise = np.dstack([rng.integers(0, 255, (256, 256, 3)), np.full((256, 256), 255)]).astype(np.uint8)
+    assert tg.repeat_score(copied, 16) > 0.99 and abs(tg.repeat_score(noise, 16)) < 0.05
+    blotch = tile.copy()
+    blotch[:8, :, :3] = 255                                    # half the tile bright: obvious period
+    assert tg.repeat_contrast(tg.fill_area([blotch], [1], 16), 16) > 5 * tg.repeat_contrast(noise, 16)
+
+
+def test_variety_keeps_edges_and_spreads_the_weight():
+    for terrain, t in (("grass", 16), ("stone", 16), ("water", 32)):
+        tex = tg.builtin_swatch(terrain, t).texture
+        vs, w = tg.variety(tex, 8, seed=3)
+        assert len(vs) == len(w) >= 6 and w[0] == 1 and min(w) >= 0.5
+        for v in vs[1:]:
+            for edge in (np.s_[0], np.s_[-1], np.s_[:, 0], np.s_[:, -1]):
+                assert (v[edge] == tex[edge]).all()
+            assert (v != tex).any()
+    lit = tg.builtin_swatch("stone", 16).texture.copy()        # stones lit from the left
+    lit[:, ::4, :3] = 250
+    lit[:, 1::4, :3] = 30
+    assert "flip_h" not in tg.symmetries(lit) and "turn_180" not in tg.symmetries(lit)
+
+
+def test_builtin_base_has_no_blotch():
+    old = tg.builtin_swatch("grass", 16, even=False).texture
+    new = tg.builtin_swatch("grass", 16).texture
+    assert tg.repeat_contrast(tg.fill_area([new], [1]), 16) < 0.75 * tg.repeat_contrast(tg.fill_area([old], [1]), 16)
+
+
+def test_fewer_repeats_on_the_fake_gpu_swatch(comfy):
+    fake, client = comfy
+    st = assets.Style(tile=16)
+    from pixel_pipeline.generate import generate_images
+    (img, _), = generate_images("water", "", client=client, seed=4, aspect=1.0, style_lora="")
+    old, new = _old_and_new("water", np.asarray(img.convert("RGB")), st)
+    o, n = _repeats(old), _repeats(new)
+    print(f"fake swatch, 32x32 tiles  autocorrelation terrain {o['terrain'][0]:.3f} -> "
+          f"{n['terrain'][0]:.3f}, base {o['base'][0]:.3f} -> {n['base'][0]:.3f}; blurred contrast "
+          f"base {o['base'][1]:.2f} -> {n['base'][1]:.2f}")
+    assert n["terrain"][0] < o["terrain"][0] - 0.2 and n["base"][0] < o["base"][0] - 0.15
+    assert n["base"][1] < 0.75 * o["base"][1]
+    sw, = tg.make_swatches("water", count=1, client=client, seed=4, style=st, style_lora="")
+    gs = tg.build_tileset("water", sw.texture, picture=sw.picture, style=st)
+    assert len(gs.choices()[255][0]) >= 6                       # make_swatches evens out by default
+
+
+@pytest.mark.skipif(not GPU_SETS.exists(), reason="no real-GPU tilesets on this machine")
+@pytest.mark.parametrize("terrain", ["water", "dirt", "cliff"])
+def test_fewer_repeats_on_real_gpu_swatches(terrain):
+    raw = GPU_SETS / f"{terrain}-tiles" / "swatch.png"
+    if not raw.exists():
+        pytest.skip(f"no {raw}")
+    old, new = _old_and_new(terrain, np.asarray(Image.open(raw).convert("RGB")), assets.Style(tile=16))
+    o, n = _repeats(old), _repeats(new)
+    print(f"{terrain} GPU swatch  autocorrelation terrain {o['terrain'][0]:.3f} -> {n['terrain'][0]:.3f}, "
+          f"base {o['base'][0]:.3f} -> {n['base'][0]:.3f}; blurred contrast terrain "
+          f"{o['terrain'][1]:.2f} -> {n['terrain'][1]:.2f}, base {o['base'][1]:.2f} -> {n['base'][1]:.2f}")
+    assert n["terrain"][0] < o["terrain"][0] - 0.1 and n["base"][0] < o["base"][0] - 0.15
+    assert n["base"][1] < 0.75 * o["base"][1] and n["terrain"][1] < max(1.0, o["terrain"][1])
+
+
+def test_weights_reach_godot_tiled_and_the_example(tmp_path):
+    gs = tg.build_tileset("dirt", tg.builtin_swatch("dirt", 16).texture,
+                          base=tg.builtin_swatch("grass", 16).texture)
+    files = tg.write_tileset(gs, tmp_path / "d")
+    tres = (tmp_path / "d" / "tileset.tres").read_text(encoding="utf-8")
+    assert "/probability = 0.5" in tres and "/probability = 0.35" not in tres
+    tsx = (tmp_path / "d" / "tileset.tsx").read_text(encoding="utf-8")
+    assert 'probability="0.5"' in tsx and files
+    used = {tuple(c) for c in gs.example.reshape(-1, 2).tolist()}
+    assert len(used & set(gs.choices()[(0, 0, 0, 0)][0])) >= 4      # many base variants in use
+    cliff = tg.build_tileset("cliff", tg.builtin_swatch("cliff", 16).texture,
+                             base=tg.builtin_swatch("grass", 16).texture)
+    t = 16
+    fulls = [cliff.atlas[r * t:(r + 1) * t, c * t:(c + 1) * t] for c, r in cliff.choices()[255][0]]
+    assert len({f.tobytes() for f in fulls}) == len(fulls) > 1        # plateau variants differ
+
+
+# --------------------------------------------------------------------------- maps drawn with the sets
+
+@pytest.fixture
+def look_project():
+    proj = assets.create_project("Looks", type="topdown-rpg")
+    assets.set_current_project("Looks")
+    grass = tg.builtin_swatch("grass", 16).texture
+    for terrain in ("water", "dirt", "cliff", "fence"):
+        gs = tg.build_tileset(terrain, tg.builtin_swatch(terrain, 16).texture, project=proj, base=grass)
+        tg.save_tileset(gs, f"{terrain.title()} one", project=proj)
+    return proj
+
+
+def _look_map():
+    from pixel_pipeline import maplib
+    doc = maplib.new_map("flat", 12, 10, seed=3)
+    d = doc.diorama
+    d.terrain[2:5, 2:6] = "water"
+    d.terrain[7, 1:9] = "dirt"
+    d.height[1:4, 8:] = 5                                         # a plateau: 3 levels up
+    d.props = [("fence", c, 8) for c in range(2, 7)] + [("tree", 10, 8)]
+    doc.spawns = [(0, 0, 9), (1, 11, 0)]
+    return doc
+
+
+def test_map_look_layers_follow_the_autotile_rules(look_project):
+    from pixel_pipeline import maplib
+    doc = _look_map()
+    look = maplib.map_look(doc, look_project)
+    assert set(look.sets) == {"water", "dirt", "cliff", "fence"} and look.props == {"fence"}
+    layers = {ly.key: ly for ly in look.layers(doc.diorama, doc.seed)}
+    assert list(layers) == ["ground", "dirt", "water", "cliff", "fence"]
+    has = {k: {(int(y), int(x)) for y, x in np.argwhere(ly.cells[..., 0] >= 0)} for k, ly in layers.items()}
+    water = {(r, c) for r in range(2, 5) for c in range(2, 6)}
+    assert has["water"] == water - {(3, 3), (3, 4)}               # shores; the middle is plain water
+    g = layers["ground"].cells
+    assert g[2, 2][1] == look.terrains.index("grass") and g[3, 3][1] == look.terrains.index("water")
+    assert {(6, 3), (8, 3), (6, 0), (8, 9)} <= has["dirt"] and not has["dirt"] & {(7, 3), (4, 3), (0, 0)}
+    assert {(3, 8), (3, 11), (2, 8)} <= has["cliff"] and not has["cliff"] & {(4, 9), (2, 10), (0, 0)}
+    fence = layers["fence"].cells
+    assert tuple(fence[8, 2]) == (tg.LE % 4, tg.LE // 4) and tuple(fence[8, 4]) == ((tg.LE | tg.LW) % 4, 2)
+    img = look.render(doc.diorama, doc.seed)
+    assert img.shape == (160, 192, 4) and (img[..., 3] == 255).all()
+    plain = maplib.render_topdown(doc, 16)
+    tiled = maplib.render_topdown(doc, 16, look=look)
+    assert tiled.shape == plain.shape and (tiled != plain).any()
+    # the same cells every time; repainting one cell keeps the others' variants
+    d2 = doc.copy()
+    d2.diorama.terrain[0, 11] = "sand"
+    g2 = look.layers(d2.diorama, doc.seed)[0].cells
+    same = np.ones(g.shape[:2], bool)
+    same[0, 11] = False
+    assert (g2[same] == g[same]).all()
+
+
+def test_map_look_picks_a_set_per_terrain(look_project):
+    from pixel_pipeline import maplib
+    tex = np.zeros((16, 16, 4), np.uint8)
+    tex[..., :3] = (250, 10, 200)
+    tex[..., 3] = 255
+    gs = tg.build_tileset("water", tex, project=look_project, base=tg.builtin_swatch("grass", 16).texture)
+    tg.save_tileset(gs, "Pink water", project=look_project)
+    opts = tg.look_options(look_project)
+    assert [a.name for a in opts["water"]] == ["Pink water", "Water one"]       # newest first
+    doc = _look_map()
+    assert maplib.map_look(doc, look_project).sets["water"].name == "pink-water"
+    doc.tiles["water"] = "water-one"
+    assert maplib.map_look(doc, look_project).sets["water"].name == "water-one"
+    doc.tiles = {"water": "", "dirt": "", "cliff": "", "fence": ""}
+    assert maplib.map_look(doc, look_project) is None                          # all built-in
+    back = maplib.MapDoc.from_dict(json.loads(json.dumps(doc.to_dict())))
+    assert back.tiles == doc.tiles and back.copy().tiles == doc.tiles
+
+
+def _compose_tiled(folder):
+    """The visible tile layers of an exported .tmj, composited from its .tsj images."""
+    tmj = json.loads((folder / "map.tmj").read_text(encoding="utf-8"))
+    sets = []
+    for ref in tmj["tilesets"]:
+        tsj = json.loads((folder / ref["source"]).read_text(encoding="utf-8"))
+        sets.append((ref["firstgid"], tsj, np.asarray(Image.open(folder / tsj["image"]).convert("RGBA"))))
+    t, w, h = tmj["tilewidth"], tmj["width"], tmj["height"]
+    img = Image.new("RGBA", (w * t, h * t))
+    for layer in tmj["layers"]:
+        if layer["type"] != "tilelayer" or not layer.get("visible", True) or layer["name"] == "height":
+            continue
+        for i, gid in enumerate(layer["data"]):
+            if not gid:
+                continue
+            first, tsj, atlas = max((s for s in sets if s[0] <= gid), key=lambda s: s[0])
+            c, r = divmod(gid - first, tsj["columns"])[::-1]
+            tile = Image.fromarray(np.ascontiguousarray(atlas[r * t:(r + 1) * t, c * t:(c + 1) * t]))
+            img.alpha_composite(tile, ((i % w) * t, (i // w) * t))
+    return np.asarray(img).astype(int)
+
+
+def test_exports_match_the_editor_look(look_project, tmp_path):
+    from pixel_pipeline import maplib
+    doc = _look_map()
+    asset = maplib.save_map(doc, "Looks", project=look_project)
+    doc = maplib.load_map(asset)
+    look = maplib.map_look(doc, look_project)
+    want = look.render(doc.diorama, doc.seed).astype(int)
+    preview = np.asarray(Image.open(asset.folder / "preview.png"))
+    assert (preview == maplib.render_topdown(doc, 16, look=look)).all()
+    maplib.export_map(asset, "tiled", tmp_path / "tiled")
+    assert np.abs(_compose_tiled(tmp_path / "tiled") - want).max() <= 1
+    tmj = json.loads((tmp_path / "tiled" / "map.tmj").read_text(encoding="utf-8"))
+    assert [ly["name"] for ly in tmj["layers"]][:3] == ["terrain", "ground", "dirt"]
+    maplib.export_map(asset, "json", tmp_path / "json")
+    colour = np.asarray(Image.open(tmp_path / "json" / "colour.png"))
+    assert (colour == maplib.render_topdown(doc, 16, look=look)).all()
+    out = tmp_path / "tm"
+    maplib.export_map(asset, "godot-tilemap", out)
+    scene = (out / "map.tscn").read_text(encoding="utf-8")
+    for node in ("Terrain", "Dirt", "Water", "Cliff", "Fence", "Height", "Props"):
+        assert f'[node name="{node}" type="TileMapLayer"' in scene, node
+    assert 'path="res://ground.tres"' in scene and "probability" in (out / "ground.tres").read_text()
+    ov = (out / "tilesets" / "water-one" / "overlay.tres").read_text(encoding="utf-8")
+    assert 'path="overlay.png"' in ov and "terrains_peering_bit" in ov
+    props = np.asarray(Image.open(out / "props.png"))
+    k = maplib.PROP_KINDS.index("fence")
+    assert not props[:, k * 16:(k + 1) * 16, 3].any()            # the Fence layer draws fences
+    maplib.export_map(asset, "godot-3d", tmp_path / "g3")
+    top = np.asarray(Image.open(tmp_path / "g3" / "map" / "tex" / "water_top.png").convert("RGBA"))
+    assert (top == look.plain("water")[0][0]).all()
+
+
+COMPOSE = """extends SceneTree
+func _init() -> void:
+\tvar s: Node = load("res://map.tscn").instantiate()
+\tvar t: int = 16
+\tvar img := Image.create(s.get_meta("cols") * t, s.get_meta("rows") * t, false, Image.FORMAT_RGBA8)
+\tfor n in s.get_children():
+\t\tif not (n is TileMapLayer) or n.name in ["Height", "Props"]:
+\t\t\tcontinue
+\t\tvar src: TileSetAtlasSource = n.tile_set.get_source(0)
+\t\tvar atlas: Image = src.texture.get_image()
+\t\tatlas.convert(Image.FORMAT_RGBA8)
+\t\tfor c in n.get_used_cells():
+\t\t\timg.blend_rect(atlas, src.get_tile_texture_region(n.get_cell_atlas_coords(c)), c * t)
+\timg.save_png("res://compose.png")
+\tprint("COMPOSED")
+\ts.free()
+\tquit()
+"""
+
+
+@pytest.mark.skipif(not GODOT, reason="set GODOT_BIN to load the TileMap export in Godot")
+def test_godot_draws_the_map_like_the_editor(look_project, tmp_path):
+    from pixel_pipeline import maplib
+    asset = maplib.save_map(_look_map(), "Looks", project=look_project)
+    doc = maplib.load_map(asset)
+    out = tmp_path / "tm"
+    maplib.export_map(asset, "godot-tilemap", out)
+    (out / "compose.gd").write_text(COMPOSE)
+    run = [GODOT, "--headless", "--path", str(out)]
+    subprocess.run(run + ["--import"], capture_output=True, timeout=300)
+    res = subprocess.run(run + ["-s", "compose.gd"], capture_output=True, text=True, timeout=300)
+    assert "COMPOSED" in res.stdout, res.stdout + res.stderr
+    got = np.asarray(Image.open(out / "compose.png").convert("RGBA")).astype(int)
+    want = maplib.map_look(doc, look_project).render(doc.diorama, doc.seed).astype(int)
+    assert np.abs(got - want)[..., :3].max() <= 1
+
+
+def test_map_editor_paints_with_the_sets(look_project):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from conftest import qt_app
+    qt_app()
+    from pixel_pipeline import maplib
+    from pixel_pipeline.ui.map_editor import MapEditor
+    ed = MapEditor(project=look_project)
+    ed.sync = True
+    try:
+        assert set(ed.tile_combos) == {"water", "dirt", "cliff", "fence"}
+        ed._set_doc(_look_map())
+        assert ed.look is not None and ed.canvas.cell == 16
+        ed.set_zoom(2)
+        assert ed.canvas.width() == 12 * 16 * 2
+        img = ed.canvas.image
+        want = maplib.render_topdown(ed.doc, 16, grid=True, look=ed.look)
+        assert (img.width(), img.height()) == (want.shape[1], want.shape[0])
+        ed.set_tool("terrain")
+        ed.select("water")
+        ed.press(9, 7)
+        ed.release()
+        assert ed.doc.diorama.terrain[7, 9] == "water"
+        ed.choose_tiles("water", "")                               # built-in water
+        assert ed.doc.tiles == {"water": ""} and "water" not in ed.look.sets
+        ed.choose_tiles("fence", "fence-one")
+        assert "fence" not in ed.doc.tiles                         # newest = the default
+        ed.name.setText("Painted")
+        asset = ed.save()
+        assert maplib.load_map(asset).tiles == {"water": ""}
+        ed.open_asset(asset)
+        assert ed.tile_combos["water"].currentData() == ""
+    finally:
+        ed.setParent(None)

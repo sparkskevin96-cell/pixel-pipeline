@@ -49,8 +49,27 @@ def _periodic_noise(size: int, cells: int, rng) -> np.ndarray:
     return rows * (1 - f)[:, None] + rows2 * f[:, None]
 
 
-def builtin_texture(name: str, size: int = 32, seed: int = 0) -> np.ndarray:
-    """A seamless pixel-art texture tile (RGBA) from a built-in terrain."""
+def low_band(field: np.ndarray, cycles: float = 1.5) -> np.ndarray:
+    """The large-scale part of a periodic field (its frequencies up to `cycles` per side; the
+    mean left out)."""
+    h, w = field.shape
+    k2 = (np.fft.fftfreq(h) * h)[:, None] ** 2 + (np.fft.fftfreq(w) * w)[None, :] ** 2
+    low = (k2 <= cycles ** 2).astype(np.float64)
+    low[0, 0] = 0
+    return np.real(np.fft.ifft2(np.fft.fft2(field) * low))
+
+
+def even_level(level: np.ndarray, cycles: float = 1.5) -> np.ndarray:
+    """A periodic field with its lowest frequencies (up to ~`cycles` per side) taken out, same
+    mean and spread: no tile-sized blotch that shows the period when the tile repeats."""
+    out = level - low_band(level, cycles)
+    sd = out.std()
+    return (out - out.mean()) * (level.std() / sd if sd > 1e-9 else 0) + level.mean()
+
+
+def builtin_texture(name: str, size: int = 32, seed: int = 0, even: bool = False) -> np.ndarray:
+    """A seamless pixel-art texture tile (RGBA) from a built-in terrain. even: no large-scale
+    brightness blotch (tilegen's sets; the map renderers keep the old look)."""
     if name not in BUILTIN:
         raise ValueError(f"Unknown built-in terrain '{name}' (use {', '.join(BUILTIN)})")
     ramp_hex, _, style = BUILTIN[name]
@@ -59,6 +78,8 @@ def builtin_texture(name: str, size: int = 32, seed: int = 0) -> np.ndarray:
     big = _periodic_noise(size, max(2, size // 16), rng)
     fine = _periodic_noise(size, max(4, size // 4), rng)
     level = 0.65 * big + 0.35 * fine
+    if even:
+        level = even_level(level)
     dither = np.tile(bayer_matrix(4), (size // 4 + 1, size // 4 + 1))[:size, :size]
     level = np.clip(level + 0.18 * dither, 0, 0.999)
     idx = (1 + level * 3).astype(int)                       # mid tones: ramp[1..3]
@@ -257,8 +278,9 @@ def write_godot_terrain_tileset(ts: TerrainSet, out_tres, atlas_png) -> Path:
     for t in ts.tiles:
         key = f"{t['col']}:{t['row']}/0"
         lines += [f"{key} = 0", f"{key}/terrain_set = 0", f"{key}/terrain = {t['terrain']}"]
-        if t["row"] == 0 and t["col"] > 0:
-            lines.append(f"{key}/probability = 0.35")
+        prob = t.get("probability", 0.35 if t["row"] == 0 and t["col"] > 0 else None)
+        if prob is not None and prob != 1:
+            lines.append(f"{key}/probability = {prob:g}")
         for name, tid in zip(CORNERS, t["corners"]):
             lines.append(f"{key}/terrains_peering_bit/{name} = {tid}")
     # Godot counts empty cells as their own terrain: grass at the map's edge needs tiles whose

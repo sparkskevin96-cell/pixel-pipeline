@@ -176,12 +176,18 @@ wants terse answers and fixes over polish.
     pulled the joint depth back and hunched Knight/Swordsman/Spearman/Paladin 17-31 degrees;
     the spine now stands over the knees (head may tilt 8 degrees); Skeleton.back = back-most
     surface so death lies a cape on the floor, not through it. All library people re-rigged.
-  - Style training on the 4070 8 GB (2026-10-13) does NOT work yet: ComfyUI's TrainLoraNode
-    aborts under dynamic VRAM (backward pass), and with --disable-dynamic-vram --lowvram,
-    offloading, bypass_mode, 512-1024 px, with or without Pixel Art XL, bf16 or native dtype
-    it still asks ~10 GiB at step 0. Kept: TRAIN_FLAGS restart of our hidden ComfyUI, /free
-    before each chunk, bypass_mode, training_dtype "none". Needs a lighter trainer (e.g. kohya
-    sd-scripts / OneTrainer 8 GB SDXL presets: fp8 base, cached latents) or a bigger GPU.
+  - Style training on the 4070 8 GB (2026-10-13): ComfyUI's TrainLoraNode can't fit SDXL (aborts
+    under dynamic VRAM; ~10 GiB at step 0 with every lowvram/offload/bypass/dtype setting). Kevin
+    OK'd kohya sd-scripts (plan A, ~120 MB): C:\AI\kohya = src/sd-scripts-main (GitHub zip) +
+    pylib (pip --target --no-deps: accelerate, diffusers 0.40, bitsandbytes, opencv-headless,
+    small helpers) + run_kohya.py, run by ComfyUI's embedded Python 3.13 (its torch 2.14 cu130).
+    run_kohya.py must touch CUDA before the models load (else "CUDA error: out of memory" on the
+    first GPU op) and needs PYTHONUTF8. styletrain.KohyaBackend (default when find_kohya(); env
+    PIXEL_KOHYA): fp8 base, Pixel Art XL as --base_weights, AdamW8bit, cached latents/TE outputs,
+    unet only, lr 1e-4, chunks continue via --network_weights; stops our ComfyUI first. 1.76 s/
+    step at 1024; GPU ~85 C per 150-step chunk, rests bring it to ~58 C (a continuous run hit
+    88 C at step 685). First style: Default project, 20 assets mirrored, 900 steps, 37 min ->
+    default_style.safetensors (trigger dfltpx), before/after in Pictures/PixelPipeline.
 - **UI kit (2026-10-13)** (`uikit.py` + `ui/uikit_tab.py`, Portraits, cards & effects -> UI kit):
   asset kind "ui" (<project>/ui, in assets.KINDS). Procedural, no GPU: THEMES wood/stone/
   parchment/metal/crystal/sci-fi; Style outline/shading/detail/palette shape every piece; drawn
@@ -205,8 +211,27 @@ wants terse answers and fixes over polish.
   fence/wall = 16 line tiles (mode 2, physics boxes) + base row; side/iso via tilesets.py.
   Interior variants keep a border band (shifted piece of the same picture, same colours).
   Files: .tres, .tsx wang set + example.tmj, json, texture.png, sheet.png/.json (Unity slices it;
-  no clips). maplib godot-tilemap paints with project_textures and copies tilesets/. Godot 4.6.1
-  headless paints blob/line/corner sets right (test). No real-GPU run yet.
+  no clips). Godot 4.6.1 headless paints blob/line/corner sets right (test). Real-GPU run
+  2026-10-13 (Pictures/PixelPipeline/tilegen_gpu_home). Kevin then asked for:
+  - Fewer visible repeats: even_out (swatch picture's lowest frequencies, <=2 cycles/tile, cut;
+    built-ins via maptiles.builtin_texture(even=True): the 16 px grass blotch was the diagonal
+    pattern), variety() = up to 8 interiors per terrain (picture crops, every roll + the flips/
+    turns `symmetries` allows by gradient skew/grain, picked by seam error, max correlation 0.3,
+    a stamp or two at p 0.5) inside a 1 px (32: 2 px) band, equal probability (Godot, Tiled tsx
+    <tile probability>, example maps via cell_noise). build_tileset(mix=False) = the old way.
+    Metric (test): 32x32-tile fill, lattice autocorrelation 0.73-0.90 -> 0.42-0.59, blurred
+    repeat contrast of the base 3.6 -> 0.7 grey levels. rebuild_tileset(asset) redoes a saved set
+    on the CPU from swatch.png. Cliff full tiles now vary (base variants).
+  - Maps drawn with the sets: tilegen.MapLook (newest top-down set per key: map terrain, cliff,
+    fence, wall; MapDoc.tiles {key: folder, "" = built-in}, saved in map.json, editor "Tiles"
+    box). Layers: ground (plain variants; shore cells get the terrain around them), corner sets
+    reach into neighbouring cells (vertex = any adjacent cell), blob shores inside water cells,
+    cliffs where a neighbour is 2+ levels lower, fence/wall props as line tiles (icons hidden).
+    Overlay atlas = transition tile minus its plain base (darkened pixels -> black at 1-k alpha).
+    Editor canvas, preview.png, godot-tilemap (ground.tres + a TileMapLayer per set on
+    tilesets/<name>/overlay.tres), tiled (hidden data layer + look layers), json colour.png,
+    godot-3d tops all match: Godot's composite = look.render within 1 grey level (test).
+    godot-iso and the iso preview still use built-in textures.
 - **App layout (2026-10-12, Kevin: "make it feel intuitive")**: tabs in the order you make a
   game: `1 Characters` (ModelStudio + Character Library list on the left; Kind person/animal/
   object, Size words not numbers, Name, Add to library = rig + all clips x16 + normals at the

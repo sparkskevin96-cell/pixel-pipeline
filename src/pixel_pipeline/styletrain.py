@@ -609,6 +609,218 @@ class ComfyBackend:
         return max(found, key=lambda p: p.stat().st_mtime)
 
 
+# --------------------------------------------------------------------------- kohya backend
+
+KOHYA_ENV = "PIXEL_KOHYA"                    # folder with run_kohya.py + src/sd-scripts-main
+KOHYA_DEFAULT = Path(r"C:\AI\kohya")
+KOHYA_LR = 1e-4                              # kohya's usual SDXL LoRA rate (ComfyUI's node: 5e-4)
+_KSTEP = re.compile(r"steps:\s*\d+%\|[^|]*\|\s*(\d+)/(\d+)\s*\[([^\]]*)\]")
+
+
+def find_kohya() -> Path | None:
+    """The kohya sd-scripts install (2026-10-13: ComfyUI's own trainer doesn't fit SDXL in
+    8 GB; kohya with an fp8 base, cached latents and AdamW8bit does, ~1.8 s/step at 1024)."""
+    env = os.environ.get(KOHYA_ENV)
+    for d in ([Path(env)] if env else []) + [KOHYA_DEFAULT]:
+        if (d / "run_kohya.py").is_file() and (d / "src" / "sd-scripts-main").is_dir():
+            return d
+    return None
+
+
+def parse_kohya(text: str) -> tuple[int, int, float | None, float | None] | None:
+    """Last kohya tqdm line ('steps: 45%|...| 9/20 [.., 1.76s/it, avr_loss=0.03]') ->
+    (step, of, loss, seconds per step)."""
+    found = list(_KSTEP.finditer(text))
+    if not found:
+        return None
+    m = found[-1]
+    inside = m.group(3)
+    loss = re.search(r"avr_loss=([-\d.eE+]+)", inside)
+    rate = re.search(r"([\d.]+)\s*(s/it|it/s)", inside)
+    sps = None
+    if rate:
+        v = float(rate.group(1))
+        sps = v if rate.group(2) == "s/it" else (1 / v if v else None)
+    return int(m.group(1)), int(m.group(2)), float(loss.group(1)) if loss else None, sps
+
+
+class KohyaBackend:
+    """Trains with kohya sd-scripts run by ComfyUI's embedded Python (its torch; the rest
+    from <kohya>/pylib). Models come from the ComfyUI folders; ComfyUI itself is stopped
+    while a chunk runs (both on an 8 GB card don't fit)."""
+
+    def __init__(self, kohya: Path | str | None = None, comfy_root: Path | str | None = None,
+                 python: Path | str | None = None):
+        from .generate import find_comfyui
+        k = Path(kohya) if kohya else find_kohya()
+        if k is None:
+            raise StyleTrainError("kohya sd-scripts isn't installed (see docs/STYLE_TRAINING.md).")
+        self.kohya = k
+        portable = None if comfy_root else find_comfyui()
+        if comfy_root is None and portable is None:
+            raise StyleTrainError("Can't find ComfyUI on this computer (set COMFYUI_DIR): "
+                                  "training uses its Python and models.")
+        self.root = Path(comfy_root) if comfy_root else portable / "ComfyUI"
+        self.python = Path(python) if python else self.root.parent / "python_embeded" / "python.exe"
+        self.data: Path | None = None
+        self._proc = None
+
+    def lora_dir(self) -> Path:
+        return self.root / "models" / "loras"
+
+    def _free_gpu(self) -> None:
+        from .generate import ComfyClient, ComfyUIUnavailable, stop_started_comfyui
+        stop_started_comfyui()
+        try:
+            ComfyClient(timeout=3).ping()
+        except ComfyUIUnavailable:
+            return
+        except Exception:  # noqa: BLE001
+            return
+        raise StyleTrainError("ComfyUI is running (started outside Pixel Pipeline): close it "
+                              "so training has the GPU to itself, then Start again.")
+
+    def prepare(self, dataset: Dataset, name: str, cfg: TrainConfig) -> None:
+        """Pictures + captions into <kohya>/data/<name>/1_<trigger> (kohya's repeats_name)."""
+        self.data = self.kohya / "data" / Path(name).name
+        if self.data.exists():
+            shutil.rmtree(self.data)
+        sub = self.data / f"1_{dataset.trigger}"
+        shutil.copytree(dataset.folder, sub, ignore=shutil.ignore_patterns("*.json"))
+
+    def command(self, cfg: TrainConfig, *, steps: int, seed: int, existing: Path | None,
+                out_dir: Path, prefix: str) -> list[str]:
+        m = self.root / "models"
+        cmd = [str(self.python), "-u", str(self.kohya / "run_kohya.py"), "sdxl_train_network.py",
+               "--pretrained_model_name_or_path", str(m / "checkpoints" / cfg.checkpoint),
+               "--train_data_dir", str(self.data), "--resolution", str(cfg.resolution),
+               "--enable_bucket", "--network_module", "networks.lora",
+               "--network_dim", str(cfg.rank), "--network_alpha", str(max(1, cfg.rank // 2)),
+               "--network_train_unet_only", "--learning_rate", str(KOHYA_LR),
+               "--unet_lr", str(KOHYA_LR), "--optimizer_type", "AdamW8bit",
+               "--lr_scheduler", "constant", "--max_train_steps", str(int(steps)),
+               "--train_batch_size", str(cfg.batch_size), "--cache_latents",
+               "--cache_latents_to_disk", "--cache_text_encoder_outputs",
+               "--cache_text_encoder_outputs_to_disk", "--mixed_precision", "fp16",
+               "--save_precision", "fp16", "--fp8_base", "--sdpa", "--no_half_vae",
+               "--seed", str(int(seed) % 2**31), "--output_dir", str(out_dir),
+               "--output_name", prefix, "--save_model_as", "safetensors",
+               "--max_data_loader_n_workers", "0"]
+        if cfg.gradient_checkpointing:
+            cmd.append("--gradient_checkpointing")
+        vae = next((v for v in sorted((m / "vae").glob("*.safetensors"))
+                    if "sdxl_vae" in v.name.lower() or "fp16-fix" in v.name.lower()), None)
+        if vae is not None:
+            cmd += ["--vae", str(vae)]
+        if _use_base_lora(cfg):
+            cmd += ["--base_weights", str(m / "loras" / cfg.base_lora),
+                    "--base_weights_multiplier", str(cfg.base_lora_strength)]
+        if existing is not None:
+            cmd += ["--network_weights", str(existing)]
+        if cfg.mirror:
+            cmd.append("--flip_aug")
+        return cmd
+
+    def train_chunk(self, name: str, cfg: TrainConfig, *, steps: int, seed: int,
+                    existing: Path | None, prefix: str, on_step: StepFn,
+                    should_abort: AbortFn) -> Path:
+        import subprocess
+        if self.data is None:
+            self.data = self.kohya / "data" / Path(name).name
+        self._free_gpu()
+        out_dir = self.kohya / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{prefix}.safetensors"
+        if out.exists():
+            out.unlink()
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        kw: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "env": env,
+                    "stdin": subprocess.DEVNULL}
+        if os.name == "nt":
+            kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        log = self.kohya / "train.log"
+        proc = subprocess.Popen(self.command(cfg, steps=steps, seed=seed, existing=existing,
+                                             out_dir=out_dir, prefix=prefix), **kw)
+        self._proc = proc
+        tail = ""
+        reader = _Reader(proc.stdout)
+        with open(log, "w", encoding="utf-8", errors="replace") as fh:
+            while True:
+                chunk = reader.read(1.0)
+                if chunk:
+                    fh.write(chunk)
+                    fh.flush()
+                    tail = (tail + chunk)[-20000:]
+                    got = parse_kohya(tail.replace("\r", "\n"))
+                    if got:
+                        on_step(got[0], got[1], got[2], got[3])
+                why = should_abort()
+                if why:
+                    _kill_tree(proc)
+                    raise Interrupted(why)
+                if proc.poll() is not None and reader.done:
+                    break
+        self._proc = None
+        if proc.returncode != 0 or not out.exists():
+            last = [ln for ln in tail.replace("\r", "\n").splitlines() if ln.strip()][-6:]
+            text = "\n".join(last)
+            if "out of memory" in text.lower():
+                raise StyleTrainError("The GPU ran out of memory: set the resolution to 768 "
+                                      "and Start again; it resumes.\n" + text)
+            raise StyleTrainError(f"kohya stopped (exit {proc.returncode}); log: {log}\n{text}")
+        return out
+
+
+class _Reader:
+    """Non-blocking reads of a child's output pipe (a thread fills a queue)."""
+
+    def __init__(self, pipe):
+        import queue
+        import threading
+        self.q: "queue.Queue[bytes | None]" = queue.Queue()
+        self.done = False
+
+        def pump():
+            for data in iter(lambda: pipe.read1(4096) if hasattr(pipe, "read1") else pipe.read(4096), b""):
+                self.q.put(data)
+            self.q.put(None)
+        threading.Thread(target=pump, daemon=True).start()
+
+    def read(self, wait: float) -> str:
+        import queue
+        out = []
+        try:
+            item = self.q.get(timeout=wait)
+            while True:
+                if item is None:
+                    self.done = True
+                    break
+                out.append(item)
+                item = self.q.get_nowait()
+        except queue.Empty:
+            pass
+        return b"".join(out).decode("utf-8", "replace")
+
+
+def _kill_tree(proc) -> None:
+    import subprocess
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        proc.kill()
+    try:
+        proc.wait(10)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def default_backend():
+    """kohya when installed (fits 8 GB), else ComfyUI's built-in trainer."""
+    return KohyaBackend() if find_kohya() is not None else ComfyBackend()
+
+
 def _fake_safetensors(path: Path, meta: dict) -> Path:
     header = json.dumps({"__metadata__": {k: str(v) for k, v in meta.items()}}).encode()
     header += b" " * (-len(header) % 8)
@@ -731,7 +943,7 @@ class StyleTrainer:
     @property
     def backend(self) -> Backend:
         if self._backend is None:
-            self._backend = ComfyBackend()
+            self._backend = default_backend()
         return self._backend
 
     def stop(self) -> None:
@@ -888,7 +1100,7 @@ class StyleTrainer:
 
         def on_step(step, of, loss, sps):
             st_done = base_done + step
-            if loss is not None:
+            if loss is not None and (not st.losses or st.losses[-1][0] != st_done):
                 st.losses.append([st_done, round(float(loss), 5)])
             if sps:
                 st.sec_per_step = float(sps)

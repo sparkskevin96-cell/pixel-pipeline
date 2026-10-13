@@ -15,6 +15,11 @@ torch); every renderer here draws unknown kinds as a plain box.
 
 The HD-2D board (hd2d.board.gd) draws the new prop kinds through res://map/props3d.gd
 (`install_board_extras(project)` writes it); without that file it draws boxes.
+
+Generated tilesets (tilegen.py): `map_look(doc, project)` = the project's saved top-down sets
+(MapDoc.tiles picks one per terrain / cliff / fence / wall: {key: set folder, "" = built-in},
+newest otherwise). The editor, previews, godot-tilemap, tiled, json (colour.png) and godot-3d
+(top textures) all draw with it; terrains no set covers keep the built-in textures.
 """
 from __future__ import annotations
 
@@ -51,6 +56,7 @@ class MapDoc:
     spawns: list = field(default_factory=list)       # [(team, col, row)]
     template: str = "flat"
     seed: int = 0
+    tiles: dict = field(default_factory=dict)        # generated tileset per key (map_look)
 
     @property
     def cols(self) -> int:
@@ -64,13 +70,15 @@ class MapDoc:
         d = self.diorama
         nd = Diorama(d.cols, d.rows, d.height.copy(), d.terrain.copy(), list(d.props), [],
                      d.water_level, d.name, d.sea)
-        return MapDoc(nd, list(self.spawns), self.template, self.seed)
+        return MapDoc(nd, list(self.spawns), self.template, self.seed, dict(self.tiles))
 
     def to_dict(self) -> dict:
         out = self.diorama.to_dict()
         out["spawns"] = [{"team": t, "col": c, "row": r} for t, c, r in self.spawns]
         out["template"] = self.template
         out["seed"] = self.seed
+        if self.tiles:
+            out["tiles"] = dict(self.tiles)
         return out
 
     @classmethod
@@ -82,7 +90,8 @@ class MapDoc:
         spawns = [(int(s["team"]), int(s["col"]), int(s["row"])) for s in data.get("spawns", [])]
         if not spawns:      # an old map.json with units: their cells are the starts
             spawns = [(int(u.get("team", 0)), int(u["col"]), int(u["row"])) for u in data.get("units", [])]
-        return cls(d, spawns, data.get("template", "flat"), int(data.get("seed", 0)))
+        return cls(d, spawns, data.get("template", "flat"), int(data.get("seed", 0)),
+                   {str(k): str(v) for k, v in (data.get("tiles") or {}).items()})
 
     def prop_at(self, c: int, r: int):
         for p in self.diorama.props:
@@ -975,23 +984,43 @@ def _shade(rgb: np.ndarray, k) -> np.ndarray:
     return np.clip(rgb.astype(np.float32) * k, 0, 255).astype(np.uint8)
 
 
+def map_look(doc: MapDoc | None = None, project: assets.Project | None = None, tile: int | None = None):
+    """The project's generated tilesets as this map uses them (tilegen.MapLook), or None."""
+    from .tilegen import MapLook
+    try:
+        return MapLook.for_project(project, doc.tiles if doc is not None else None, tile)
+    except Exception:  # noqa: BLE001 - no project / unreadable sets: built-in textures
+        return None
+
+
 def render_topdown(doc: MapDoc, cell: int = 16, *, spawns: bool = True, props: bool = True,
-                   grid: bool = False) -> np.ndarray:
-    """Top-down colour picture: terrain textures, lighter when higher, cliff shadows, props
-    and team starts. (rows*cell, cols*cell, 4)."""
+                   grid: bool = False, look=None) -> np.ndarray:
+    """Top-down colour picture: terrain textures (or a tilegen.MapLook's tiles: shores, paths,
+    cliffs, fences), lighter when higher, cliff shadows, props and team starts.
+    (rows*cell, cols*cell, 4)."""
     d = doc.diorama
     tex = terrain_textures(cell)
     img = np.zeros((d.rows * cell, d.cols * cell, 4), np.uint8)
     h = d.height.astype(int)
+    tiled = None
+    if look is not None:
+        tiled = look.render(d, doc.seed)
+        if look.tile != cell:
+            tiled = np.asarray(Image.fromarray(tiled).resize((d.cols * cell, d.rows * cell), Image.NEAREST))
+    cliffs = look is not None and "cliff" in look.sets
     for r in range(d.rows):
         for c in range(d.cols):
-            top = tex.get(d.terrain[r, c], tex["grass"])[0]
             k = 0.74 + 0.06 * min(h[r, c], 8)
-            tile = top.copy()
+            if tiled is not None:
+                tile = tiled[r * cell:(r + 1) * cell, c * cell:(c + 1) * cell].copy()
+            else:
+                tile = tex.get(d.terrain[r, c], tex["grass"])[0].copy()
             tile[..., :3] = _shade(tile[..., :3], k)
             # shadow from a higher neighbour above/left (light from the upper left)
             for dc, dr, sl in ((0, -1, (slice(0, None), slice(None))), (-1, 0, (slice(None), slice(0, None)))):
                 nc, nr = c + dc, r + dr
+                if cliffs and 0 <= nc < d.cols and 0 <= nr < d.rows and h[nr, nc] - h[r, c] >= 2:
+                    continue                                  # the cliff tiles draw that drop
                 if 0 <= nc < d.cols and 0 <= nr < d.rows and h[nr, nc] > h[r, c]:
                     band = min(cell // 2, (h[nr, nc] - h[r, c]) * max(1, cell // 8))
                     if dr:
@@ -1001,6 +1030,8 @@ def render_topdown(doc: MapDoc, cell: int = 16, *, spawns: bool = True, props: b
             # a lit edge where this cell drops toward the viewer (lower neighbour below/right)
             for dc, dr in ((0, 1), (1, 0)):
                 nc, nr = c + dc, r + dr
+                if cliffs and 0 <= nc < d.cols and 0 <= nr < d.rows and h[r, c] - h[nr, nc] >= 2:
+                    continue
                 if 0 <= nc < d.cols and 0 <= nr < d.rows and h[nr, nc] < h[r, c]:
                     if dr:
                         tile[-1:, :, :3] = _shade(tile[-1:, :, :3], 0.45)
@@ -1012,8 +1043,9 @@ def render_topdown(doc: MapDoc, cell: int = 16, *, spawns: bool = True, props: b
             img[r * cell:(r + 1) * cell, c * cell:(c + 1) * cell] = tile
     if props:
         icons: dict = {}
+        drawn = look.props if look is not None else set()
         for kind, c, r in d.props:
-            if not (0 <= c < d.cols and 0 <= r < d.rows):
+            if not (0 <= c < d.cols and 0 <= r < d.rows) or kind in drawn:
                 continue
             ic = icons.get(kind)
             if ic is None:
@@ -1208,7 +1240,8 @@ def save_map(doc: MapDoc, name: str | None = None, *, project: assets.Project | 
                 p.unlink()
             except OSError:
                 pass
-    Image.fromarray(render_topdown(doc, 16)).save(folder / "preview.png")
+    look = map_look(doc, proj)
+    Image.fromarray(render_topdown(doc, look.tile if look else 16, look=look)).save(folder / "preview.png")
     iso = render_iso(doc, 0, 32 if tile >= 32 else 16)
     Image.fromarray(iso).save(folder / "iso_preview.png")
     Image.fromarray(_fit(iso, 160, 120)).save(folder / "thumb.png")
@@ -1524,11 +1557,16 @@ def install_board_extras(project_dir, tile: int = 32) -> list[Path]:
 
 # --------------------------------------------------------------------------- exports
 
-def _export_godot3d(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
+def _export_godot3d(doc: MapDoc, out: Path, style: assets.Style, look=None) -> list[Path]:
     from .hd2d import make_hd2d
     d = doc.copy().diorama
     d.units = []
     files = make_hd2d(out, {}, d, name=d.name, iso=False, tile_px=style.tile, ppu=style.ppu)
+    if look is not None:                  # generated sets: their plain tile tops the terrain's blocks
+        for name in set(d.terrain.ravel()):
+            p = out / "map" / "tex" / f"{name}_top.png"
+            if p.exists() and (name in look.sets or any(s.base == name for s in look.sets.values())):
+                Image.fromarray(np.ascontiguousarray(look.plain(name)[0][0])).save(p)
     (out / "map" / "map.json").write_text(json.dumps(doc.to_dict(), indent=1), encoding="utf-8")
     files += install_board_extras(out, style.tile)
     for rel, text in (("view.tscn", VIEW_TSCN), ("view.gd", VIEW_GD),
@@ -1583,12 +1621,36 @@ def _height_tiles(levels: int, cell: int) -> np.ndarray:
     return out
 
 
+def _look_files(look, out: Path) -> dict:
+    """Copy the look's sets to out/tilesets/<name>/ (+ overlay.png / overlay.tres: the set as
+    drawn over the ground layer, same atlas coords, peering bits and probabilities)."""
+    res = {}
+    for s in look.sets.values():
+        src, dst = s.asset.folder, out / "tilesets" / s.name
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in ("tileset.png", "tileset.tres", "tileset.tsx", "tileset.json"):
+            if (src / f).exists():
+                shutil.copy2(src / f, dst / f)
+        Image.fromarray(s.overlay).save(dst / "overlay.png")
+        tres = dst / "overlay.tres"
+        if (dst / "tileset.tres").exists():
+            text = (dst / "tileset.tres").read_text(encoding="utf-8")
+            tres.write_text(text.replace('path="tileset.png"', 'path="overlay.png"'), encoding="utf-8")
+        else:
+            tres.write_text("\n".join(_tres_atlas("overlay.png", s.tile, s.tile, [])), encoding="utf-8")
+        res[s.key] = [dst / f for f in ("tileset.png", "tileset.tres", "tileset.tsx", "tileset.json",
+                                         "overlay.png", "overlay.tres") if (dst / f).exists()]
+    return res
+
+
 def _export_tilemap(doc: MapDoc, out: Path, style: assets.Style,
-                    project: assets.Project | None = None) -> list[Path]:
+                    project: assets.Project | None = None, look=None) -> list[Path]:
     """Top-down TileMap: the maptiles terrain TileSet (terrain painting works in the editor),
     a Height layer (custom data "level"), a Props layer (custom data "kind"), Marker2D starts.
     Terrains the project has a generated tileset for (tilegen.py) paint with its texture; those
-    tilesets are copied to tilesets/<name>/ too."""
+    tilesets are copied to tilesets/<name>/ too. With a look (map_look) the scene is what the
+    map editor shows: Terrain = ground.tres (plain tiles by weight), then a layer per set
+    (shores, paths, cliffs, fences) on its tilesets/<name>/overlay.tres."""
     from .maptiles import Terrain, build_terrain_set, write_godot_terrain_tileset
     from .tilegen import project_textures, project_tilesets
     d = doc.diorama
@@ -1617,6 +1679,24 @@ def _export_tilemap(doc: MapDoc, out: Path, style: assets.Style,
             k = used.index(d.terrain[r, c])
             ax, ay = (int(rng.integers(4)), 0) if k == 0 else (14, k)
             tcells.append((c, r, 0, ax, ay, 0))
+    look_layers, ext = [], [("TileSet", "res://terrain.tres", "1_terrain")]
+    if look is not None:
+        layers = look.layers(d, doc.seed)
+        Image.fromarray(look.ground_atlas).save(out / "ground.png")
+        gtiles = [(j, i, {"probability": f"{w:g}"} if w != 1 else {})
+                  for i, name in enumerate(look.terrains) for j, w in enumerate(look._plain[name][1])]
+        (out / "ground.tres").write_text("\n".join(_tres_atlas("ground.png", T, T, gtiles)), encoding="utf-8")
+        files += [out / "ground.png", out / "ground.tres"]
+        ext = [("TileSet", "res://ground.tres", "1_terrain")]
+        tcells = [(c, r, 0, *map(int, layers[0].cells[r, c]), 0) for r in range(d.rows) for c in range(d.cols)]
+        copied = _look_files(look, out)
+        for i, layer in enumerate(layers[1:]):
+            cells = [(c, r, 0, int(x), int(y), 0) for (r, c), (x, y) in
+                     ((rc, layer.cells[rc]) for rc in np.ndindex(d.rows, d.cols)) if x >= 0]
+            rid = f"{i + 4}_{layer.key}"
+            ext.append(("TileSet", f"res://tilesets/{layer.set.name}/overlay.tres", rid))
+            look_layers.append((layer.key.title(), rid, cells))
+            files += copied.get(layer.key, [])
     levels = max(MAX_LEVEL + 1, int(d.height.max()) + 1)
     Image.fromarray(_height_tiles(levels, T)).save(out / "heights.png")
     (out / "heights.tres").write_text("\n".join(_tres_atlas(
@@ -1624,21 +1704,26 @@ def _export_tilemap(doc: MapDoc, out: Path, style: assets.Style,
         encoding="utf-8")
     hcells = [(c, r, 0, max(0, int(d.height[r, c])), 0, 0) for r in range(d.rows) for c in range(d.cols)]
     kinds = list(PROP_KINDS) + sorted({k for k, _, _ in d.props} - set(PROP_KINDS))
-    Image.fromarray(_icon_strip(kinds, T)).save(out / "props.png")
+    strip = _icon_strip(kinds, T)
+    for k in (look.props if look is not None else ()):  # drawn by their own layer: data only
+        strip[:, kinds.index(k) * T:(kinds.index(k) + 1) * T] = 0
+    Image.fromarray(strip).save(out / "props.png")
     (out / "props.tres").write_text("\n".join(_tres_atlas(
         "props.png", T, T, [(i, 0, {"custom_data_0": f'"{k}"', "custom_data_1": str(k in BLOCKING_PROPS).lower()})
                             for i, k in enumerate(kinds)], [("kind", 4), ("blocking", 1)])), encoding="utf-8")
     pcells = [(c, r, 0, kinds.index(k), 0, 0) for k, c, r in d.props]
     files += [out / "heights.png", out / "heights.tres", out / "props.png", out / "props.tres"]
-    lines = ['[gd_scene load_steps=4 format=3]', "",
-             '[ext_resource type="TileSet" path="res://terrain.tres" id="1_terrain"]',
-             '[ext_resource type="TileSet" path="res://heights.tres" id="2_heights"]',
-             '[ext_resource type="TileSet" path="res://props.tres" id="3_props"]', "",
-             f'[node name="{_node_name(d.name)}" type="Node2D"]',
-             f'metadata/cols = {d.cols}', f'metadata/rows = {d.rows}', f'metadata/level = {LEVEL}', "",
-             '[node name="Terrain" type="TileMapLayer" parent="."]',
-             f"tile_map_data = {_tilemap_data(tcells)}", 'tile_set = ExtResource("1_terrain")', "",
-             '[node name="Height" type="TileMapLayer" parent="."]',
+    ext += [("TileSet", "res://heights.tres", "2_heights"), ("TileSet", "res://props.tres", "3_props")]
+    lines = [f'[gd_scene load_steps={len(ext) + 1} format=3]', ""]
+    lines += [f'[ext_resource type="{t}" path="{p}" id="{i}"]' for t, p, i in ext]
+    lines += ["", f'[node name="{_node_name(d.name)}" type="Node2D"]',
+              f'metadata/cols = {d.cols}', f'metadata/rows = {d.rows}', f'metadata/level = {LEVEL}', "",
+              '[node name="Terrain" type="TileMapLayer" parent="."]',
+              f"tile_map_data = {_tilemap_data(tcells)}", 'tile_set = ExtResource("1_terrain")', ""]
+    for name, rid, cells in look_layers:
+        lines += [f'[node name="{name}" type="TileMapLayer" parent="."]',
+                  f"tile_map_data = {_tilemap_data(cells)}", f'tile_set = ExtResource("{rid}")', ""]
+    lines += ['[node name="Height" type="TileMapLayer" parent="."]',
              f"tile_map_data = {_tilemap_data(hcells)}", 'tile_set = ExtResource("2_heights")', "",
              '[node name="Props" type="TileMapLayer" parent="."]',
              f"tile_map_data = {_tilemap_data(pcells)}", 'tile_set = ExtResource("3_props")', "",
@@ -1658,7 +1743,7 @@ def _export_tilemap(doc: MapDoc, out: Path, style: assets.Style,
             for f in ("tileset.png", "tileset.tres", "tileset.tsx", "tileset.json"):
                 if (a.folder / f).exists():
                     files.append(Path(shutil.copy2(a.folder / f, dst / f)))
-    return files
+    return sorted(set(files))
 
 
 def _node_name(name: str) -> str:
@@ -1766,9 +1851,11 @@ def _tsj(name: str, png: str, img: np.ndarray, T: int, props: list[list[dict]]) 
             "tiles": [{"id": i, "properties": p} for i, p in enumerate(props)]}
 
 
-def _export_tiled(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
+def _export_tiled(doc: MapDoc, out: Path, style: assets.Style, look=None) -> list[Path]:
     """Tiled .tmj (orthogonal): terrain layer, height layer (gid = level tile, + "level"
-    property per tile), props and spawns object layers; tilesets as .tsj + .png."""
+    property per tile), props and spawns object layers; tilesets as .tsj + .png. With a look
+    (map_look) the terrain layer is data only (hidden) and the tiles the map editor shows come
+    above it: "ground" (look_ground.tsj, tile probabilities) + a layer per set (look_<key>)."""
     d = doc.diorama
     T = style.tile
     out.mkdir(parents=True, exist_ok=True)
@@ -1791,6 +1878,27 @@ def _export_tiled(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
         files += [out / f"{name}.png", p]
         first[name] = gid
         gid += img.shape[1] // T
+    look_layers = []
+    if look is not None:
+        for layer in look.layers(d, doc.seed):
+            name = f"look_{layer.key}"
+            img = layer.atlas
+            cols_ = img.shape[1] // T
+            ts = _tsj(name, f"{name}.png", img, T, [])
+            ts.update(tilecount=cols_ * (img.shape[0] // T), columns=cols_, tiles=[])
+            weights = ([(j, i, w) for i, n in enumerate(look.terrains) for j, w in enumerate(look._plain[n][1])]
+                       if layer.set is None else
+                       [(c, r, w) for xys, ws in layer.set.choices.values() for (c, r), w in zip(xys, ws)])
+            ts["tiles"] = [{"id": r * cols_ + c, "probability": w} for c, r, w in weights if w != 1]
+            Image.fromarray(img).save(out / f"{name}.png")
+            (out / f"{name}.tsj").write_text(json.dumps(ts, indent=1), encoding="utf-8")
+            files += [out / f"{name}.png", out / f"{name}.tsj"]
+            sets.append((name, img, []))
+            first[name] = gid
+            data = [0 if x < 0 else gid + int(y) * cols_ + int(x)
+                    for x, y in layer.cells.reshape(-1, 2).tolist()]
+            gid += ts["tilecount"]
+            look_layers.append({"name": "ground" if layer.set is None else layer.key, "data": data})
     tdata = [first["terrain"] + TERRAINS.index(d.terrain[r, c]) for r in range(d.rows) for c in range(d.cols)]
     hdata = [first["heights"] + max(0, int(d.height[r, c])) for r in range(d.rows) for c in range(d.cols)]
     oid = 1
@@ -1812,7 +1920,8 @@ def _export_tiled(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
     base = {"x": 0, "y": 0, "opacity": 1, "visible": True}
     tmj = {"type": "map", "version": "1.10", "tiledversion": "1.10.2", "orientation": "orthogonal",
            "renderorder": "right-down", "width": d.cols, "height": d.rows, "tilewidth": T, "tileheight": T,
-           "infinite": False, "compressionlevel": -1, "nextlayerid": 5, "nextobjectid": oid,
+           "infinite": False, "compressionlevel": -1, "nextlayerid": 5 + len(look_layers),
+           "nextobjectid": oid,
            "properties": [{"name": "name", "type": "string", "value": d.name},
                           {"name": "level_height", "type": "float", "value": LEVEL},
                           {"name": "water_level", "type": "float", "value": d.water_level},
@@ -1820,7 +1929,9 @@ def _export_tiled(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
            "tilesets": [{"firstgid": first[n], "source": f"{n}.tsj"} for n, _, _ in sets],
            "layers": [
                {"id": 1, "name": "terrain", "type": "tilelayer", "width": d.cols, "height": d.rows,
-                "data": tdata, **base},
+                "data": tdata, **base, **({"visible": False} if look_layers else {})},
+               *[{"id": 5 + i, "name": ll["name"], "type": "tilelayer", "width": d.cols,
+                  "height": d.rows, "data": ll["data"], **base} for i, ll in enumerate(look_layers)],
                {"id": 2, "name": "height", "type": "tilelayer", "width": d.cols, "height": d.rows,
                 "data": hdata, **base, "opacity": 0.5,
                 "properties": [{"name": "meaning", "type": "string",
@@ -1837,7 +1948,7 @@ def _export_tiled(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
 HEIGHT_SCALE = 4096
 
 
-def _export_json(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
+def _export_json(doc: MapDoc, out: Path, style: assets.Style, look=None) -> list[Path]:
     """map.json + height.png (16-bit: value = (level - offset) * scale) + terrain.png (8-bit
     index into the terrains list) + colour.png (top-down) + props.json + legend.json."""
     d = doc.diorama
@@ -1848,7 +1959,7 @@ def _export_json(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
     Image.fromarray(h16).save(out / "height.png")
     idx = np.vectorize(TERRAINS.index)(d.terrain).astype(np.uint8)
     Image.fromarray(idx, "L").save(out / "terrain.png")
-    Image.fromarray(render_topdown(doc, style.tile)).save(out / "colour.png")
+    Image.fromarray(render_topdown(doc, style.tile, look=look)).save(out / "colour.png")
     (out / "map.json").write_text(json.dumps(doc.to_dict(), indent=1), encoding="utf-8")
     (out / "props.json").write_text(json.dumps(
         [{"kind": k, "col": c, "row": r, "level": int(d.height[r, c]), "blocking": k in BLOCKING_PROPS}
@@ -1857,6 +1968,7 @@ def _export_json(doc: MapDoc, out: Path, style: assets.Style) -> list[Path]:
         "cols": d.cols, "rows": d.rows, "terrains": list(TERRAINS), "walkable": sorted(WALKABLE),
         "height_scale": scale, "height_offset": lo, "level_tiles": LEVEL, "tile_px": style.tile,
         "spawns": [{"team": t, "col": c, "row": r} for t, c, r in doc.spawns],
+        "tilesets": {k: s.name for k, s in look.sets.items()} if look is not None else {},
         "files": {"height.png": "16-bit grey, level = value / height_scale + height_offset",
                   "terrain.png": "8-bit, terrain = terrains[value]", "colour.png": "top-down picture",
                   "props.json": "props with their cell and level"}}, indent=1), encoding="utf-8")
@@ -1880,10 +1992,13 @@ def export_map(asset, target: str, out_dir) -> list[Path]:
         style = assets.current_project().style
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    proj = _project_of(asset) if isinstance(asset, assets.Asset) else None
+    look = map_look(doc, proj, style.tile) if target != "godot-iso" else None
     if target == "godot-tilemap":
-        proj = _project_of(asset) if isinstance(asset, assets.Asset) else None
-        return _export_tilemap(doc, out, style, proj)
-    return _EXPORTERS[target](doc, out, style)
+        return _export_tilemap(doc, out, style, proj, look)
+    if target == "godot-iso":
+        return _export_iso(doc, out, style)
+    return _EXPORTERS[target](doc, out, style, look)
 
 
 # --------------------------------------------------------------------------- project types

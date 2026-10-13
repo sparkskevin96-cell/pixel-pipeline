@@ -426,3 +426,89 @@ def test_dialog_dry_run(proj, tmp_path):
     dlg._show_record()
     assert dlg.test_btn.isEnabled()
     dlg.setParent(None)
+
+
+# ---- kohya backend (fake kohya: a run_kohya.py that prints kohya's progress and writes the file)
+
+FAKE_KOHYA = r'''
+import sys, time, pathlib
+a = sys.argv
+out = pathlib.Path(a[a.index("--output_dir") + 1]) / (a[a.index("--output_name") + 1] + ".safetensors")
+n = int(a[a.index("--max_train_steps") + 1])
+for i in range(1, n + 1):
+    sys.stdout.write(f"\rsteps: {100 * i // n}%|##| {i}/{n} [00:0{i}<00:00, 1.76s/it, avr_loss=0.0{i}]")
+    sys.stdout.flush()
+    time.sleep(0.05)
+if "--slow" not in " ".join(a):
+    out.write_bytes(b"lora")
+print("\nmodel saved.")
+'''
+
+
+def _fake_kohya(tmp_path):
+    import sys
+    k = tmp_path / "kohya"
+    (k / "src" / "sd-scripts-main").mkdir(parents=True)
+    (k / "run_kohya.py").write_text(FAKE_KOHYA)
+    root = tmp_path / "ComfyUI"
+    for d in ("checkpoints", "loras", "vae"):
+        (root / "models" / d).mkdir(parents=True)
+    (root / "models" / "vae" / "sdxl_vae.safetensors").write_bytes(b"v")
+    return S.KohyaBackend(k, root, python=sys.executable)
+
+
+def test_parse_kohya_progress():
+    text = "steps:  45%|####5     | 9/20 [00:16<00:19,  1.76s/it, avr_loss=0.0319]"
+    assert S.parse_kohya(text) == (9, 20, 0.0319, 1.76)
+    assert S.parse_kohya("loading U-Net") is None
+
+
+def test_kohya_command_continues_and_stacks_pixel_lora(tmp_path):
+    b = _fake_kohya(tmp_path)
+    b.data = tmp_path / "data"
+    cmd = b.command(S.TrainConfig(resolution=768), steps=150, seed=3,
+                    existing=tmp_path / "ck.safetensors", out_dir=tmp_path / "out", prefix="p")
+    j = " ".join(cmd)
+    assert "--fp8_base" in cmd and "AdamW8bit" in cmd and "--resolution 768" in j
+    assert "--network_weights" in cmd and "pixel-art-xl.safetensors" in j and "sdxl_vae" in j
+    cmd = b.command(S.TrainConfig(base_lora="none"), steps=1, seed=0, existing=None,
+                    out_dir=tmp_path, prefix="p")
+    assert "--base_weights" not in cmd and "--network_weights" not in cmd
+
+
+def test_kohya_chunk_reports_steps_and_returns_the_lora(tmp_path, monkeypatch):
+    import pixel_pipeline.generate as gen
+    monkeypatch.setattr(gen, "stop_started_comfyui", lambda: None)
+    monkeypatch.setattr(S.KohyaBackend, "_free_gpu", lambda self: None)
+    b = _fake_kohya(tmp_path)
+    ds_dir = tmp_path / "ds"
+    ds_dir.mkdir()
+    (ds_dir / "000_a.png").write_bytes(b"x")
+    (ds_dir / "000_a.txt").write_text("cap")
+    b.prepare(S.Dataset(ds_dir, 1, 1, "trig", "sig"), "pp_style/proj", S.TrainConfig())
+    assert (b.data / "1_trig" / "000_a.txt").exists()
+    seen = []
+    out = b.train_chunk("pp_style/proj", S.TrainConfig(), steps=5, seed=1, existing=None,
+                        prefix="proj_c0", on_step=lambda *a: seen.append(a),
+                        should_abort=lambda: None)
+    assert out.read_bytes() == b"lora" and seen[-1][:2] == (5, 5) and seen[-1][3] == 1.76
+
+
+def test_kohya_chunk_stops_when_too_hot(tmp_path, monkeypatch):
+    monkeypatch.setattr(S.KohyaBackend, "_free_gpu", lambda self: None)
+    b = _fake_kohya(tmp_path)
+    b.data = tmp_path / "data"
+    with pytest.raises(S.Interrupted, match="°C"):
+        b.train_chunk("pp_style/proj", S.TrainConfig(), steps=200, seed=1, existing=None,
+                      prefix="p", on_step=lambda *a: None, should_abort=lambda: "GPU reached 88 °C")
+
+
+def test_default_backend_prefers_kohya(tmp_path, monkeypatch):
+    monkeypatch.setenv(S.KOHYA_ENV, str(tmp_path / "nowhere"))
+    monkeypatch.setattr(S, "KOHYA_DEFAULT", tmp_path / "nowhere2")
+    assert S.find_kohya() is None
+    k = tmp_path / "k"
+    (k / "src" / "sd-scripts-main").mkdir(parents=True)
+    (k / "run_kohya.py").write_text("")
+    monkeypatch.setenv(S.KOHYA_ENV, str(k))
+    assert S.find_kohya() == k
