@@ -27,7 +27,7 @@ PRESETS = {
     "godot-2d": "Godot 2D (SpriteFrames .tres + facing script)",
     "godot-hd2d": "Godot HD-2D unit (for the tactics project)",
     "unity": "Unity (sliced sprite sheet + .meta)",
-    "gamemaker": "GameMaker (one _stripN PNG per animation)",
+    "gamemaker": "GameMaker (one _stripN PNG per animation + sprite_add loader)",
     "aseprite": "Aseprite (.aseprite with tags)",
     "generic": "Generic (PNG + JSON + single frames)",
 }
@@ -278,10 +278,16 @@ def unity_guid(text: str) -> str:
     return uuid.uuid5(uuid.NAMESPACE_URL, "pixel-pipeline:" + text).hex
 
 
-def _unity_platform(compression: int = 0) -> str:
-    return "".join(f"""  - serializedVersion: 3
+def _unity_write(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Unity's own files use LF line ends (also on Windows)."""
+    with open(path, "w", encoding=encoding, newline="\n") as fh:
+        fh.write(text)
+
+
+def _unity_platform(compression: int = 0, max_size: int = 8192) -> str:
+    return "".join(f"""  - serializedVersion: 4
     buildTarget: {target}
-    maxTextureSize: 8192
+    maxTextureSize: {max_size}
     resizeAlgorithm: 0
     textureFormat: -1
     textureCompression: {compression}
@@ -295,20 +301,90 @@ def _unity_platform(compression: int = 0) -> str:
 """ for target in ("DefaultTexturePlatform", "Standalone"))
 
 
+# Unity 6.3 refuses to import a texture over 8192 px on a side ("out of range height (got
+# 9216 max supported 8192)", seen in batch mode), so taller sheets are repacked for Unity.
+UNITY_MAX_TEXTURE = 8192
+
+
+def unity_layout(frames: list[Frame], size: tuple[int, int]) -> tuple[list[Frame], tuple[int, int]] | None:
+    """None when the sheet fits Unity as it is; else the frames repacked: the sheet's rows
+    (frames sharing a y) stacked into columns at most UNITY_MAX_TEXTURE tall, side by side."""
+    if max(size) <= UNITY_MAX_TEXTURE:
+        return None
+    rows: dict[int, list[Frame]] = {}
+    for f in frames:
+        rows.setdefault(f.y, []).append(f)
+    moved: dict[int, Frame] = {}
+    col_x = col_w = y = 0
+    for ry in sorted(rows):
+        fs = rows[ry]
+        rh = max(f.y + f.h for f in fs) - ry
+        rw = max(f.x + f.w for f in fs)
+        if y and y + rh > UNITY_MAX_TEXTURE:
+            col_x, col_w, y = col_x + col_w, 0, 0
+        for f in fs:
+            moved[id(f)] = Frame(f.name, col_x + f.x, y + (f.y - ry), f.w, f.h, f.duration)
+        col_w, y = max(col_w, rw), y + rh
+    out = [moved[id(f)] for f in frames]
+    new_size = (max(f.x + f.w for f in out), max(f.y + f.h for f in out))
+    if max(new_size) > UNITY_MAX_TEXTURE:
+        raise ValueError(f"The sheet is {size[0]}x{size[1]} and does not fit Unity's "
+                         f"{UNITY_MAX_TEXTURE} px texture limit even repacked. Export fewer "
+                         "animations or directions.")
+    return out, new_size
+
+
+def _repack(path: Path, frames: list[Frame], moved: list[Frame], size: tuple[int, int], dst: Path) -> Path:
+    img = _rgba(path)
+    canvas = np.zeros((size[1], size[0], 4), np.uint8)
+    for f, m in zip(frames, moved):
+        canvas[m.y:m.y + m.h, m.x:m.x + m.w] = _crop(img, f)
+    return _save(canvas, dst)
+
+
+def unity_sprite_names(frames: list[Frame]) -> list[str]:
+    """Unique Unity sprite names in frame order: 'walk_SE 3' -> walk_SE_3 (a clash gets _2...)."""
+    out, used = [], set()
+    for f in frames:
+        base = _yaml_name(f.name)
+        n, k = base, 2
+        while n in used:
+            n, k = f"{base}_{k}", k + 1
+        used.add(n)
+        out.append(n)
+    return out
+
+
+def unity_sprite_file_id(i: int) -> int:
+    """The internalID (= fileID in references, e.g. from .anim clips) of the i-th sprite."""
+    return 21300000 + 2 * i
+
+
+def _unity_max_size(size: tuple[int, int]) -> int:
+    big = max(size)
+    if big > UNITY_MAX_TEXTURE:
+        raise ValueError(f"The texture is {size[0]}x{size[1]}; Unity imports at most "
+                         f"{UNITY_MAX_TEXTURE} px a side.")
+    return 8192
+
+
 def unity_meta(guid: str, size: tuple[int, int], frames: list[Frame] | None, *, ppu: float = 32,
-               normal_map: bool = False, pivot: tuple[float, float] = (0.5, 0.0)) -> str:
+               normal_map: bool = False, pivot: tuple[float, float] = (0.5, 0.0),
+               normal_guid: str | None = None) -> str:
     """Unity TextureImporter .meta: point filter, no compression, no mipmaps. frames given ->
     Sprite (Multiple) with one sprite per frame (Unity rects start bottom-left, so y is
-    flipped); None -> a single sprite; normal_map -> texture type Normal map (linear)."""
+    flipped); None -> a single sprite; normal_map -> texture type Normal map (linear);
+    normal_guid -> that texture is the sprites' _NormalMap secondary texture (URP 2D lights)."""
     w, h = size
+    max_size = _unity_max_size(size)
     sprites = ""
-    names = ""
+    table = []
     if frames and not normal_map:
-        for i, f in enumerate(frames):
-            sid = uuid.uuid5(uuid.NAMESPACE_URL, f"{guid}/{f.name}").hex
-            internal = 21300000 + 2 * i
+        for i, (f, name) in enumerate(zip(frames, unity_sprite_names(frames))):
+            sid = uuid.uuid5(uuid.NAMESPACE_URL, f"{guid}/{name}").hex
+            internal = unity_sprite_file_id(i)
             sprites += f"""    - serializedVersion: 2
-      name: {_yaml_name(f.name)}
+      name: {name}
       rect:
         serializedVersion: 2
         x: {f.x}
@@ -316,11 +392,12 @@ def unity_meta(guid: str, size: tuple[int, int], frames: list[Frame] | None, *, 
         width: {f.w}
         height: {f.h}
       alignment: 7
-      pivot: {{x: {pivot[0]}, y: {pivot[1]}}}
+      pivot: {{x: {pivot[0]:g}, y: {pivot[1]:g}}}
       border: {{x: 0, y: 0, z: 0, w: 0}}
+      customData:
       outline: []
       physicsShape: []
-      tessellationDetail: 0
+      tessellationDetail: -1
       bones: []
       spriteID: {sid}
       internalID: {internal}
@@ -329,7 +406,14 @@ def unity_meta(guid: str, size: tuple[int, int], frames: list[Frame] | None, *, 
       edges: []
       weights: []
 """
-            names += f"      {_yaml_name(f.name)}: {internal}\n"
+            table.append((name, internal))
+    # Unity writes the name table sorted by name (ordinal)
+    names = "".join(f"      {nm}: {i}\n" for nm, i in sorted(table))
+    secondary = "    secondaryTextures: []\n"
+    if normal_guid and not normal_map:
+        secondary = ("    secondaryTextures:\n"
+                     f"    - texture: {{fileID: 2800000, guid: {normal_guid}, type: 3}}\n"
+                     "      name: _NormalMap\n")
     sprite_mode = 0 if normal_map else (2 if frames else 1)
     texture_type = 1 if normal_map else 8
     return f"""fileFormatVersion: 2
@@ -337,7 +421,7 @@ guid: {guid}
 TextureImporter:
   internalIDToNameTable: []
   externalObjects: {{}}
-  serializedVersion: 12
+  serializedVersion: 13
   mipmaps:
     mipMapMode: 0
     enableMipMap: 0
@@ -365,7 +449,7 @@ TextureImporter:
   cubemapConvolution: 0
   seamlessCubemap: 0
   textureFormat: 1
-  maxTextureSize: 8192
+  maxTextureSize: {max_size}
   textureSettings:
     serializedVersion: 2
     filterMode: 0
@@ -381,7 +465,7 @@ TextureImporter:
   spriteExtrude: 1
   spriteMeshType: 0
   alignment: 7
-  spritePivot: {{x: {pivot[0]}, y: {pivot[1]}}}
+  spritePivot: {{x: {pivot[0]:g}, y: {pivot[1]:g}}}
   spritePixelsToUnits: {ppu:g}
   spriteBorder: {{x: 0, y: 0, z: 0, w: 0}}
   spriteGenerateFallbackPhysicsShape: 0
@@ -401,10 +485,10 @@ TextureImporter:
   swizzle: 50462976
   cookieLightType: 0
   platformSettings:
-{_unity_platform(0)}  spriteSheet:
+{_unity_platform(0, max_size)}  spriteSheet:
     serializedVersion: 2
-    sprites:
-{sprites or "    []" + chr(10)}    outline: []
+    sprites:{(chr(10) + sprites) if sprites else " []" + chr(10)}    outline: []
+    customData:
     physicsShape: []
     bones: []
     spriteID:
@@ -413,9 +497,9 @@ TextureImporter:
     indices:
     edges: []
     weights: []
-    secondaryTextures: []
-    nameFileIdTable:
-{names or "      {}" + chr(10)}  mipmapLimitGroupName:
+{secondary}    spriteCustomMetadata:
+      entries: []
+    nameFileIdTable:{(chr(10) + names) if names else " {}" + chr(10)}  mipmapLimitGroupName:
   pSDRemoveMatte: 0
   userData:
   assetBundleName:
@@ -439,92 +523,315 @@ Files
 How to use
   1. Copy every file (the .meta files too) into your project's Assets folder. Unity reads
      the .meta and slices the sheet; expand {png} in the Project window to see the sprites.
-  2. Sprite names are <action>_<direction>_<frame>, e.g. walk_SE_0. Select one animation's
-     frames and drag them into the Scene: Unity makes an Animation clip from them.
-     Frame times (ms) are in {name}_frames.json.
+  2. Sprite names are <action>_<direction>_<frame>, e.g. walk_SE_0. The clips/ folder has
+     an Animation clip per <action>_<direction> (drag one onto a GameObject with a
+     SpriteRenderer; Unity adds an Animator). Frame times (ms) are in {name}_frames.json.
   3. Pixel-perfect: add a Pixel Perfect Camera (URP 2D) with Assets Pixels Per Unit = {ppu:g}.
-  4. Normal map: on a Sprite-Lit material (URP 2D) add {npng} as the sheet's Secondary
-     Texture named _NormalMap (Sprite Editor > Secondary Textures).
+  4. Normal map: the sheet's sprites already carry {npng} as their _NormalMap secondary
+     texture, so a Sprite-Lit material (URP 2D) lights them with it.
 """
 
 
-def _unity(src: Source, out: Path, ppu: float | None = None, **_) -> list[Path]:
+def _gcd_ms(frames: list[Frame]) -> int:
+    """The clip's sample step: every frame time is a whole number of samples."""
+    import math
+    g = 0
+    for f in frames:
+        g = math.gcd(g, max(1, int(f.duration)))
+    return max(1, g)
+
+
+def unity_clip_plan(src: Source) -> list[dict]:
+    """One clip per animation of 2+ frames: {name, sprites, ids (sprite fileIDs), times (s,
+    from each frame's duration), length, fps, loop}."""
+    if src.sheet is None:
+        return []
+    names = unity_sprite_names(src.frames)
+    index = {id(f): i for i, f in enumerate(src.frames)}
+    plans = []
+    for key, fs in src.groups():
+        if len(fs) < 2:
+            continue
+        idx = [index[id(f)] for f in fs]
+        times, t = [], 0
+        for f in fs:
+            times.append(round(t / 1000, 6))
+            t += f.duration
+        plans.append({"name": _yaml_name(key), "sprites": [names[i] for i in idx],
+                      "ids": [unity_sprite_file_id(i) for i in idx], "times": times,
+                      "length": round(t / 1000, 6), "fps": round(1000 / _gcd_ms(fs), 6),
+                      "loop": key.rsplit("_", 1)[0] not in ONCE})
+    return plans
+
+
+def unity_anim(plan: dict, sheet_guid: str) -> str:
+    """A sprite AnimationClip (.anim, text YAML) that swaps SpriteRenderer.sprite through the
+    sheet's sprites at the sheet's frame times (the format Unity itself saves)."""
+    refs = [f"{{fileID: {i}, guid: {sheet_guid}, type: 3}}" for i in plan["ids"]]
+    times = list(plan["times"])
+    step = 1 / plan["fps"]
+    if plan["length"] - times[-1] > step + 1e-6:
+        # Unity holds the last key for one sample (clip length = last key + 1/fps), so a longer
+        # last frame gets the same sprite keyed again one sample before the end
+        times.append(round(plan["length"] - step, 6))
+        refs = refs + refs[-1:]
+    keys = "".join(f"    - time: {t:g}\n      value: {r}\n" for t, r in zip(times, refs))
+    mapping = "".join(f"    - {r}\n" for r in refs)
+    return f"""%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!74 &7400000
+AnimationClip:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {{fileID: 0}}
+  m_PrefabInstance: {{fileID: 0}}
+  m_PrefabAsset: {{fileID: 0}}
+  m_Name: {plan["name"]}
+  serializedVersion: 7
+  m_Legacy: 0
+  m_Compressed: 0
+  m_UseHighQualityCurve: 1
+  m_RotationCurves: []
+  m_CompressedRotationCurves: []
+  m_EulerCurves: []
+  m_PositionCurves: []
+  m_ScaleCurves: []
+  m_FloatCurves: []
+  m_PPtrCurves:
+  - serializedVersion: 2
+    curve:
+{keys}    attribute: m_Sprite
+    path: 
+    classID: 212
+    script: {{fileID: 0}}
+    flags: 2
+  m_SampleRate: {plan["fps"]:.9g}
+  m_WrapMode: 0
+  m_Bounds:
+    m_Center: {{x: 0, y: 0, z: 0}}
+    m_Extent: {{x: 0, y: 0, z: 0}}
+  m_ClipBindingConstant:
+    genericBindings:
+    - serializedVersion: 2
+      path: 0
+      attribute: 0
+      script: {{fileID: 0}}
+      typeID: 212
+      customType: 23
+      isPPtrCurve: 1
+      isIntCurve: 0
+      isSerializeReferenceCurve: 0
+    pptrCurveMapping:
+{mapping}  m_AnimationClipSettings:
+    serializedVersion: 2
+    m_AdditiveReferencePoseClip: {{fileID: 0}}
+    m_AdditiveReferencePoseTime: 0
+    m_StartTime: 0
+    m_StopTime: {plan["length"]:.9g}
+    m_OrientationOffsetY: 0
+    m_Level: 0
+    m_CycleOffset: 0
+    m_HasAdditiveReferencePose: 0
+    m_LoopTime: {1 if plan["loop"] else 0}
+    m_LoopBlend: 0
+    m_LoopBlendOrientation: 0
+    m_LoopBlendPositionY: 0
+    m_LoopBlendPositionXZ: 0
+    m_KeepOriginalOrientation: 0
+    m_KeepOriginalPositionY: 1
+    m_KeepOriginalPositionXZ: 0
+    m_HeightFromFeet: 0
+    m_Mirror: 0
+  m_EditorCurves: []
+  m_EulerEditorCurves: []
+  m_HasGenericRootTransform: 0
+  m_HasMotionFloatCurves: 0
+  m_Events: []
+"""
+
+
+def _unity(src: Source, out: Path, ppu: float | None = None, clips: bool = True, **_) -> list[Path]:
+    """<name>.png + .meta (sliced: Sprite Multiple), <name>_n.png + .meta (Normal map, linked to
+    the sprites as their _NormalMap secondary texture), clips/<action_dir>.anim (+ .meta) when
+    clips, <name>_frames.json, <name>_README.txt."""
     n = src.file_name
     written: list[Path] = []
     if ppu is None:
         ppu = float(_project_style_value("tile", 32))
-    png = _copy(src.image, out / f"{n}.png", written)
-    size = Image.open(png).size
     sheet_frames = src.frames if src.sheet is not None else None
+    size = Image.open(src.image).size
+    layout = unity_layout(sheet_frames, size) if sheet_frames else None
+    npng = f"{n}_n.png"
+    if layout:                                   # too tall for Unity: rows into columns
+        sheet_frames, size = layout
+        png = _repack(src.image, src.frames, sheet_frames, size, out / f"{n}.png")
+        written.append(png)
+        if src.normals:
+            written.append(_repack(src.normals, src.frames, sheet_frames, size, out / npng))
+    else:
+        png = _copy(src.image, out / f"{n}.png", written)
+        if src.normals:
+            _copy(src.normals, out / npng, written)
     guid = unity_guid(f"{src.kind}/{src.name}")
+    normal_guid = unity_guid(f"{src.kind}/{src.name}/normals") if src.normals else None
     meta = out / f"{n}.png.meta"
-    meta.write_text(unity_meta(guid, size, sheet_frames, ppu=ppu), encoding="utf-8")
+    _unity_write(meta, unity_meta(guid, size, sheet_frames, ppu=ppu, normal_guid=normal_guid))
     written.append(meta)
     normal_line = ""
-    npng = f"{n}_n.png"
     if src.normals:
-        _copy(src.normals, out / npng, written)
         nmeta = out / f"{npng}.meta"
-        nmeta.write_text(unity_meta(unity_guid(f"{src.kind}/{src.name}/normals"), size, None,
-                                    ppu=ppu, normal_map=True), encoding="utf-8")
+        _unity_write(nmeta, unity_meta(normal_guid, Image.open(out / npng).size, None,
+                                       ppu=ppu, normal_map=True))
         written.append(nmeta)
-        normal_line = (f"  {npng}          normal map (OpenGL, green up), imported as a Normal map\n")
+        normal_line = (f"  {npng}          normal map (OpenGL, green up), imported as a Normal map\n"
+                       f"                   and already the sprites' _NormalMap secondary texture\n")
     if src.icon and src.icon != src.image:
         icon = _copy(src.icon, out / f"{n}_icon.png", written)
         imeta = out / f"{icon.name}.meta"
-        imeta.write_text(unity_meta(unity_guid(f"{src.kind}/{src.name}/icon"), Image.open(icon).size,
+        _unity_write(imeta, unity_meta(unity_guid(f"{src.kind}/{src.name}/icon"), Image.open(icon).size,
                                     None, ppu=ppu), encoding="utf-8")
         written.append(imeta)
+    plans = unity_clip_plan(src) if clips else []
+    clip_line = ""
+    if plans:
+        cdir = out / "clips"
+        cdir.mkdir(exist_ok=True)
+        for plan in plans:
+            anim = cdir / f"{plan['name']}.anim"
+            _unity_write(anim, unity_anim(plan, guid), encoding="utf-8")
+            am = cdir / f"{anim.name}.meta"
+            clip_guid = unity_guid(f"{src.kind}/{src.name}/clip/{plan['name']}")
+            _unity_write(am, f"fileFormatVersion: 2\nguid: {clip_guid}\n"
+                          "NativeFormatImporter:\n  externalObjects: {}\n  mainObjectFileID: 7400000\n"
+                          "  userData:\n  assetBundleName:\n  assetBundleVariant:\n", encoding="utf-8")
+            written += [anim, am]
+        clip_line = (f"  clips/           {len(plans)} Animation clips, one per <action>_<direction>"
+                     " (frame times from the sheet)\n")
+    names = unity_sprite_names(src.frames) if src.sheet is not None else [png.stem]
+    by_frame = {id(f): nm for f, nm in zip(src.frames, names)}
     frames_json = out / f"{n}_frames.json"
     frames_json.write_text(json.dumps({
-        "sprites": [{"name": _yaml_name(f.name), "duration_ms": f.duration} for f in src.frames],
-        "animations": [{"name": k, "sprites": [_yaml_name(f.name) for f in fs],
+        "sprites": [{"name": nm, "duration_ms": f.duration} for f, nm in zip(src.frames, names)],
+        "animations": [{"name": k, "sprites": [by_frame[id(f)] for f in fs],
                         "frame_ms": fs[0].duration} for k, fs in src.groups()]}, indent=1),
         encoding="utf-8")
     written.append(frames_json)
     readme = out / f"{n}_README.txt"
     readme.write_text(UNITY_README.format(name=n, png=png.name, count=len(src.frames), ppu=ppu,
-                                          normal_line=normal_line, npng=npng), encoding="utf-8")
+                                          normal_line=normal_line + clip_line, npng=npng),
+                      encoding="utf-8")
     written.append(readme)
     return written
 
 
+def gamemaker_name(name: str) -> str:
+    """A GameMaker resource name: letters, digits, underscores, not starting with a digit,
+    with the usual spr_ prefix ('Health Potion' -> spr_health_potion)."""
+    s = re.sub(r"[^A-Za-z0-9_]+", "_", str(name)).strip("_") or "asset"
+    return s if s.startswith("spr_") else f"spr_{s}"
+
+
+GAMEMAKER_README = """{name} - exported from pixel-pipeline for GameMaker
+=============================================
+
+Every animation is one horizontal strip, named <sprite>_strip<frames>.png. GameMaker cuts a
+file whose name ends in _strip<N> into N frames by itself.
+
+In the IDE (any GameMaker since 2.3)
+  1. Create a Sprite, name it as the file without _strip<N> (e.g. {example}), click Import
+     and pick {example_file}: it arrives as {example_frames} frames.
+  2. Origin: set it to Custom and type the "origin" x, y from {json}
+     (bottom centre: the feet; x = half the frame width, y = the row under the feet).
+  3. Speed: Frames per second = the sprite's "fps" in {json}.
+  4. Collision mask: Automatic is fine (frames are tight around the character).
+  _normal_strip files are the matching normal maps (OpenGL, green up) for your own lighting
+  shader; GameMaker does not use them by itself.
+
+Without importing (sprite_add at run time)
+  Put the PNGs in Included Files (datafiles) and call {gml_func}() from {gml}: it adds every
+  strip with sprite_add (frame count + origin) and sets its speed, and returns a struct
+  keyed by animation name, e.g. sprites[$ "{example_key}"]. (On HTML5 sprite_add loads
+  asynchronously.)
+
+Not included: a ready .yy sprite resource. GameMaker's project format changes between
+releases and was not available to test, so import the strips as above.
+"""
+
+
 def _gamemaker(src: Source, out: Path, normals: bool = True, **_) -> list[Path]:
-    """One horizontal strip per action_direction: <name>_<action>_<dir>_strip<N>.png (GameMaker
-    slices _stripN itself on import; direction keeps its case: knight_walk_SE_strip8.png), the
-    normal map as <name>_<action>_<dir>_normal_strip<N>.png, + <name>_gamemaker.json."""
+    """One horizontal strip per action_direction: spr_<name>_<action>_<dir>_strip<N>.png
+    (GameMaker slices _stripN itself on import; direction keeps its case:
+    spr_knight_walk_SE_strip8.png), frames bottom-centre aligned; the normal map as
+    spr_<name>_<action>_<dir>_normal_strip<N>.png; <name>_gamemaker.json (frames, fps,
+    origin = feet, bbox, per-frame ms), <name>_load_sprites.gml (sprite_add loader) and
+    <name>_GameMaker_README.txt."""
     n = src.file_name
+    spr = gamemaker_name(n)
     img = _rgba(src.image)
     nimg = _rgba(src.normals) if (normals and src.normals) else None
     written: list[Path] = []
-    summary = {"name": n, "origin": "bottom centre", "sprites": []}
+    summary = {"name": n, "origin": "bottom centre (x = frame width // 2, y = row under the feet)",
+               "sprites": []}
     groups = src.groups()
     single = len(groups) == 1 and len(groups[0][1]) == 1
+    gml = []
     for key, fs in groups:
         w, h = max(f.w for f in fs), max(f.h for f in fs)
-        base = n if single else f"{n}_{_yaml_name(key)}"
+        base = spr if single else f"{spr}_{_yaml_name(key)}"
         files = []
+        colour_strip = None
         for layer, suffix in ((img, ""), (nimg, "_normal")):
             if layer is None:
                 continue
             strip = np.zeros((h, w * len(fs), 4), np.uint8)
             for i, f in enumerate(fs):
                 c = _crop(layer, f)
-                strip[:c.shape[0], i * w:i * w + c.shape[1]] = c
+                x0 = i * w + (w - c.shape[1]) // 2          # bottom-centre: feet stay put
+                strip[h - c.shape[0]:h, x0:x0 + c.shape[1]] = c
+            if colour_strip is None:
+                colour_strip = strip
             name = f"{base}{suffix}.png" if len(fs) == 1 else f"{base}{suffix}_strip{len(fs)}.png"
             written.append(_save(strip, out / name))
             files.append(name)
+        cells = [Frame(f.name, i * w, 0, w, h) for i, f in enumerate(fs)]
+        foot = _foot_row(colour_strip, cells)
+        alpha = colour_strip[..., 3] >= 128
+        bbox = None
+        if alpha.any():
+            per = alpha.reshape(h, len(fs), w).any(1)            # union of all frames
+            ys, xs = np.nonzero(per)
+            bbox = {"left": int(xs.min()), "top": int(ys.min()),
+                    "right": int(xs.max()), "bottom": int(ys.max())}
+        total = sum(f.duration for f in fs)
+        fps = round(1000 * len(fs) / max(1, total), 3)
         summary["sprites"].append({
-            "sprite": base, "file": files[0], "normal_map": files[1] if len(files) > 1 else None,
-            "frames": len(fs), "frame_w": w, "frame_h": h,
-            "fps": round(1000 / max(1, fs[0].duration), 3),
-            "origin": [w // 2, _foot_row(img, fs)]})
+            "sprite": base, "animation": key, "file": files[0],
+            "normal_map": files[1] if len(files) > 1 else None,
+            "frames": len(fs), "frame_w": w, "frame_h": h, "fps": fps,
+            "frame_ms": [f.duration for f in fs], "origin": [w // 2, foot], "bbox": bbox})
+        gml.append(f'    _s[$ "{key}"] = sprite_add(_dir + "{files[0]}", {len(fs)}, false, false, '
+                   f'{w // 2}, {foot});\n'
+                   f'    sprite_set_speed(_s[$ "{key}"], {fps:g}, spritespeed_framespersecond);\n')
     if src.icon and src.icon != src.image:
-        _copy(src.icon, out / f"{n}_icon.png", written)
-        summary["icon"] = f"{n}_icon.png"
+        _copy(src.icon, out / f"{spr}_icon.png", written)
+        summary["icon"] = f"{spr}_icon.png"
     js = out / f"{n}_gamemaker.json"
     js.write_text(json.dumps(summary, indent=1), encoding="utf-8")
     written.append(js)
+    func = f"{n}_load_sprites" if not n[0].isdigit() else f"load_{n}_sprites"
+    script = out / f"{n}_load_sprites.gml"
+    script.write_text(
+        f"/// {func}([dir]) -> struct of sprites for {src.name}, keyed by animation name.\n"
+        f"/// The PNGs must be in Included Files; dir is their folder inside it (\"\" = top).\n"
+        f"function {func}(_dir = \"\") {{\n"
+        f"    if (_dir != \"\" && string_char_at(_dir, string_length(_dir)) != \"/\") _dir += \"/\";\n"
+        f"    var _s = {{}};\n" + "".join(gml) + "    return _s;\n}\n", encoding="utf-8")
+    written.append(script)
+    first = summary["sprites"][0]
+    readme = out / f"{n}_GameMaker_README.txt"
+    readme.write_text(GAMEMAKER_README.format(
+        name=n, example=first["sprite"], example_file=first["file"], example_frames=first["frames"],
+        example_key=first["animation"], json=js.name, gml=script.name, gml_func=func), encoding="utf-8")
+    written.append(readme)
     return written
 
 
@@ -596,8 +903,9 @@ def export_asset(asset, preset: str, out_dir, **opts) -> list[Path]:
 
     opts: godot-2d res_path ("res://units/knight" -> absolute texture path, default relative);
     godot-hd2d ppu (out_dir = the Godot project; files go to units/<name>/); unity ppu (pixels
-    per unit, default the project's tile size); gamemaker normals (also _n strips, default
-    True); generic single_frames (default True)."""
+    per unit, default the project's tile size), clips (an .anim per animation, default True);
+    gamemaker normals (also _normal strips, default True); generic single_frames (default
+    True)."""
     if preset not in _WRITERS:
         raise ValueError(f"Unknown export preset '{preset}' (use {', '.join(PRESETS)})")
     src = source(asset)

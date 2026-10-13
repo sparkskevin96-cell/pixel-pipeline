@@ -14,6 +14,8 @@ the result is limited-palette pixel art rather than a blurred glow. Colours come
 
 Same parameters + seed -> the same pixels. Looping effects (fire, magic_circle, sparkle,
 arrow_trail, and heal / level_up with loop=True) are periodic: frame n would equal frame 0.
+Smoke and dust are soft noise-thinned puffs that break up into wisps (wind= pushes them
+sideways); the dark theme gets a light rim on its dark outer pixels so it reads on dark ground.
 """
 from __future__ import annotations
 
@@ -64,6 +66,9 @@ THEMES = {
     "smoke":    ["34343f", "5c5c6a", "8a8a96", "b8b8c2", "e2e2e8"],
 }
 SOOT = ["241e24", "3e3438", "5e5254", "847a78", "a89c98"]   # explosion smoke
+# a light rim on the outer dark pixels, for themes whose dark end vanishes on dark ground
+RIMS = {"dark": "c8a0ff"}
+WINDY = ("smoke", "dust")                  # kinds that take wind=
 
 
 def _parse_colours(colours) -> np.ndarray:
@@ -238,33 +243,25 @@ def _dot(I, F, cx, cy, value, r=0.5):
     return np.maximum(I, np.where(hit, value, 0))
 
 
+def _outer_edge(m: np.ndarray) -> np.ndarray:
+    """Pixels of mask m with a 4-neighbour outside it (the frame border counts as inside)."""
+    p = np.pad(m, 1, mode="edge")
+    return m & ~(p[:-2, 1:-1] & p[2:, 1:-1] & p[1:-1, :-2] & p[1:-1, 2:])
+
+
+def _despeck(m: np.ndarray, keep: int = 2) -> np.ndarray:
+    """Drop pixels of mask m with fewer than `keep` of their 4 neighbours set (lone specks)."""
+    p = np.pad(m, 1).astype(np.int8)
+    nb = p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]
+    return m & (nb >= keep)
+
+
 def _ring(F, cx, cy, rx, ry, width=0.6):
     """Distance (px, approx.) from the ellipse outline, for crisp 1 px rings."""
     X, Y = (F.x - cx) / max(rx, 1e-3), (F.y - cy) / max(ry, 1e-3)
     rho = np.sqrt(X * X + Y * Y) + 1e-6
     grad = np.sqrt((X / (rho * max(rx, 1e-3))) ** 2 + (Y / (rho * max(ry, 1e-3))) ** 2) + 1e-6
     return np.abs(rho - 1) / grad, rho
-
-
-def _puffs(F, blobs):
-    """Lit smoke balls: blobs [(cx, cy, r, depth)] -> (brightness, coverage 0..1).
-    Light from the top left; the front-most ball (largest z) wins per pixel."""
-    I, cov = F.zeros(), F.zeros()
-    best = np.full((F.h, F.w), -1e9, np.float32)
-    for bx, by, br, depth in blobs:
-        if br <= 0.3:
-            continue
-        dx, dy = (F.x - bx) / br, (F.y - by) / br
-        d2 = dx * dx + dy * dy
-        inside = d2 < 1
-        nz = np.sqrt(np.clip(1 - d2, 0, 1))
-        z = nz * br + depth
-        lit = np.clip(-0.5 * dx - 0.62 * dy + 0.6 * nz, 0, 1)
-        sel = inside & (z > best)
-        I = np.where(sel, 0.1 + 0.72 * lit, I)
-        best = np.where(sel, z, best)
-        cov = np.maximum(cov, np.clip(1 - np.sqrt(d2), 0, 1))
-    return I, cov
 
 
 def _bolt(rng, x0, y0, x1, y1, depth, spread):
@@ -284,7 +281,8 @@ def _bolt(rng, x0, y0, x1, y1, depth, spread):
 
 
 # --------------------------------------------------------------------------- the effects
-# Each returns a list (one per frame) of layers [(brightness field, ramp name)], drawn in order.
+# Each returns a list (one per frame) of layers [(brightness field, ramp name[, dither share])],
+# drawn in order.
 
 def _times(n, loop):
     return [i / n for i in range(n)] if loop else [(i + 0.5) / n for i in range(n)]
@@ -390,23 +388,63 @@ def _explosion(w, h, n, loop, rng):
     return out
 
 
-def _smoke(w, h, n, loop, rng):
+def _union(F, blobs):
+    """Soft puffs [(cx, cy, rx, ry)] merged into one density field 0..1 (1 - prod(1 - each)),
+    each a flat-topped bump so neighbouring puffs keep their own round lobes."""
+    keep = F.zeros() + 1
+    for bx, by, rx, ry in blobs:
+        if rx <= 0.3 or ry <= 0.3:
+            continue
+        d2 = ((F.x - bx) / rx) ** 2 + ((F.y - by) / ry) ** 2
+        keep *= 1 - np.exp(-0.45 * d2 ** 1.6)
+    return 1 - keep
+
+
+def _vapour(F, D, N, erosion, level, thr=0.42):
+    """Density D, noise N (0..1), erosion 0..1 (rising over the effect's life) -> brightness.
+    The noise thins the density (ragged edges; holes open and the cloud breaks into wisps as
+    erosion rises) and the lobes are lit from the upper left by the slope of D, in flat bands."""
+    Fd = D * (0.6 + 0.8 * N) - erosion * (0.3 + 1.0 * (1 - N))
+    vis = _despeck(Fd > thr)
+    p = np.pad(D, 1, mode="edge")
+    grad = p[2:, 1:-1] - p[:-2, 1:-1] + 0.4 * (p[1:-1, 2:] - p[1:-1, :-2])
+    I = level + 1.2 * np.clip(grad, -0.2, 0.2) + 0.06 * (N - 0.5) - 0.12 * (Fd < thr + 0.08)
+    return np.where(vis, np.clip(I, 0.1, 1), 0)
+
+
+def _smoke(w, h, n, loop, rng, wind=0.0):
+    """Several soft puffs that pop out together, rise (and drift with the wind), swell, curl,
+    fade from light to dark through the ramp and break apart into holes and wisps."""
     F = _F(w, h)
     S = min(w, h)
-    cx, base = w / 2, h * 0.78
-    noise = _Noise(rng, 4, 2)
-    blobs = [(rng.uniform(-0.22, 0.22) * w, rng.uniform(-0.12, 0.06) * h, rng.uniform(0.2, 0.3) * S,
-              rng.uniform(0.25, 0.45) * h) for _ in range(5)]
+    cx, base = w / 2 - wind * w * 0.16, h * 0.74
+    fbm = _Noise(rng, 4, 3)
+    lobes = []                      # (angle out from the middle, how far, size, delay)
+    k0 = rng.uniform(0, 2 * math.pi)
+    for k in range(5):
+        a = k0 + k * 2 * math.pi / 5 + rng.uniform(-0.35, 0.35)
+        lobes.append((a, rng.uniform(0.2, 0.3) * S, rng.uniform(0.11, 0.15) * S,
+                      k * 0.025 + rng.uniform(0, 0.03)))
+    lobes.append((0.0, 0.0, 0.15 * S, 0.0))
     out = []
     for t in _times(n, loop):
-        g = _ease_out(t / 0.55)
-        balls = [(cx + ox * (0.3 + 0.9 * g), base + oy - rise * g - h * 0.05 * t,
-                  r * (0.45 + 0.6 * g), -oy * 0.5) for ox, oy, r, rise in blobs]
-        I, cov = _puffs(F, balls)
-        cut = 0.02 + 1.05 * _clamp((t - 0.38) / 0.62)
-        nz = noise(F.x / w, F.y / h - t * 0.5)
-        vis = cov + (nz - 0.5) * 0.45 > cut
-        out.append([(np.where(vis, I, 0), "main")])
+        rise = h * 0.26 * _ease_out(t / 0.7) + h * 0.1 * t
+        blobs = []
+        for a, dist, r, delay in lobes:
+            p = _clamp((t - delay) / (1 - delay))
+            g = _ease_out(p / 0.6)
+            sp = 0.55 + 0.6 * g
+            ox, oy = math.cos(a) * dist * sp, math.sin(a) * dist * 0.85 * sp
+            high = (rise - oy) / h                     # higher bits drift further
+            rr = r * (0.6 + 0.7 * g)
+            blobs.append((cx + ox + wind * w * 0.32 * p ** 1.2 * (0.5 + high), base + oy - rise,
+                          rr * (1 + 0.2 * abs(wind) + 0.3 * p), rr * (1 - 0.15 * p)))
+        ang = 2 * math.pi * t * 0.35                   # the noise drifts up and curls round
+        N = fbm(F.x / w * 1.4 + 0.1 * math.cos(ang) - wind * t * 0.3,
+                F.y / h * 1.4 + t * 0.5 + 0.1 * math.sin(ang))
+        I = _vapour(F, _union(F, blobs), N, _clamp((t - 0.15) / 0.85) ** 1.2,
+                    0.8 - 0.48 * t ** 0.9)
+        out.append([(I, "main", 0.0)])
     return out
 
 
@@ -498,31 +536,60 @@ def _sparkle(w, h, n, loop, rng):
     return out
 
 
+def _cross(I, F, cx, cy, arm: int, value, outline: float = 0.12):
+    """A plus sign (arms `arm` px) with a bright centre and a dark 1 px outline round it."""
+    if value <= 0 or arm < 0:
+        return I
+    dx, dy = np.abs(F.x - (math.floor(cx) + 0.5)), np.abs(F.y - (math.floor(cy) + 0.5))
+    plus = (np.minimum(dx, dy) < 0.5) & (np.maximum(dx, dy) <= arm + 0.01)
+    ring = ((np.minimum(dx, dy) < 1.5) & (np.maximum(dx, dy) <= arm + 1.01)) & ~plus
+    if arm > 0:                                 # a lone dot needs no outline
+        I = np.where(ring & (I < outline), outline, I)
+    v = np.where(np.maximum(dx, dy) < 0.5, value, value * 0.8)
+    return np.maximum(I, np.where(plus, v, 0))
+
+
 def _heal(w, h, n, loop, rng):
+    """A soft ring opens on the ground, then plus signs and sparkles float up out of it,
+    swaying a little, popping in and fading out near the top."""
     F = _F(w, h)
-    cx, base = w / 2, h - 3
-    parts = [(rng.uniform(0.18, 0.82) * w, rng.uniform(0, 1), rng.uniform(0, 0.45),
-              rng.random() < 0.45) for _ in range(9)]
+    rx = w * 0.42
+    ry = rx * 0.3
+    cx, base = w / 2, h - ry - 1.5
+    crosses = [(rng.uniform(-0.55, 0.55) * rx, k / 4 + rng.uniform(0, 0.1), rng.uniform(0, 1),
+                k % 2 == 0) for k in range(4)]
+    motes = [(rng.uniform(-0.8, 0.8) * rx, rng.uniform(0, 1), rng.uniform(0, 1)) for _ in range(6)]
     out = []
     for t in _times(n, loop):
-        env = 0.8 if loop else math.sin(math.pi * _clamp(t / 0.95)) ** 0.7
-        v = np.clip((base - F.y) / (h * 0.95), 0, 1)
-        col = np.clip(1 - np.abs(F.x - cx) / (w * 0.3), 0, 1) ** 0.7 * (1 - v) ** 1.6
-        I = _dglow(F, np.where(F.y <= base + 1, col * env * 1.4, 0), 0.5)
-        if not loop and t < 0.6:
-            d, _ = _ring(F, cx, base, w * 0.42 * _ease_out(t / 0.4), w * 0.42 * 0.3 * _ease_out(t / 0.4))
-            I = np.maximum(I, np.where(d < 0.6, 0.75 * (1 - t / 0.6) + 0.15, 0))
-        for x, ph, delay, plus in parts:
-            p = (ph + t) % 1.0 if loop else (t * 1.35 - delay)
-            if not 0 <= p <= 1:
+        I = F.zeros()
+        grow = 1.0 if loop else _ease_out(t / 0.3)
+        pulse = 1.0 if not loop else 0.9 + 0.1 * math.cos(2 * math.pi * t)
+        # the ground ring: front arc bright, back arc dimmer, a fainter ring inside
+        ring_env = 1.0 if loop else _clamp((1 - t) / 0.35)   # fades by thinning, not darkening
+        for rad, val, k in ((1.0, 0.9, 0), (0.6, 0.6, 1)):
+            d, _ = _ring(F, cx, base, rx * rad * grow * pulse, ry * rad * grow * pulse)
+            v = val * np.where(F.y >= base, 1.0, 0.68)
+            ang = np.arctan2((F.y - base) / 0.3, F.x - cx)
+            keep = np.cos(ang * 12 + k) > 1 - 2.2 * ring_env
+            I = np.maximum(I, np.where((d < 0.6) & (grow > 0.15) & keep, v, 0))
+        top = 3.0
+        # little motes drifting up (1 px, twinkling on alternate frames)
+        for x, ph, tw in motes:
+            p = (ph + t) % 1.0 if loop else t * 1.25 - ph * 0.3
+            if 0 < p < 1:
+                y = base - 1 - p * (base - top)
+                on = math.sin(2 * math.pi * (4 * t + tw)) > 0   # whole twinkles per loop
+                I = _dot(I, F, cx + x * (1 - 0.3 * p), y, (0.85 if on else 0.5) * (1 - 0.5 * p))
+        # the crosses: pop in, rise and sway, shrink away at the top
+        for x, ph, sw, big in crosses:
+            p = (ph + t) % 1.0 if loop else t * 1.3 - ph * 0.55
+            if not 0 < p < 1:
                 continue
-            y = base - 2 - p * (h - 6)
-            val = 0.55 + 0.45 * math.sin(math.pi * min(1.0, p * 1.6))
-            if plus:
-                I = _star(I, F, x, y, 2, val)
-            else:
-                I = _star(I, F, x, y, 1 if p < 0.6 else 0, val * 0.9)
-        out.append([(I, "main")])
+            y = base - 2 - p * (base - top - 3)
+            xs = cx + x + math.sin(2 * math.pi * (p + sw)) * 1.2
+            arm = (2 if big else 1) if 0.12 < p < 0.8 else (1 if big else 0)
+            I = _cross(I, F, xs, y, arm, 1.0 - 0.35 * p)
+        out.append([(np.clip(I, 0, 1), "main", 0.0)])
     return out
 
 
@@ -569,91 +636,149 @@ def _lightning(w, h, n, loop, rng):
 
 
 def _arrow_trail(w, h, n, loop, rng):
+    """The streak behind something flying right: a bright core line that tapers back to a
+    point, a darker wedge round its head, speed lines streaming past above and below, and
+    sparks shed behind that drift off and fade. Scrolls by whole periods, so it loops exactly."""
     F = _F(w, h)
-    cy = h / 2
-    q = F.x / w
+    cy = math.floor(h / 2) + 0.5                   # the core sits on one pixel row
+    head = w - 1.0
+    q = np.clip(F.x / head, 0, 1)                  # 0 tail .. 1 head
+    lines = [(-2, 0.3, 0.0), (2, 0.26, 0.5), (-3, 0.14, 0.3), (3, 0.16, 0.8)]   # row, length, phase
+    sparks = [(k / 3 + rng.uniform(0, 0.15), (-1) ** k * rng.uniform(0.6, 1.0)) for k in range(3)]
     out = []
     for t in _times(n, loop):
         tt = t if loop else 0.0
-        env = 1.0 if loop else 1 - 0.75 * t
-        hw = 0.45 + h * 0.2 * q ** 1.4
+        env = 1.0 if loop else 1 - 0.6 * t
         dy = np.abs(F.y - cy)
-        stripe = 0.5 + 0.5 * np.cos(2 * math.pi * (3 * q + tt))
-        body = (dy <= hw) & (q + 0.12 * stripe > 0.4)
-        I = np.where(body, 0.3 + 0.45 * q * (0.6 + 0.4 * stripe), 0)
-        I = np.maximum(I, np.where((dy <= hw) & (q > 0.75), 0.6 + 0.4 * q, 0))
-        I = np.maximum(I, np.where((dy < 0.5) & (q > 0.15), 0.45 + 0.55 * q, 0))
+        I = F.zeros()
+        # the core: 1 px from the tail, swelling to 3 px over the last fifth
+        half = np.where(q > 0.72, 1.0, 0.0) + 0.5
+        core = (dy <= half) & (q > 0.15) & ((dy < 0.5) | (F.x < w - 1))   # rounded front
+        I = np.where(core, np.where(dy < 0.5, 0.5 + 0.5 * q, 0.62 + 0.2 * q), I)
+        # a dark edge round the head so it reads on light ground too
+        c = np.pad(core, 1)
+        near = (c[:-2, 1:-1] | c[2:, 1:-1] | c[1:-1, :-2] | c[1:-1, 2:]
+                | c[:-2, :-2] | c[:-2, 2:] | c[2:, :-2] | c[2:, 2:])
+        I = np.where(near & ~core & (q > 0.6), 0.12, I)
+        # speed lines: dashes streaming left, a whole loop moves each one a whole period
+        for off, length, ph in lines:
+            if not (0 <= cy + off < h):
+                continue
+            row = np.abs(F.y - (cy + off)) < 0.5
+            pos = (F.x + (tt + ph) * w) % w            # one whole width per loop
+            dash = row & (pos < w * length) & (q < 0.85)
+            fade = np.clip(pos / (w * length), 0, 1)    # bright at its front end
+            I = np.maximum(I, np.where(dash, 0.38 + 0.3 * fade * q, 0))
+        # sparks shed off the core, drifting back and out, dimming
+        for ph, side in sparks:
+            p = (ph + tt) % 1.0 if loop else _clamp(t * 1.2 + ph * 0.5)
+            px = head - 4 - p * (head - 4) * 0.8
+            py = cy + side * (1.2 + p * (h / 2 - 2))
+            if p < 0.9:
+                I = _dot(I, F, px, py, 0.95 - 0.55 * p)
         if not loop:   # one-shot: the tail gets eaten from the left
             I = np.where(q > t * 0.9, I, 0)
-        for off, ph in ((-0.34, 0.25), (0.34, 0.6)):
-            ly = cy + off * h
-            dash = np.cos(2 * math.pi * (2 * q + 2 * tt + ph)) > 0.15
-            line = (np.abs(F.y - ly) < 0.5) & dash & (q > 0.2) & (q < 0.92)
-            I = np.maximum(I, np.where(line, 0.5 * q + 0.1, 0))
-        out.append([(I * env, "main")])
+        out.append([(I * env, "main", 0.0)])
     return out
 
 
-def _dust(w, h, n, loop, rng):
+def _dust(w, h, n, loop, rng, wind=0.0):
+    """A footstep's kick of dust: two low, flat clouds roll out sideways along the ground (more
+    downwind), lift a little, then settle and thin away; a few grits hop out."""
     F = _F(w, h)
-    cx, ground = w / 2, h - 1.5
-    noise = _Noise(rng, 4, 2)
-    puffs = []
+    cx, ground = w / 2, h - 1.0
+    fbm = _Noise(rng, 4, 3)
+    lobes = []                      # (side, how far out, size, lift, delay)
     for side in (-1, 1):
-        for k in range(2):
-            puffs.append((side, rng.uniform(0.18, 0.42), rng.uniform(0.3, 0.42) * h,
-                          rng.uniform(0.0, 0.25) * h))
-    pebbles = [(rng.choice([-1, 1]) * rng.uniform(0.3, 0.9), rng.uniform(0.5, 1.0)) for _ in range(4)]
+        for k in range(3):
+            lobes.append((side, (0.26 - 0.07 * k + rng.uniform(-0.02, 0.02)) * w,  # leader first
+                          (0.3 - 0.06 * k + rng.uniform(-0.03, 0.03)) * h,
+                          (0.1 + 0.1 * k + rng.uniform(0, 0.08)) * h,
+                          k * 0.04 + rng.uniform(0, 0.04)))
+    grits = [(rng.choice([-1, 1]) * rng.uniform(0.35, 0.9), rng.uniform(0.6, 1.0),
+              rng.uniform(0, 0.15)) for _ in range(4)]
     out = []
     for t in _times(n, loop):
-        g = _ease_out(t / 0.6)
-        balls = [(cx + side * (2 + dist * w * g), ground - r * (0.5 + 0.4 * g) - rise * g,
-                  r * (0.5 + 0.55 * g), -dist) for side, dist, r, rise in puffs]
-        balls.append((cx, ground - h * 0.18, h * 0.32 * (1 - g * 0.6), 0.5))
-        I, cov = _puffs(F, balls)
-        cut = 0.02 + 1.05 * _clamp((t - 0.3) / 0.7)
-        vis = (cov + (noise(F.x / w, F.y / h) - 0.5) * 0.4 > cut) & (F.y < ground + 1)
-        I = np.where(vis, I, 0)
-        for vx, vy in pebbles:
-            px = cx + vx * w * 0.5 * t
-            py = ground - 1 - vy * h * 0.9 * (t - t * t) * 3
-            if t < 0.9:
-                I = _dot(I, F, px, py, 0.35)
-        out.append([(I, "main")])
+        blobs = []
+        for side, dist, r, lift, delay in lobes:
+            p = _clamp((t - delay) / (1 - delay))
+            g = _ease_out(p / 0.7)
+            reach = dist * (0.3 + 0.85 * g) * (1 + 0.45 * wind * side)
+            up = lift * math.sin(math.pi * min(1.0, p * 1.3)) * 0.8   # up, then settles
+            rr = r * (0.55 + 0.6 * g)
+            rx, ry = rr * (1.1 + 0.4 * p), rr * (0.85 - 0.3 * p)          # flattens as it settles
+            blobs.append((cx + side * reach + wind * w * 0.15 * p, ground - ry * 0.75 - up, rx, ry))
+        mid = 1 - _clamp(t / 0.4)                         # the puff right under the foot
+        blobs.append((cx, ground - h * 0.15, h * 0.32 * mid, h * 0.22 * mid))
+        N = fbm(F.x / w * 1.6 - wind * t * 0.25, F.y / h * 0.8 + t * 0.3)
+        I = _vapour(F, _union(F, blobs), N, _clamp((t - 0.2) / 0.8) ** 1.1, 0.78 - 0.45 * t)
+        I = np.where(F.y < ground + 1, I, 0)
+        for vx, vy, delay in grits:                    # little stones hopping out
+            p = (t - delay) / (1 - delay)
+            if 0 < p < 0.92:
+                px = cx + vx * w * 0.5 * p
+                py = ground - 1 - vy * h * 2.4 * (p - p * p)
+                I = _dot(I, F, px, py, 0.3)
+        out.append([(I, "main", 0.0)])
     return out
 
 
 def _splash(w, h, n, loop, rng):
+    """Something drops in: a crown of spikes jumps up round the hole, its tips break off into
+    droplets that arc outward and fall back, and rings ripple out over the water. The back
+    of the crown and rings is drawn darker than the front, so it sits on the surface."""
     F = _F(w, h)
-    cx, ground = w / 2, h - 3.5
-    drops = [(rng.uniform(-0.45, 0.45) * w, rng.uniform(0.55, 1.0) * h, rng.integers(0, 2))
-             for _ in range(9)]
+    S = min(w, h)
+    cx, ground = w / 2, h - S * 0.17
+    R0 = S * 0.15
+    sq = 0.3                                   # ellipse squash (the water seen at an angle)
+    k = 8
+    spikes = []
+    for j in range(k):
+        phi = 2 * math.pi * (j + 0.5 + rng.uniform(-0.2, 0.2)) / k
+        # spikes seen end-on (front/back) look shorter
+        spikes.append((phi, rng.uniform(0.8, 1.15) * (0.5 + 0.5 * abs(math.cos(phi))),
+                       rng.random() < 0.4, rng.uniform(0.85, 1.2)))
     out = []
     for t in _times(n, loop):
         I = F.zeros()
-        # central column up and back down
-        hc = h * 0.4 * math.sin(math.pi * _clamp(t / 0.7)) ** 0.8
-        if hc > 1:
-            v = (ground - F.y) / hc
-            half = 2.2 * (1 - np.clip(v, 0, 1)) ** 0.6 + 0.6
-            col = (v >= 0) & (v <= 1) & (np.abs(F.x - cx) <= half)
-            I = np.where(col, 0.55 + 0.45 * (1 - np.abs(F.x - cx - 0.6) / (half + 1)) * 0.9, I)
-        # crown droplets on arcs
-        for vx, vy, big in drops:
-            p = t * 1.1
-            px = cx + vx * p
-            py = ground - (vy * 1.6 * p - h * 1.4 * p * p * 0.8)
-            if p < 1.05 and py <= ground:
-                I = _dot(I, F, px, py, 0.95, 1.0 if big else 0.5)
-                I = _dot(I, F, px, py + 1, 0.55)
-        # ripple on the water
-        rr = w * (0.18 + 0.32 * _ease_out(t))
-        d, rho = _ring(F, cx, ground, rr, rr * 0.28)
-        I = np.maximum(I, np.where(d < 0.6, 0.85 * (1 - t) + 0.2, 0))
-        if t > 0.35:
-            d2, _ = _ring(F, cx, ground, rr * 0.6, rr * 0.6 * 0.28)
-            I = np.maximum(I, np.where(d2 < 0.6, 0.5 * (1 - t) + 0.15, 0))
-        out.append([(I, "main")])
+        # ripples: front arcs bright, back arcs darker
+        for start, val, grow in ((0.0, 0.85, 0.28), (0.32, 0.6, 0.18)):
+            if t >= start:
+                q = (t - start) / (1 - start)
+                rr = R0 * 0.9 + S * grow * _ease_out(q) * 1.15
+                d, _ = _ring(F, cx, ground, rr, rr * sq)
+                front = F.y >= ground
+                v = (val * (1 - 0.6 * q) + 0.12) * np.where(front, 1.0, 0.62)
+                # it breaks into dashes as it fades out
+                dash = np.cos(np.arctan2((F.y - ground) / sq, F.x - cx) * 10) > 2.4 * q - 1.9
+                I = np.maximum(I, np.where((d < 0.6) & dash, v, 0))
+        if t < 0.3:                            # the hole's foam, shrinking
+            _, rho = _ring(F, cx, ground, R0 * (1 - t / 0.3), R0 * sq * (1 - t / 0.3))
+            I = np.maximum(I, np.where(rho < 1, 0.95, 0))
+        # crown spikes rise and lean out, then their tips fly off as drops
+        rise = math.sin(math.pi * _clamp(t / 0.55)) ** 0.7
+        for phi, tall, big, sp in spikes:
+            bx, by = cx + R0 * math.cos(phi), ground + R0 * sq * math.sin(phi)
+            front = math.sin(phi) > -0.15
+            shade = 1.0 if front else 0.6
+            hh = S * 0.24 * tall * rise
+            lean = math.cos(phi) * S * 0.2 * rise
+            if hh > 0.8:
+                tx, ty = bx + lean, by - hh
+                dist = _seg_dist(F, bx, by, tx, ty)
+                along = np.clip((by - F.y) / max(hh, 1), 0, 1)
+                I = np.maximum(I, np.where(dist < 0.62, shade * (0.5 + 0.5 * along), 0))
+            if t > 0.18:                       # the tip's drop, on a ballistic arc
+                q = (t - 0.18) * sp
+                x0, y0 = bx + math.cos(phi) * S * 0.16, by - S * 0.22 * tall
+                px = x0 + (math.cos(phi) * 0.9 + 0.3 * (sp - 1)) * S * 0.45 * q
+                py = y0 - S * 1.4 * q + S * 3.0 * q * q
+                floor = ground + (R0 + S * 0.45 * q) * sq * math.sin(phi)
+                if py < floor:
+                    I = _dot(I, F, px, py, 0.98 * shade, 1.0 if big else 0.5)
+                    I = _dot(I, F, px, py - 1, 0.6 * shade)   # a short streak above it
+        out.append([(I, "main", 0.0)])
     return out
 
 
@@ -720,6 +845,7 @@ class Effect:
     loop: bool
     theme: str | None
     ramp: np.ndarray = field(repr=False, default=None)
+    rim: np.ndarray | None = field(repr=False, default=None)   # the rim colour, if one was used
 
     @property
     def size(self) -> tuple[int, int]:
@@ -742,9 +868,13 @@ def effect_size(kind: str, size=None, style=None) -> tuple[int, int]:
 
 def render_effect(kind: str, *, theme: str | None = None, colours=None, size=None,
                   frames: int | None = None, loop: bool | None = None, seed: int = 0,
-                  dither: float = 0.5, style=None, palette: np.ndarray | None = None) -> Effect:
+                  dither: float = 0.5, style=None, palette: np.ndarray | None = None,
+                  wind: float = 0.0, rim=None) -> Effect:
     """Draw an effect in memory. palette: snap colours to it (default: the style's fixed
-    palette, if it has one). dither: 0 = flat bands, 0.5 = a little Bayer at band edges."""
+    palette, if it has one). dither: 0 = flat bands, 0.5 = a little Bayer at band edges.
+    wind: -1 (blowing left) .. 1 (right), for smoke and dust. rim: a light colour for the dark
+    outer pixels so a dark effect reads on dark ground (None = the theme's, e.g. dark's light
+    purple; False = none)."""
     if kind not in SPECS:
         raise ValueError(f"Unknown effect '{kind}' (use {', '.join(EFFECT_KINDS)})")
     _, n0, ms, loop0, theme0, _ = SPECS[kind]
@@ -757,24 +887,39 @@ def render_effect(kind: str, *, theme: str | None = None, colours=None, size=Non
     pal = palette if palette is not None else project_palette(style)
     ramps = {"main": snap_ramp(theme_ramp(use_theme, colours), pal),
              "soot": snap_ramp(hex_to_rgb(SOOT), pal)}
+    if rim is None:
+        rim = RIMS.get(use_theme) if use_theme else None
+    rim_rgb = snap_ramp(_parse_colours([rim]), pal)[0] if rim else None
     rng = np.random.default_rng(seed)
-    layers = _MAKERS[kind](w, h, n, loop, rng)
+    maker = _MAKERS[kind]
+    layers = maker(w, h, n, loop, rng, wind=float(wind)) if kind in WINDY else maker(w, h, n, loop, rng)
     out = []
     used = []
     for frame in layers:
         rgba = np.zeros((h, w, 4), np.uint8)
-        for I, name in frame:
+        dark = np.zeros((h, w), bool)          # main-ramp pixels in its darker third
+        for layer in frame:
+            I, name = layer[:2]
             ramp = ramps[name]
-            idx = _shade(np.asarray(I, np.float32), len(ramp), dither)
+            dk = layer[2] if len(layer) > 2 else 1.0        # the layer's share of the dither
+            idx = _shade(np.asarray(I, np.float32), len(ramp), dither * dk)
             m = idx >= 0
             rgba[m, :3] = ramp[idx[m]]
             rgba[m, 3] = 255
+            dark = np.where(m, (idx < max(1, len(ramp) // 3)) & (name == "main"), dark)
             if m.any():
                 used.append(name)
+        if rim_rgb is not None:
+            edge = dark & _outer_edge(rgba[..., 3] > 0)
+            rgba[edge, :3] = rim_rgb
+            if edge.any():
+                used.append("rim")
         out.append(rgba)
-    colours_used = [ramps["main"]] + ([ramps["soot"]] if "soot" in used else [])
+    colours_used = ([ramps["main"]] + ([ramps["soot"]] if "soot" in used else [])
+                    + ([rim_rgb[None]] if "rim" in used else []))
     all_cols = np.unique(np.concatenate(colours_used), axis=0)
-    return Effect(kind, out, all_cols, ms, loop, use_theme, ramps["main"])
+    return Effect(kind, out, all_cols, ms, loop, use_theme, ramps["main"],
+                  rim_rgb if "rim" in used else None)
 
 
 # --------------------------------------------------------------------------- files
@@ -848,22 +993,24 @@ def write_thumb(effect: Effect, out, px: int = 96) -> Path:
 
 def make_effect(kind: str, name: str | None = None, *, theme: str | None = None, colours=None,
                 size=None, frames: int | None = None, project=None, loop: bool | None = None,
-                seed: int = 0, dither: float = 0.5, tags=None):
+                seed: int = 0, dither: float = 0.5, tags=None, wind: float = 0.0, rim=None):
     """Make an effect and save it as an asset (kind "effect") in the project (default: the
     current one) at its scale and palette. Returns the Asset."""
     from .assets import current_project, new_asset, set_tags
     proj = project or current_project()
     style = proj.style
     fx = render_effect(kind, theme=theme, colours=colours, size=size, frames=frames, loop=loop,
-                       seed=seed, dither=dither, style=style)
+                       seed=seed, dither=dither, style=style, wind=wind, rim=rim)
     label = name or (SPECS[kind][5].split(" (")[0] + (f" ({fx.theme})" if fx.theme and
                                                      fx.theme != SPECS[kind][4] else ""))
     w, h = fx.size
     asset = new_asset("effect", label, proj, effect=kind, theme=fx.theme,
                       colours=[rgb_to_hex(c) for c in fx.ramp], size=[w, h],
                       frames=len(fx.frames), frame_ms=fx.frame_ms, loop=fx.loop, seed=seed,
-                      dither=dither, files=["sheet.png", "sheet.json", "sheet.aseprite",
-                                            "sheet.tres", "preview.gif", "thumb.png"])
+                      dither=dither, wind=float(wind) if kind in WINDY else 0.0,
+                      rim=rgb_to_hex(fx.rim) if fx.rim is not None else None,
+                      files=["sheet.png", "sheet.json", "sheet.aseprite", "sheet.tres",
+                             "preview.gif", "thumb.png"])
     write_effect(fx, asset.folder)
     set_tags(asset, sorted({"effect", kind, *([fx.theme] if fx.theme else []), *(tags or [])}))
     return asset

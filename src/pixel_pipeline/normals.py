@@ -121,3 +121,21 @@ def write_normal_sheet(sprites: list[Sprite], out_png, columns: int) -> Path:
     path = normal_sheet_path(out_png)
     Image.fromarray(sheet, "RGBA").save(path)
     return path
+
+
+def from_drawing(rgba: np.ndarray, bevel: float = 3.0, relief: float = 0.6) -> np.ndarray:
+    """A normal map for a drawn sprite (no 3D behind it): the silhouette is bevelled (normals
+    tilt outward near the edge) and brightness adds surface relief, so scene lights still shade
+    it (HD-2D, Godot/Unity 2D lights). RGBA, OpenGL convention, alpha = the sprite's."""
+    import cv2
+    a = (rgba[..., 3] >= 128).astype(np.uint8)
+    dist = cv2.distanceTransform(a, cv2.DIST_L2, 3).astype(np.float32)
+    height = np.clip(dist / max(bevel, 1e-3), 0, 1)
+    lum = rgba[..., :3].astype(np.float32).mean(-1) / 255.0
+    height = height + relief * cv2.GaussianBlur(lum, (0, 0), 0.8) * (dist > 0)
+    gy, gx = np.gradient(height)
+    n = np.dstack([-gx, gy, np.full_like(gx, 0.35)])        # y up in the normal map
+    n /= np.linalg.norm(n, axis=-1, keepdims=True)
+    out = np.dstack([encode(face_camera(n)), rgba[..., 3]])
+    out[a == 0] = 0
+    return out.astype(np.uint8)

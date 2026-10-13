@@ -68,11 +68,16 @@ class EffectsTab(ToolTab):
         for label, v in (("Effect's own", None), ("Loop", True), ("Once", False)):
             self.loop.addItem(label, v)
         self.seed = spin(0, 9999, 0)
+        self.wind = QComboBox()                # smoke and dust only
+        for label, v in (("Still air", 0.0), ("Breeze to the right", 0.5),
+                         ("Wind to the right", 1.0), ("Breeze to the left", -0.5),
+                         ("Wind to the left", -1.0)):
+            self.wind.addItem(label, v)
         self.dither = QCheckBox("Dithered edges")
         self.dither.setChecked(True)
         self.name = QLineEdit()
         self.name.setPlaceholderText("Name (optional)")
-        for w in (self.theme, self.loop):
+        for w in (self.theme, self.loop, self.wind):
             w.currentIndexChanged.connect(self.preview)
         for w in (self.size_, self.frames, self.seed):
             w.valueChanged.connect(self.preview)
@@ -91,6 +96,7 @@ class EffectsTab(ToolTab):
         form.addRow("Frames", self.frames)
         form.addRow("Plays", self.loop)
         form.addRow("Variation", self.seed)
+        form.addRow("Wind", self.wind)
         form.addRow(self.dither)
         form.addRow(self.name)
         form.addRow(self.make_btn)
@@ -142,7 +148,8 @@ class EffectsTab(ToolTab):
         return {"theme": self.theme.currentData(), "colours": text or None,
                 "size": self.size_.value() or None, "frames": self.frames.value() or None,
                 "loop": self.loop.currentData(), "seed": self.seed.value(),
-                "dither": 0.5 if self.dither.isChecked() else 0.0}
+                "dither": 0.5 if self.dither.isChecked() else 0.0,
+                "wind": self.wind.currentData() if self.wind.isEnabled() else 0.0}
 
     # -- previews
     def _render_icons(self):
@@ -154,6 +161,8 @@ class EffectsTab(ToolTab):
             self.kinds.item(i).setIcon(_icon(self.kind_fx[kind].frames[0]))
 
     def _kind_changed(self, *_):
+        from ..effects import WINDY
+        self.wind.setEnabled(self.current_kind() in WINDY)
         self.preview()
 
     def preview(self, *_):

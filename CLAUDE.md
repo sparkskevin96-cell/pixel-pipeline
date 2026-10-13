@@ -110,7 +110,7 @@ wants terse answers and fixes over polish.
   flipped)/gamemaker(_stripN)/aseprite/generic; `reskin.py` (recolour variants);
   `jobqueue.py` (paced creation queue, variations); `ui/assets_tab.py` (Library page).
   `portraits.py` (painted busts by SDXL img2img from picture.png, expressions at 0.58 denoise:
-  still subtle, a face-only inpaint would be stronger; pixel versions) + `effects.py` (13
+  now face-only inpaint, see Polish wave; pixel versions) + `effects.py` (13
   procedural effects, themes) and their tabs. Character quality: `model3d.views_for_model`
   (back/side pictures by img2img over the shape rendered from that side; prompt_to_model
   views= default front+back from words) and paint_from_picture back/left/right;
@@ -118,6 +118,25 @@ wants terse answers and fixes over polish.
   add_animations; library.add_character_animations keeps old frames identical);
   `pixelclean.py` (specks, islands, nubs; on in library.render_sheets). Characters store
   their prompt. GPU verified 2026-10-12: all-four-views swordswoman (3.5 min), portraits.
+- **Polish wave (2026-10-13)**:
+  - Portrait expressions: face-only inpaint (YuNet landmarks -> soft face mask, crop to 1024, SDXL
+    inpaint at 0.9 via generate inpaint workflow, composite so everything outside is identical,
+    colour-matched); no face found (visor) -> whole-picture fallback.
+  - Items: weapons/keys lie flat from the icon (thickened), chunky items stay 3D.
+  - Props: hand_pixel finish (material ramps, warm lights/cool shadows), equalise_faces.
+  - DRAWN props (default from words, objects.draw_prop): Kevin called the Hunyuan-rendered
+    cottage awful (melty mesh posterised). Buildings and props are drawn as pixel art by SDXL +
+    Pixel Art XL at the project's camera, then drop_ground (flat grey slab), converter, clean-up,
+    normals.from_drawing (bevel + relief) so lights still work. SDXL draws buildings front-on
+    whatever the prompt, so in angled projects a building's single view is redrawn over its
+    Hunyuan shape seen from the SE corner (img2img 0.7); 4 sides = each side drawn over the
+    model's view. same_size pads frames.
+  - Effects: wispy smoke/dust, crown splash, arrow trail, heal ring, dark-theme rim.
+  - Unity export verified in Unity 6000.3.9f1 batch mode (tools/verify_unity: 99/99 checks,
+    pixels per sprite, normal map as _NormalMap, .anim clips). Fixed: metas with `sprites: []`
+    on one line, sheets over 8192 px repacked into columns. GameMaker: spr_ strips, GML loader,
+    not verified (not installed).
+  - Updater copies with /IS /IT.
 - **App layout (2026-10-12, Kevin: "make it feel intuitive")**: tabs in the order you make a
   game: `1 Characters` (ModelStudio + Character Library list on the left; Kind person/animal/
   object, Size words not numbers, Name, Add to library = rig + all clips x16 + normals at the

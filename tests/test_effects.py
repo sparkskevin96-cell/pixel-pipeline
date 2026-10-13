@@ -35,6 +35,69 @@ def test_loops_wrap(kind):
     assert np.array_equal(b.frames[2 * n - 2], a.frames[n - 1])  # same motion at half speed
 
 
+@pytest.mark.parametrize("kind", ["heal", "level_up"])
+def test_optional_loops_wrap(kind):
+    n = effects.SPECS[kind][1]
+    a = effects.render_effect(kind, frames=n, loop=True)
+    b = effects.render_effect(kind, frames=2 * n, loop=True)
+    assert np.array_equal(b.frames[0], a.frames[0])
+    assert np.array_equal(b.frames[2 * n - 2], a.frames[n - 1])
+
+
+def _drift_x(fx):
+    """How far the visible pixels' middle moves sideways from the 2nd frame to the 2nd-last."""
+    a, b = fx.frames[1], fx.frames[-2]
+    return float(np.nonzero(b[..., 3])[1].mean() - np.nonzero(a[..., 3])[1].mean())
+
+
+@pytest.mark.parametrize("kind", ["smoke", "dust"])
+def test_wind_pushes_smoke_and_dust(kind):
+    still = effects.render_effect(kind)
+    right = effects.render_effect(kind, wind=1.0)
+    left = effects.render_effect(kind, wind=-1.0)
+    if kind == "smoke":                     # it drifts downwind as it rises
+        assert _drift_x(left) < -1 and _drift_x(right) > 1 and abs(_drift_x(still)) < 3
+    else:                                   # the kicked-up dust leans downwind
+        mid = lambda fx: np.mean([np.nonzero(f[..., 3])[1].mean() for f in fx.frames])  # noqa: E731
+        assert mid(left) < mid(still) - 1 < mid(right) - 2
+    # other kinds ignore it
+    assert all(np.array_equal(a, b) for a, b in zip(effects.render_effect("hit").frames,
+                                                       effects.render_effect("hit", wind=1).frames))
+
+
+def test_smoke_breaks_up():
+    """Smoke thins out: the late frames are smaller than the peak and have holes or pieces."""
+    import cv2
+    fx = effects.render_effect("smoke")
+    area = [int((f[..., 3] > 0).sum()) for f in fx.frames]
+    peak = int(np.argmax(area))
+    assert 0 < peak < len(area) - 2 and area[-1] < area[peak] * 0.5
+    pieces = [cv2.connectedComponents((f[..., 3] > 0).astype(np.uint8), connectivity=4)[0] - 1
+              for f in fx.frames[peak:]]
+    assert max(pieces) >= 3                                       # wisps, not one shrinking ball
+    shades = {tuple(c) for c in fx.frames[1][fx.frames[1][..., 3] > 0][:, :3].tolist()}
+    late = {tuple(c) for c in fx.frames[-2][fx.frames[-2][..., 3] > 0][:, :3].tolist()}
+    lum = lambda cs: np.mean([sum(c) for c in cs])               # noqa: E731
+    assert lum(late) < lum(shades)                                # fades darker as it goes
+
+
+def test_dark_theme_rim():
+    """The dark theme's outer dark pixels get a light rim, so it shows on dark ground."""
+    rim = tuple(hex_to_rgb([effects.RIMS["dark"]])[0].tolist())
+    fx = effects.render_effect("slash", theme="dark")
+    used = {tuple(c) for f in fx.frames for c in f[f[..., 3] > 0][:, :3].tolist()}
+    assert rim in used and fx.rim is not None
+    plain = effects.render_effect("slash", theme="dark", rim=False)
+    assert rim not in {tuple(c) for f in plain.frames for c in f[f[..., 3] > 0][:, :3].tolist()}
+    darkest = tuple(hex_to_rgb([effects.THEMES["dark"][0]])[0].tolist())
+    for f in fx.frames:                                           # no near-black on the outside
+        m = f[..., 3] > 0
+        edge = effects._outer_edge(m)
+        assert darkest not in {tuple(c) for c in f[edge][:, :3].tolist()}
+    fire = effects.render_effect("fire")                          # other themes: no rim
+    assert fire.rim is None
+
+
 def test_theme_colours_size_frames():
     fire = effects.render_effect("fire", theme="ice")
     ice = set(map(tuple, hex_to_rgb(effects.THEMES["ice"]).tolist()))
@@ -85,6 +148,8 @@ def test_make_effect_files(tmp_path):
     assert [a.name for a in list_assets("effect", project=proj)] == ["Explosion (poison)"]
     loop = effects.make_effect("fire", "Torch", project=proj)
     assert loop.folder.name == "torch" and '"loop": true' in (loop.folder / "sheet.tres").read_text()
+    smoke = effects.make_effect("smoke", project=proj, wind=-0.5, theme="dark")
+    assert smoke.extra["wind"] == -0.5 and smoke.extra["rim"]
 
 
 def test_effects_tab(tmp_path):
@@ -113,5 +178,10 @@ def test_effects_tab(tmp_path):
     assert tab.last.extra["theme"] == "poison" and tab.last.extra["frames"] == 6
     tab.saved.setCurrentRow(0)
     assert "Green flame" in tab.info.text()
+    assert not tab.wind.isEnabled()
+    tab.select_kind("smoke")
+    assert tab.wind.isEnabled()
+    tab.wind.setCurrentIndex(tab.wind.findData(1.0))
+    assert tab.options()["wind"] == 1.0
     tab.colours.setText("#zzz")
     tab.preview()                                             # bad colours -> message, no crash

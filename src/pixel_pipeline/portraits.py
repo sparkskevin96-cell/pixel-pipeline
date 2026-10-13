@@ -13,9 +13,13 @@ in the project's palette, and a 9-slice frame for game UI.
 
 How the painted ones keep the character's identity: the bust is cropped from the character's
 picture.png (YuNet face box, teams.portrait_crop), then SDXL img2img (no pixel LoRA) redraws it
-as a painting at a moderate denoise; every expression is then made FROM that neutral painting
-at a lower denoise with the same seed (seed = hash of the character's folder), so the face,
-hair and clothes stay put while the expression changes. Characters without a picture fall back
+as a painting at a moderate denoise. Every expression is then made FROM that neutral painting by
+inpainting only the face (face_mask: YuNet eyes + mouth landmarks on the painting -> a feathered
+ellipse over brows, eyes, cheeks, mouth and chin) at a high denoise with strong expression words
+and "neutral expression" in the negative, same seed (seed = hash of the character's folder).
+The result is composited back with the mask, so hair, clothes and background outside it are
+pixel-identical to the neutral; whole-picture img2img at 0.58 (face_only=False, the old way)
+barely changed faces and drifted identity when pushed. Characters without a picture fall back
 to their front idle sprite, enlarged (needs a higher denoise, so less faithful).
 """
 from __future__ import annotations
@@ -28,16 +32,37 @@ import numpy as np
 from PIL import Image
 
 EXPRESSIONS = ("neutral", "happy", "angry", "sad", "surprised")
+ALL_EXPRESSIONS = ("neutral", "happy", "angry", "sad", "surprised", "determined", "smug", "hurt",
+                   "thinking")
+# (words:1.3) = ComfyUI prompt weighting: the expression has to win over the painting under it
 EXPRESSION_WORDS = {
     "neutral": "calm neutral expression, closed mouth",
-    "happy": "happy expression, warm smile",
-    "angry": "angry expression, furrowed brows, gritted teeth, scowl",
-    "sad": "sad expression, downcast eyes, slight frown",
-    "surprised": "surprised expression, wide eyes, open mouth, raised eyebrows",
-    "determined": "determined expression, focused eyes, set jaw",
-    "smug": "smug expression, smirk, half-lidded eyes",
-    "hurt": "pained expression, wincing, one eye shut",
-    "thinking": "thoughtful expression, eyes looking aside",
+    "happy": "(big happy smile:1.4), joyful laughing face, open-mouth smile showing teeth, "
+             "smiling eyes, raised cheeks",
+    "angry": "(angry:1.3), (furrowed eyebrows:1.3), glaring eyes, scowl, gritted teeth",
+    "sad": "(sad:1.5), (crying:1.3), (worried eyebrows:1.3), (frowning:1.3), teary eyes, pout",
+    "surprised": "(shocked surprised face:1.5), (very wide open eyes:1.3), raised eyebrows, "
+                 "(mouth wide open:1.4)",
+    "determined": "(determined:1.4), (glaring:1.3), (v-shaped eyebrows:1.4), (furrowed "
+                  "brow:1.2), lips pressed together",
+    "smug": "(smug smirk:1.4), lopsided grin, half-lidded eyes, one eyebrow raised",
+    "hurt": "(wincing in pain:1.5), (one eye closed:1.5), (clenched teeth:1.4), (frowning:1.2), "
+            "sweat",
+    "thinking": "(thinking:1.4), (eyes looking up:1.4), (pursed lips:1.3), (one eyebrow "
+                "raised:1.3), pensive",
+}
+NEUTRAL_NEGATIVE = ("(neutral expression:1.3), expressionless, blank stare, emotionless, face "
+                    "paint, tattoo, facial markings, scar, white streak, scratch, sparkles, "
+                    "white dots")
+EXPRESSION_NEGATIVE = {      # the opposite looks too, so e.g. "sad" can't come out smiling
+    "happy": "frown, sad, angry",
+    "angry": "smile, happy, calm",
+    "sad": "smile, happy, grin, blood",
+    "surprised": "closed mouth, narrowed eyes",
+    "determined": "smile, open mouth",
+    "smug": "frown, sad, open mouth",
+    "hurt": "smile, grin, happy, calm, blood, tears",
+    "thinking": "smile, open mouth, looking at the viewer",
 }
 PAINTED_PROMPT = ("{who}, head and shoulders portrait, {expression}, painted fantasy game "
                   "portrait, anime-inspired painterly illustration, detailed face, clean "
@@ -47,11 +72,21 @@ PAINTED_NEGATIVE = ("photo, photorealistic, 3d render, pixel art, sprite, blurry
                     "artifacts, text, watermark, signature, frame, border, multiple people, "
                     "cropped head, out of frame, deformed face, extra eyes, bad anatomy, "
                     "busy background, scenery")
+# expressions repaint only the face: the expression goes first, words are about the face
+# (the character's own words drowned the expression and "green armor" leaked into eyes and
+# tears; without any, angry turned her into a man): only who the person is (person_words)
+# stays, and match_colours pulls the repainted face and each eye back to the neutral's colours
+EXPRESSION_PROMPT = ("close-up face of {person}, {expression}, painted fantasy game portrait, "
+                     "anime-inspired painterly illustration, detailed expressive face, clean "
+                     "lineart, soft cel shading")
 NEUTRAL_DENOISE = 0.5        # picture -> painting
-EXPRESSION_DENOISE = 0.58    # neutral painting -> each expression (0.4 barely changed faces)
+EXPRESSION_DENOISE = 0.9     # face-only inpaint of the neutral painting -> each expression
+EXPRESSION_DENOISE_BY = {"sad": 0.95, "hurt": 0.95, "thinking": 0.95}   # eye-led ones need more
+WHOLE_DENOISE = 0.58         # face_only=False: whole-picture img2img (0.4 barely changed faces)
 SPRITE_DENOISE = 0.65        # enlarged sprite -> painting (no picture.png)
 STYLES = ("painted", "pixel")
 GEN_SIZE = 1024
+PIXEL_ALPHA = 200            # cut-out alpha a pixel bust pixel needs
 
 
 # --------------------------------------------------------------------------- character input
@@ -139,6 +174,15 @@ def init_bust(ch, settings=None) -> tuple[Image.Image, float, str]:
     return _on_white(bust_crop(sprite), GEN_SIZE, smooth=False), SPRITE_DENOISE, "sprite"
 
 
+def _white_key(rgb: np.ndarray, tol: float = 14.0) -> np.ndarray:
+    """True = surely subject: not near-white (Lab distance to white >= tol). White parts
+    (shirts, gaps between curls) are left to the cut-out model."""
+    from .color import rgb_to_lab
+    h, w = rgb.shape[:2]
+    lab = rgb_to_lab(rgb.reshape(-1, 3)).reshape(h, w, 3)
+    return np.linalg.norm(lab - np.array([100.0, 0.0, 0.0]), axis=-1) >= tol
+
+
 def _cut_out(img: Image.Image) -> np.ndarray:
     """Generated bust on white -> RGBA with the background removed."""
     from .pipeline import isolate, load_image
@@ -147,6 +191,11 @@ def _cut_out(img: Image.Image) -> np.ndarray:
     rgba = load_image(img)
     rgba[..., 3] = 255
     out = isolate(rgba, settings_for("person"))
+    # the paintings are on plain white: anything clearly not white is the bust, whatever the
+    # model thinks (it made a knight's soft red hood half see-through)
+    key = _white_key(rgba[..., :3])
+    inner = cv2.erode(key.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0   # keep soft edges
+    out[..., 3] = np.where(inner, 255, out[..., 3])
     # keep the bust; drop the specks the cut-out leaves around hair and edges
     solid = (out[..., 3] >= 128).astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(solid, connectivity=8)
@@ -155,6 +204,163 @@ def _cut_out(img: Image.Image) -> np.ndarray:
         small = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] < 0.02 * biggest]
         out[np.isin(lab, small), 3] = 0
     return out
+
+
+# --------------------------------------------------------------------------- face mask
+
+def face_landmarks(rgb: np.ndarray, threshold: float = 0.5) -> dict | None:
+    """YuNet on an RGB/RGBA picture: {"box": (x, y, w, h), "eyes": [(x, y), (x, y)],
+    "nose": (x, y), "mouth": [(x, y), (x, y)], "score"} of the most confident face, else None."""
+    import cv2
+    from .teams import _face_model
+    model = _face_model()
+    if model is None:
+        return None
+    h, w = rgb.shape[:2]
+    k = min(1.0, 640 / max(h, w))
+    small = cv2.resize(np.ascontiguousarray(rgb[..., 2::-1]),
+                       (max(1, round(w * k)), max(1, round(h * k))))
+    try:
+        det = cv2.FaceDetectorYN.create(str(model), "", (small.shape[1], small.shape[0]),
+                                        threshold)
+        _, faces = det.detect(small)
+    except (cv2.error, AttributeError):
+        return None
+    if faces is None or not len(faces):
+        return None
+    f = faces[np.argmax(faces[:, -1])] / np.r_[np.full(14, k), 1.0]
+    pts = f[4:14].reshape(5, 2)
+    return {"box": tuple(float(v) for v in f[:4]), "eyes": [tuple(pts[0]), tuple(pts[1])],
+            "nose": tuple(pts[2]), "mouth": [tuple(pts[3]), tuple(pts[4])],
+            "score": float(f[14])}
+
+
+def _subject_top_face(rgb: np.ndarray) -> tuple[float, float, float, float, float]:
+    """No face found (helmets, masks, odd paintings): guess it from the bust's own top on
+    white. -> (cx, cy, rx, ry, angle)."""
+    h, w = rgb.shape[:2]
+    solid = (rgb[..., :3].astype(np.int16) < 235).any(-1)
+    ys = np.nonzero(solid.any(1))[0]
+    top = int(ys.min()) if len(ys) else int(0.1 * h)
+    row = np.nonzero(solid[min(h - 1, top + int(0.18 * h))])[0]
+    cx = float(np.median(row)) if len(row) else w / 2
+    return cx, top + 0.3 * h, 0.15 * w, 0.17 * h, 0.0
+
+
+def face_ellipse(rgb: np.ndarray, face="detect"):
+    """(cx, cy, rx, ry, angle in radians) of the face region to repaint: brows to chin,
+    cheek to cheek, turned with the eye line. From YuNet landmarks, else the face box, else
+    the bust's top."""
+    if isinstance(face, str):
+        face = face_landmarks(rgb)
+    if face is None:
+        return _subject_top_face(rgb)
+    (ax, ay), (bx, by) = face["eyes"]
+    (mx1, my1), (mx2, my2) = face["mouth"]
+    eye = np.array([(ax + bx) / 2, (ay + by) / 2])
+    mouth = np.array([(mx1 + mx2) / 2, (my1 + my2) / 2])
+    d = float(np.hypot(bx - ax, by - ay))
+    fx, fy, fw, fh = face["box"]
+    down = mouth - eye
+    length = float(np.hypot(*down))
+    if d < 0.15 * fw or length < 0.15 * fh:     # landmarks unusable: the box alone
+        return fx + fw / 2, fy + 0.52 * fh, 0.46 * fw, 0.52 * fh, 0.0
+    down = down / length
+    angle = float(np.arctan2(-down[0], down[1]))        # 0 = upright
+    top = -0.62 * d                                     # brows (along the face's own axis)
+    bottom = length + 0.62 * d                          # chin
+    c = eye + down * (top + bottom) / 2
+    return float(c[0]), float(c[1]), 0.92 * d, (bottom - top) / 2, angle  # 1.0 d met the hair
+
+
+def face_mask(rgb: np.ndarray, face="detect", *, core: float = 0.78,
+              edge: float = 1.12) -> np.ndarray:
+    """Soft float32 (H, W) mask over the face (1 inside, smooth falloff from `core` to `edge`
+    of the face ellipse, 0 outside): what an expression may repaint."""
+    h, w = rgb.shape[:2]
+    cx, cy, rx, ry, ang = face_ellipse(rgb, face)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx, dy = xx - cx, yy - cy
+    ca, sa = np.cos(ang), np.sin(ang)
+    u, v = dx * ca + dy * sa, -dx * sa + dy * ca
+    r = np.sqrt((u / max(rx, 1)) ** 2 + (v / max(ry, 1)) ** 2)
+    t = np.clip((edge - r) / (edge - core), 0, 1)
+    return (t * t * (3 - 2 * t)).astype(np.float32)
+
+
+def match_colours(painted: Image.Image, reference: Image.Image, mask: np.ndarray) -> Image.Image:
+    """painted's colours inside the mask moved to reference's (a/b mean + spread in Lab,
+    weighted by the mask): a repainted face keeps the neutral's skin tone and palette."""
+    from .color import lab_to_rgb, rgb_to_lab
+    w = mask.astype(np.float64).reshape(-1)
+    if w.sum() < 1:
+        return painted
+    p = rgb_to_lab(np.asarray(painted.convert("RGB"), np.float32).reshape(-1, 3)).astype(np.float64)
+    r = rgb_to_lab(np.asarray(reference.convert("RGB"), np.float32).reshape(-1, 3)).astype(np.float64)
+
+    def stats(x):
+        mu = (x * w[:, None]).sum(0) / w.sum()
+        sd = np.sqrt(((x - mu) ** 2 * w[:, None]).sum(0) / w.sum()) + 1e-6
+        return mu, sd
+
+    pm, ps = stats(p)
+    rm, rs = stats(r)
+    out = p.copy()           # colour only (a, b): lightness changes are the expression (teeth)
+    out[:, 1:] = (p[:, 1:] - pm[1:]) * np.clip(rs[1:] / ps[1:], 0.7, 1.4) + rm[1:]
+    rgb = np.clip(lab_to_rgb(out.astype(np.float32)), 0, 255).reshape(painted.height, painted.width, 3)
+    return Image.fromarray(np.rint(rgb).astype(np.uint8), "RGB")
+
+
+_WOMAN = ("woman", "girl", "female", "lady", "queen", "princess", "witch", "priestess",
+          "sorceress", "maiden", "heroine", "empress", "duchess", "nun", "mother")
+_MAN = ("man", "boy", "male", "king", "prince", "lord", "monk", "priest", "father", "wizard",
+        "sorcerer", "emperor", "duke")
+
+
+def person_words(who: str) -> str:
+    """'a woman' / 'a man' / 'a person' from the character's words (swordswoman -> woman):
+    the identity a face-only repaint must keep, without costume words."""
+    import re
+    words = re.findall(r"[a-z]+", who.lower())
+    if any(w.endswith(_WOMAN) for w in words):
+        old = any(w in ("old", "elderly", "aged") for w in words)
+        return "an old woman" if old else ("a girl" if "girl" in words else "a young woman"
+                                          if "young" in words else "a woman")
+    if any(w.endswith(_MAN) and not w.endswith(_WOMAN) for w in words):
+        old = any(w in ("old", "elderly", "aged") for w in words)
+        return "an old man" if old else ("a boy" if "boy" in words else "a young man"
+                                        if "young" in words else "a man")
+    return "a person"
+
+
+def eye_discs(face: dict, size, offset=(0, 0)) -> list[np.ndarray]:
+    """Soft round masks (one per eye, in a crop of `size` at `offset`) around the irises."""
+    (ax, ay), (bx, by) = face["eyes"]
+    d = float(np.hypot(bx - ax, by - ay))
+    w, h = size
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    out = []
+    for x, y in face["eyes"]:
+        cx, cy = x - offset[0], y - offset[1] + 0.06 * d     # the points sit on the upper lid
+        r = np.hypot(xx - cx, yy - cy) / (0.26 * d)
+        out.append(np.clip(1.5 - r, 0, 1).astype(np.float32) ** 1.5)
+    return out
+
+
+def face_crop_box(mask: np.ndarray, margin: float = 0.15) -> tuple[int, int, int, int]:
+    """Square (x0, y0, x1, y1) around the mask's non-zero part plus `margin` each side, kept
+    inside the picture: the face is repainted from this crop enlarged to GEN_SIZE (an SDXL
+    face that fills the frame takes an expression far better than a small one)."""
+    h, w = mask.shape
+    ys, xs = np.nonzero(mask > 0)
+    if not len(xs):
+        return 0, 0, w, h
+    side = max(xs.max() - xs.min(), ys.max() - ys.min()) + 1
+    side = min(int(round(side * (1 + 2 * margin))), w, h)
+    cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2
+    x0 = int(np.clip(round(cx - side / 2), 0, w - side))
+    y0 = int(np.clip(round(cy - side / 2), 0, h - side))
+    return x0, y0, x0 + side, y0 + side
 
 
 # --------------------------------------------------------------------------- frame
@@ -308,17 +514,51 @@ def pixel_bust(painted: np.ndarray, size: int, style, palette: np.ndarray | None
     return finish(prepare(painted, s), s, palette)
 
 
+def _clean_bust(sprite, style):
+    """Specks and 1-2 px colour islands off a pixel bust (pixelclean, as for sheets)."""
+    from .pixelclean import clean_sprite
+    outline = style.outline if style.outline in ("selout", "solid", "none") else "selout"
+    return clean_sprite(sprite, outline, speck=6, islands=2)
+
+
+def _clear_portrait(replace, info: dict):
+    """An existing portrait asset emptied of its old images, with new info."""
+    import shutil
+    from .assets import Asset
+    folder = Path(getattr(replace, "folder", replace))
+    meta = folder / "asset.json"
+    if not meta.exists():
+        raise ValueError(f"No portrait asset in {folder}")
+    d = json.loads(meta.read_text(encoding="utf-8"))
+    if d.get("kind") != "portrait":
+        raise ValueError(f"{folder} is a {d.get('kind')} asset, not a portrait")
+    for p in folder.iterdir():
+        if p.name != "asset.json":
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+    a = Asset("portrait", d.get("name", folder.name), folder, tags=d.get("tags", []),
+              collections=d.get("collections", []), created=d.get("created", 0.0),
+              extra={**d.get("extra", {}), **info})
+    a.save()
+    return a
+
+
 def make_portraits(character, expressions=EXPRESSIONS, style: str = "painted",
                    size: int | None = None, *, client=None, progress=None, project=None,
                    painted_size: int = 512, prompt: str | None = None, seed: int | None = None,
-                   **gen_opts):
+                   face_only: bool = True, expression_denoise: float | None = None,
+                   replace=None, **gen_opts):
     """Portraits of a library character (Character, folder or name) in each expression.
     style: "painted" or "pixel" (which one the sheet/thumbnail show; both are always saved).
+    face_only: expressions inpaint just the face of the neutral painting (default); False =
+    the whole picture img2img'd at WHOLE_DENOISE, which is also what happens when YuNet finds
+    no face on the neutral painting (asset.extra face_found False: helmets, visors, masks).
+    expression_denoise overrides the denoise.
+    replace: an existing portrait Asset (or its folder) to write over instead of a new one.
     size: pixel bust size (default 96 px for a 64 px person, scaled with the project).
     client: a generate.ComfyClient (default: the local ComfyUI). gen_opts go to
     generate_images (lora is always "none": the painted look). Returns the Asset."""
     from .assets import current_project, new_asset, set_tags
-    from .generate import generate_images
+    from .generate import composite_masked, generate_images
     if style not in STYLES:
         raise ValueError(f"Unknown portrait style '{style}' (use {', '.join(STYLES)})")
     expressions = [e.strip() for e in expressions if e and e.strip()]
@@ -339,38 +579,99 @@ def make_portraits(character, expressions=EXPRESSIONS, style: str = "painted",
     say("Cropping head and shoulders…")
     init, denoise, source = init_bust(ch)
 
-    def paint(image, expr, dn):
-        words = EXPRESSION_WORDS.get(expr, f"{expr} expression")
-        (img, _), = generate_images(PAINTED_PROMPT.format(who=who, expression=words),
-                                    PAINTED_NEGATIVE, client=client, seed=seed, init_image=image,
+    def paint(image, expr, dn, mask=None):
+        words = EXPRESSION_WORDS.get(expr, f"({expr} expression:1.3)")
+        negative = PAINTED_NEGATIVE
+        if expr != "neutral":
+            negative = ", ".join(x for x in (NEUTRAL_NEGATIVE, EXPRESSION_NEGATIVE.get(expr),
+                                             PAINTED_NEGATIVE) if x)
+        template = PAINTED_PROMPT if expr == "neutral" or mask is None else EXPRESSION_PROMPT
+        text = template.format(who=who, expression=words, person=person)
+        if mask is not None:          # the face alone, enlarged to the full generation size
+            box = face_crop_box(mask)
+            face = image.crop(box)
+            m = mask[box[1]:box[3], box[0]:box[2]]
+            big = GEN_SIZE      # resized here: prepare_init_image only enlarges by whole numbers
+            big_m = np.asarray(Image.fromarray(m).resize((big, big), Image.BILINEAR), np.float32)
+            (img, _), = generate_images(text, negative, client=client, seed=seed,
+                                        init_image=face.resize((big, big), Image.LANCZOS),
+                                        denoise=dn, aspect=1.0, lora="none", mask=big_m,
+                                        **gen_opts)
+            img = match_colours(img.convert("RGB").resize(face.size, Image.LANCZOS), face, m)
+            if landmarks is not None:     # each eye keeps its colour (irises drifted blue)
+                for disc in eye_discs(landmarks, face.size, box[:2]):
+                    img = composite_masked(img, match_colours(img, face, disc), disc)
+            out = image.copy()
+            out.paste(composite_masked(face, img, m), box[:2])
+            return out
+        (img, _), = generate_images(text, negative, client=client, seed=seed, init_image=image,
                                     denoise=dn, aspect=1.0, lora="none", **gen_opts)
         return img.convert("RGB")
 
-    raws = {}
+    raws, landmarks, person = {}, None, person_words(who)
     say(f"Painting {ch.name} (neutral) on your GPU…")
     raws["neutral"] = paint(init, "neutral", denoise)
+    mask = landmarks = None
+    face_found = None
+    if face_only and len(expressions) > 1:
+        landmarks = face_landmarks(np.asarray(raws["neutral"]))
+        face_found = landmarks is not None
+        if face_found:
+            mask = face_mask(np.asarray(raws["neutral"]), landmarks)
+        else:   # helmet, visor, hood, mask: inventing a face there gave random strangers
+            face_only = False
+            say(f"No face found on {ch.name} (helmet or mask?): expressions repaint the whole "
+                "picture lightly instead, so they differ little")
+    dn = expression_denoise or (EXPRESSION_DENOISE if face_only else WHOLE_DENOISE)
     for e in expressions[1:]:
         say(f"Painting {ch.name} ({e})…")
-        raws[e] = paint(raws["neutral"], e, EXPRESSION_DENOISE)
+        edn = dn if expression_denoise or not face_only else EXPRESSION_DENOISE_BY.get(e, dn)
+        raws[e] = paint(raws["neutral"], e, edn, mask)
 
-    asset = new_asset("portrait", f"{ch.name} portraits", proj, character=ch.name,
-                      character_folder=str(ch.folder), expressions=expressions, style=style,
-                      size=px, painted_size=painted_size, seed=seed, prompt=who, source=source)
+    info = dict(character=ch.name, character_folder=str(ch.folder), expressions=expressions,
+                style=style, size=px, painted_size=painted_size, seed=seed, prompt=who,
+                source=source, face_only=bool(face_only), face_found=face_found,
+                expression_denoise=dn)
+    if replace is not None:
+        asset = _clear_portrait(replace, info)
+    else:
+        asset = new_asset("portrait", f"{ch.name} portraits", proj, **info)
     folder = asset.folder
+    if mask is not None:
+        Image.fromarray(np.rint(mask * 255).astype(np.uint8), "L").save(folder / "face_mask.png")
+    for e in expressions:
+        raws[e].save(folder / f"raw_{e}.png")
+    say("Writing the sheets…")
+    _finish(asset, raws, st)
+    say(f"Portraits of {ch.name}: {', '.join(expressions)}")
+    return asset
+
+
+def _finish(asset, raws: dict, st) -> None:
+    """raw images -> cut-out painted busts, pixel busts (one palette), sheets, frame, preview,
+    thumbnail; tags and the file list."""
+    from .assets import set_tags
+    from .effects import project_palette
+    folder = asset.folder
+    expressions = asset.extra["expressions"]
+    style = asset.extra.get("style", "painted")
+    painted_size = int(asset.extra.get("painted_size", 512))
+    px = int(asset.extra.get("size") or st.scale(96))
+    name = asset.extra.get("character", asset.name)
     painted, pixels = {}, {}
     palette = None
     for e in expressions:
-        raws[e].save(folder / f"raw_{e}.png")
         cut = _cut_out(raws[e].resize((painted_size, painted_size), Image.LANCZOS))
         painted[e] = cut
         Image.fromarray(cut, "RGBA").save(folder / f"portrait_{e}.png")
-        sprite = pixel_bust(cut, px, st, palette)
+        solid = cut.copy()    # pixel art: only well-covered pixels (faded wisps became flecks)
+        solid[..., 3] = np.where(cut[..., 3] >= PIXEL_ALPHA, 255, 0)
+        sprite = _clean_bust(pixel_bust(solid, px, st, palette), st)
         palette = sprite.palette if palette is None else palette   # one palette for all
         pixels[e] = sprite.rgba
         sprite.save(folder / f"portrait_{e}_pixel.png")
 
-    say("Writing the sheets…")
-    common = {"character": ch.name, "expressions": expressions}
+    common = {"character": name, "expressions": expressions}
     _write_sheet([painted[e] for e in expressions], expressions, folder / "sheet_painted.png",
                  {**common, "style": "painted"})
     _write_sheet([pixels[e] for e in expressions], expressions, folder / "sheet_pixel.png",
@@ -378,7 +679,6 @@ def make_portraits(character, expressions=EXPRESSIONS, style: str = "painted",
     main = pixels if style == "pixel" else painted
     _write_sheet([main[e] for e in expressions], expressions, folder / "sheet.png",
                  {**common, "style": style})
-    from .effects import project_palette
     m = max(4, round(8 * st.person_height / 64))
     portrait_frame(folder, m, style=st)
     frame = frame_image(m, palette=project_palette(st))
@@ -386,8 +686,17 @@ def make_portraits(character, expressions=EXPRESSIONS, style: str = "painted",
     Image.fromarray(preview, "RGBA").save(folder / "preview.png")
     _thumb(main["neutral"], folder / "thumb.png", pixel=style == "pixel")
     asset.extra["files"] = sorted(p.name for p in folder.iterdir())
-    set_tags(asset, ["portrait", style, ch.name])
-    say(f"Portraits of {ch.name}: {', '.join(expressions)}")
+    set_tags(asset, ["portrait", style, name])
+
+
+def refinish_portraits(asset, project=None):
+    """Re-make the cut-outs, pixel busts and sheets of a portrait asset from its raw_*.png
+    (no GPU): after a cut-out or palette change, or a new project style."""
+    from .assets import current_project
+    st = (project or current_project()).style
+    raws = {e: Image.open(asset.folder / f"raw_{e}.png").convert("RGB")
+            for e in asset.extra["expressions"]}
+    _finish(asset, raws, st)
     return asset
 
 

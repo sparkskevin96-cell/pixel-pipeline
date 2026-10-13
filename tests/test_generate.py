@@ -50,6 +50,7 @@ OUTPUTS = {"CheckpointLoaderSimple": ["MODEL", "CLIP", "VAE"], "LoraLoader": ["M
            "ModelSamplingDiscrete": ["MODEL"], "VAELoader": ["VAE"], "CLIPTextEncode": ["CONDITIONING"],
            "EmptyLatentImage": ["LATENT"], "LoadImage": ["IMAGE", "MASK"], "VAEEncode": ["LATENT"],
            "KSampler": ["LATENT"], "VAEDecode": ["IMAGE"], "SaveImage": [], "PreviewImage": [],
+           "LoadImageMask": ["MASK"], "SetLatentNoiseMask": ["LATENT"], "VAEEncodeForInpaint": ["LATENT"],
            # Hunyuan3D 2 (comfy_extras/nodes_hunyuan3d.py, nodes_save_3d.py)
            "ImageOnlyCheckpointLoader": ["MODEL", "CLIP_VISION", "VAE"],
            "CLIPVisionEncode": ["CLIP_VISION_OUTPUT"],
@@ -70,6 +71,9 @@ INPUTS = {
     "EmptyLatentImage": {"width": int, "height": int, "batch_size": int},
     "LoadImage": {"image": "uploads"},
     "VAEEncode": {"pixels": "IMAGE", "vae": "VAE"},
+    "LoadImageMask": {"image": "uploads", "channel": ["alpha", "red", "green", "blue"]},
+    "SetLatentNoiseMask": {"samples": "LATENT", "mask": "MASK"},
+    "VAEEncodeForInpaint": {"pixels": "IMAGE", "vae": "VAE", "mask": "MASK", "grow_mask_by": int},
     "KSampler": {"model": "MODEL", "seed": int, "steps": int, "cfg": float, "sampler_name": SAMPLERS,
                  "scheduler": SCHEDULERS, "positive": "CONDITIONING", "negative": "CONDITIONING",
                  "latent_image": "LATENT", "denoise": float},
@@ -174,6 +178,8 @@ class FakeComfy:
             return self.render_3d(wf)
         sampler = next(n for n in wf.values() if n["class_type"] == "KSampler")
         src = wf[sampler["inputs"]["latent_image"][0]]
+        while src["class_type"] == "SetLatentNoiseMask":
+            src = wf[src["inputs"]["samples"][0]]
         if src["class_type"] == "EmptyLatentImage":
             w, h = src["inputs"]["width"], src["inputs"]["height"]
         else:

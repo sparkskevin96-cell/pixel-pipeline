@@ -702,12 +702,17 @@ def build_workflow(prompt: str, negative: str = "", *, seed: int, width: int = 1
                    checkpoint: str = DEFAULT_CHECKPOINT, lora: str | None = DEFAULT_LORA,
                    lora_strength: float = 1.0, lcm_lora: str | None = None, vae: str | None = None,
                    steps: int = 25, cfg: float = 6.0, sampler: str = "euler_ancestral",
-                   scheduler: str = "normal", filename_prefix: str = "pixel-pipeline") -> dict:
+                   scheduler: str = "normal", filename_prefix: str = "pixel-pipeline",
+                   mask: str | None = None, grow_mask_by: int | None = None) -> dict:
     """ComfyUI API-format workflow from core nodes only.
 
     txt2img: CheckpointLoaderSimple -> [LoraLoader] -> 2x CLIPTextEncode -> EmptyLatentImage
              -> KSampler -> VAEDecode -> SaveImage
     img2img (image = uploaded name): LoadImage -> VAEEncode -> KSampler(denoise) instead.
+    inpaint (image + mask = uploaded mask picture, white = repaint): LoadImageMask(red) ->
+             SetLatentNoiseMask on the VAEEncode latent (keeps the init under the noise, so a
+             denoise below 1 still starts from it); grow_mask_by = VAEEncodeForInpaint instead
+             (greys the masked pixels: for denoise 1.0 / inpainting checkpoints).
     lcm_lora adds a second LoraLoader + ModelSamplingDiscrete(lcm); vae adds a VAELoader.
     """
     wf: dict[str, dict] = {}
@@ -737,8 +742,19 @@ def build_workflow(prompt: str, negative: str = "", *, seed: int, width: int = 1
         latent = ["8", 0]
     else:
         node("8", "LoadImage", "Init image", image=image)
-        node("9", "VAEEncode", "Encode init image", pixels=["8", 0], vae=vae_out)
-        latent = ["9", 0]
+        if mask is not None:
+            node("13", "LoadImageMask", "Inpaint mask", image=mask, channel="red")
+        if mask is not None and grow_mask_by is not None:
+            node("9", "VAEEncodeForInpaint", "Encode for inpaint", pixels=["8", 0], vae=vae_out,
+                 mask=["13", 0], grow_mask_by=int(grow_mask_by))
+            latent = ["9", 0]
+        else:
+            node("9", "VAEEncode", "Encode init image", pixels=["8", 0], vae=vae_out)
+            latent = ["9", 0]
+            if mask is not None:
+                node("14", "SetLatentNoiseMask", "Repaint only the mask", samples=latent,
+                     mask=["13", 0])
+                latent = ["14", 0]
     node("10", "KSampler", "Sampler", model=model, seed=seed, steps=steps, cfg=cfg,
          sampler_name=sampler, scheduler=scheduler, positive=["6", 0], negative=["7", 0],
          latent_image=latent, denoise=denoise if image is not None else 1.0)
@@ -753,6 +769,45 @@ def txt2img_workflow(prompt: str, negative: str = "", **kw) -> dict:
 
 def img2img_workflow(prompt: str, negative: str, image: str, *, denoise: float = 0.6, **kw) -> dict:
     return build_workflow(prompt, negative, image=image, denoise=denoise, **kw)
+
+
+def inpaint_workflow(prompt: str, negative: str, image: str, mask: str, *, denoise: float = 0.85,
+                     **kw) -> dict:
+    """img2img that repaints only where the uploaded `mask` picture is white."""
+    return build_workflow(prompt, negative, image=image, mask=mask, denoise=denoise, **kw)
+
+
+def mask_array(mask) -> np.ndarray:
+    """A mask (float/bool array 0..1, uint8 0..255 array, or picture: its grey value; RGBA
+    pictures use alpha) -> float32 (H, W) in 0..1."""
+    if isinstance(mask, np.ndarray) and mask.ndim == 2:
+        m = mask.astype(np.float32)
+        return np.clip(m / 255 if mask.dtype == np.uint8 else m, 0, 1)
+    if isinstance(mask, Image.Image):
+        img = mask
+    elif isinstance(mask, np.ndarray):
+        img = Image.fromarray(mask)
+    else:
+        img = Image.open(mask)
+    if img.mode in ("RGBA", "LA"):
+        return np.asarray(img.getchannel("A"), np.float32) / 255
+    return np.asarray(img.convert("L"), np.float32) / 255
+
+
+def composite_masked(base: Image.Image, painted: Image.Image, mask) -> Image.Image:
+    """painted where mask is 1, base where it's 0 (blended between): pixels outside the mask
+    come back exactly as in `base`. painted is resized to base's size if it differs."""
+    b = np.asarray(base.convert("RGB"), np.float32)
+    p = painted.convert("RGB")
+    if p.size != base.size:
+        p = p.resize(base.size, Image.LANCZOS)
+    pa = np.asarray(p, np.float32)
+    m = mask_array(mask)
+    if m.shape != b.shape[:2]:
+        m = np.asarray(Image.fromarray(m).resize(base.size, Image.BILINEAR), np.float32)
+    m = np.clip(m, 0, 1)[..., None]
+    out = pa * m + b * (1 - m)
+    return Image.fromarray(np.rint(out).astype(np.uint8), "RGB")
 
 
 PLACEHOLDERS = {
@@ -918,10 +973,15 @@ def _models(client: ComfyClient, opts: GenOptions, needed: set[str]) -> dict:
 
 def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | None = None,
                     seed: int | None = None, count: int = 1, init_image: ImageSource | None = None,
-                    denoise: float = 0.6, aspect: float | None = None,
+                    denoise: float = 0.6, aspect: float | None = None, mask=None,
+                    grow_mask_by: int | None = None,
                     **gen_opts) -> list[tuple[Image.Image, int]]:
     """Raw ComfyUI images, no conversion: [(image, seed)]. Prompts are sent as given
     (a "negative" in gen_opts is ignored here; pass `negative`).
+
+    mask (with init_image): inpaint. Same size as init_image, white/1 = repaint (see
+    mask_array for the forms it takes). Only the masked part is redrawn and the result is
+    composited over the init in Python, so pixels outside the mask come back unchanged.
 
     count > 1 queues one prompt per image with seeds seed, seed+1, ... so each image can
     be re-made from its own seed.
@@ -932,6 +992,10 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
     if init_image is not None and not 0 < denoise <= 1:
         raise ValueError("denoise must be between 0 and 1 (0.3 = stay close to the sketch, "
                          "0.8 = redraw freely)")
+    if mask is not None and init_image is None:
+        raise ValueError("Inpainting needs an init image to paint into (init_image).")
+    if mask is not None and opts.template:
+        raise ValueError("Workflow templates can't inpaint (mask); use the built-in workflow.")
     template = load_template(opts.template) if opts.template else None
     used = template_placeholders(template) if template is not None else set()
     if template is not None:
@@ -949,8 +1013,19 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
     width, height = generation_size(aspect, opts.width, opts.height)
     needed = used if template is not None else {"checkpoint", "lora", "lcm_lora", "vae"}
     models = _models(client, opts, needed)
-    image_name = (client.upload_image(prepare_init_image(init, width, height))
-                  if init is not None else None)
+    prepared = prepare_init_image(init, width, height) if init is not None else None
+    image_name = client.upload_image(prepared) if prepared is not None else None
+    mask_name, placed_mask = None, None
+    if mask is not None:
+        m = mask_array(mask)
+        if m.shape != init.shape[:2]:
+            raise ValueError(f"The mask is {m.shape[1]}x{m.shape[0]} but the init image is "
+                             f"{init.shape[1]}x{init.shape[0]}")
+        grey = np.rint(m * 255).astype(np.uint8)
+        rgba = np.dstack([grey, grey, grey, np.full_like(grey, 255)])
+        placed = prepare_init_image(rgba, width, height, background=(0, 0, 0))  # same placement
+        placed_mask = np.asarray(placed.convert("L"), np.float32) / 255
+        mask_name = client.upload_image(placed)
     samp = opts.sampling()
 
     base = random.randrange(2**32) if seed is None else int(seed)
@@ -971,11 +1046,15 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
                                 lora=models["lora"], lora_strength=samp["lora_strength"],
                                 lcm_lora=models["lcm_lora"], vae=models["vae"],
                                 steps=samp["steps"], cfg=samp["cfg"], sampler=samp["sampler"],
-                                scheduler=samp["scheduler"], filename_prefix=opts.filename_prefix)
+                                scheduler=samp["scheduler"], filename_prefix=opts.filename_prefix,
+                                mask=mask_name, grow_mask_by=grow_mask_by)
         pid = client.queue(wf)
         log.info("Queued ComfyUI prompt %s (seed %d)", pid, s)
         entry = client.wait(pid, opts.timeout)
-        results += [(img, s) for img in client.fetch_images(pid, entry)]
+        images = client.fetch_images(pid, entry)
+        if placed_mask is not None:
+            images = [composite_masked(prepared, img, placed_mask) for img in images]
+        results += [(img, s) for img in images]
     return results
 
 

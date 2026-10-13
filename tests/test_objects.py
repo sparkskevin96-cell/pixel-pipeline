@@ -66,13 +66,14 @@ def test_guess_prop_and_prompts():
 # --------------------------------------------------------------------------- items
 
 def test_item_from_words_icons_follow_the_style(comfy, monkeypatch):
+    """A 3D world sprite (style "3d": weapons default to flat, see the flat tests)."""
     monkeypatch.delenv("PIXEL_LIBRARY", raising=False)
     fake, client = comfy
     fake.models["checkpoints"].append(HUNYUAN)
     proj = project(icon=24, outline="solid", palette="pico-8", directions=8)
     steps = []
     item = O.make_item("Iron Sword", "an iron sword", category="weapon", project=proj,
-                       client=client, seed=11, progress=steps.append)
+                       client=client, seed=11, progress=steps.append, style="3d")
     f = item.folder
     assert f.parent == proj.kind_folder("item")
     # 3 icon pictures (pixel LoRA, icon prompt), then the 3D shape from the chosen one
@@ -223,7 +224,8 @@ def test_prop_from_words(comfy, monkeypatch):
     fake, client = comfy
     fake.models["checkpoints"].append(HUNYUAN)
     proj = project()
-    house = O.make_prop("Cottage", "a small stone cottage", project=proj, client=client, seed=4)
+    house = O.make_prop("Cottage", "a small stone cottage", project=proj, client=client, seed=4,
+                        look="3d")
     assert house.extra["height_people"] == 3.0 and house.extra["directions"] == 4
     assert house.extra["seed"] == 4 and house.extra["source"] == "words"
     pic_wf = fake.prompts[0]                      # then the shape (and maybe a back picture)
@@ -401,3 +403,167 @@ def test_buildings_are_squared_to_the_grid(tmp_path, monkeypatch):
     assert widths[-1] > 1.8 * widths[0]               # long wall vs gable end, not corners
     O.render_prop(h, yaw=h.extra["yaw"] + 90, project=proj)
     assert O.open_asset(h.folder).extra["yaw"] == pytest.approx((h.extra["yaw"]) % 360)
+
+
+# --------------------------------------------------------------------------- thin items, hand-pixelled props
+
+def sword_picture(path=None):
+    """A sword drawn upright on a transparent background, the way icon pictures come: a thin
+    shaded blade (light left edge, dark right edge), a crossguard and a grip."""
+    rgba = np.zeros((420, 120, 4), np.uint8)
+    rgba[110:410, 54:61] = (215, 215, 225, 255)             # blade: 7 px of 300
+    rgba[110:410, 61:66] = (120, 120, 135, 255)             # its shadowed edge
+    rgba[90:110, 20:100] = (140, 100, 40, 255)              # crossguard
+    rgba[20:90, 57:63] = (110, 60, 30, 255)                 # grip: narrower than the blade
+    rgba[10:20, 55:65] = (140, 100, 40, 255)                # pommel
+    if path is not None:
+        Image.fromarray(rgba, "RGBA").save(path)
+    return rgba
+
+
+def test_thicken_keeps_thick_parts_bigger():
+    pose = O.lying_pose(sword_picture())
+    assert pose.shape[1] > 3 * pose.shape[0]                    # lies left to right
+    solid = pose[..., 3] >= 128
+    cols = solid.sum(0)
+    xs = np.nonzero(cols)[0]
+    assert np.argmax(cols) < pose.shape[1] / 2                  # the long blade goes right
+    blade = O.thinnest(pose[..., 3])
+    assert 8 <= blade <= 16
+    out = O.thicken(pose, 40)
+    thick = O.thinnest(out[..., 3])
+    assert thick >= 36                                           # thin parts reach ~40 rows
+    guard = (out[..., 3] >= 128).sum(0).max()
+    assert guard >= cols.max() + 25                              # the crossguard grew too
+    assert out.shape[1] == pose.shape[1]                         # no longer
+    assert O.thicken(pose, 2) is pose                            # thick enough already
+
+
+def test_weapon_world_sprite_drawn_flat_from_the_icon(tmp_path, monkeypatch):
+    """Weapons default to "flat (from icon)": no 3D model or GPU, every direction from the
+    icon picture, the blade thick enough to have a body inside its outline."""
+    monkeypatch.delenv("PIXEL_LIBRARY", raising=False)
+    proj = project(icon=32, outline="selout", directions=8, palette="pico-8")
+    sword_picture(tmp_path / "sword.png")
+    item = O.make_item("Sword", picture=tmp_path / "sword.png", category="weapon", project=proj)
+    f = item.folder
+    assert O.world_style(item) == "flat" and item.extra["world_from"] == "icon"
+    assert not (f / "model.glb").exists()
+    frames = O.load_world(item)
+    assert len(frames) == 8 and len({fr.shape for fr in frames}) == 1
+    pico = {tuple(c) for c in load_palette("pico-8")}
+    for fr in frames:
+        assert colours(fr) <= pico
+    east = frames[0]                                             # lying left to right
+    solid = east[..., 3] > 0
+    cols = solid.sum(0)[solid.any(0)]
+    assert np.median(cols) >= 4                                  # 2 px of blade + outline
+    assert max(np.ptp(np.nonzero(east[..., 3])[1]) + 1, 1) >= A.Style().scale(24) - 2
+    # the light edge of the blade faces the light (up) lying east and lying west alike
+    for fr in (frames[0], frames[4]):
+        a = fr[..., 3] > 0
+        lum = fr[..., :3].astype(int) @ [299, 587, 114]
+        mid = np.nonzero(a)[0].mean()
+        top = a & (np.arange(a.shape[0])[:, None] < mid)
+        assert lum[top].mean() > lum[a & ~top].mean()
+    normal = np.asarray(Image.open(f / "sheet_n.png"))
+    assert len({tuple(c) for c in normal[normal[..., 3] > 0][:, :3]}) <= 2   # flat on the ground
+    # another size and 1 direction: still no model needed; style can be switched
+    O.render_item(item, size="large", directions=1, project=proj)
+    one = O.load_world(item)
+    assert len(one) == 1 and item.extra["world_from"] == "icon"
+    with pytest.raises(ValueError):
+        O.render_item(item, directions=8, style="3d", project=proj)   # 3D needs a model
+    with pytest.raises(ValueError):
+        O.render_item(item, style="wobbly", project=proj)
+
+
+def test_world_style_auto_rules(tmp_path, monkeypatch):
+    monkeypatch.delenv("PIXEL_LIBRARY", raising=False)
+    proj = project()
+    sword_picture(tmp_path / "s.png")
+    for cat, want in (("weapon", "flat"), ("key", "flat"), ("potion", "3d"), ("food", "3d"),
+                      ("misc", "flat")):
+        it = O.make_item(cat, picture=tmp_path / "s.png", category=cat, world=False,
+                         project=proj)
+        assert O.world_style(it) == want, cat
+        assert O.world_style(it, "3d") == "3d"
+    figure(tmp_path / "fig.glb")
+    toy = O.make_item("Toy", model=tmp_path / "fig.glb", category="weapon", project=proj,
+                      directions=4)
+    assert O.world_style(toy) == "3d" and toy.extra["world_from"] == "model"   # your model
+
+
+def test_equalise_faces_lifts_the_side_the_picture_saw_badly():
+    rng = np.random.default_rng(0)
+    n = 4000
+    side = rng.integers(0, 4, n)                                 # four walls
+    ang = side * np.pi / 2
+    nrm = np.stack([np.sin(ang), np.zeros(n), np.cos(ang)], 1)
+    pts = nrm * 1.0 + np.stack([np.zeros(n), rng.random(n), np.zeros(n)], 1)
+    cols = np.tile(np.array([150, 150, 160], np.uint8), (n, 1))
+    cols[side == 2] = (60, 60, 66)                               # the back: dark and greyer
+    out = O.equalise_faces(pts, cols, nrm, 1.0)
+    lum = out.astype(int).sum(1)
+    assert abs(lum[side == 2].mean() - lum[side == 0].mean()) < 40
+    assert O.equalise_faces(pts, cols, nrm, 0.0) is cols
+
+
+def test_props_are_hand_pixelled_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("PIXEL_LIBRARY", raising=False)
+    barrel(tmp_path / "barrel.glb")
+    proj = project(elevation=30, colours=24)
+    b = O.make_prop("Barrel", model=tmp_path / "barrel.glb", project=proj)
+    assert b.extra["hand_pixel"] is True
+    hand = O.load_world(b)[0]
+    O.render_prop(b, hand=False, project=proj)
+    plain = O.load_world(b)[0]
+    assert O.open_asset(b.folder).extra["hand_pixel"] is False
+    assert hand.shape == plain.shape and not np.array_equal(hand, plain)
+    assert len(colours(hand)) <= len(colours(plain))
+    normal = np.asarray(Image.open(b.folder / "sheet_n.png"))
+    assert normal.shape[:2] == plain.shape[:2]
+    O.rerender(b, project=proj, hand=True)
+    assert np.array_equal(O.load_world(b)[0], hand)                # same again: deterministic
+
+
+def test_prop_drawn_from_words(comfy, monkeypatch):
+    """From words a prop is drawn as pixel art (not a posterised 3D render): 3 versions to
+    pick from, exactly as tall as asked in people, the project's camera in the prompt."""
+    monkeypatch.delenv("PIXEL_LIBRARY", raising=False)
+    fake, client = comfy
+    fake.models["checkpoints"].append(HUNYUAN)
+    proj = project(elevation=30)
+    hut = O.make_prop("Cottage", "a small stone cottage", project=proj, client=client, seed=4)
+    # a building in a three-quarter project: drawn again from the corner over its 3D shape
+    assert (hut.folder / "drawn_corner.png").exists() and (hut.folder / "model.glb").exists()
+    assert hut.extra["look"] == "drawn" and hut.extra["directions"] == 1
+    assert hut.extra["height_people"] == 3.0
+    for i in (1, 2, 3):
+        assert (hut.folder / f"drawn_v{i}.png").exists() and (hut.folder / f"sprite_v{i}.png").exists()
+    text = next(n for n in fake.prompts[0].values() if n["_meta"]["title"] == "Prompt")["inputs"]["text"]
+    assert "pixel art" in text and "isometric" in text and "plain white background" in text
+    assert any(n["class_type"] == "LoraLoader" for n in fake.prompts[0].values())   # pixel LoRA
+    frames = O.load_world(hut)
+    alpha = frames[0][..., 3] > 0
+    rows = np.nonzero(alpha.any(1))[0]
+    tall = rows.max() - rows.min() + 1
+    assert abs(tall - 3 * proj.style.person_height) <= 4, tall               # outline room
+    assert frames[0].shape[0] >= tall
+    O.choose_drawn(hut, 2, project=proj)
+    assert hut.extra["chosen"] == 2
+
+
+def test_prop_drawn_four_sides_over_its_model(comfy, monkeypatch):
+    monkeypatch.delenv("PIXEL_LIBRARY", raising=False)
+    fake, client = comfy
+    fake.models["checkpoints"].append(HUNYUAN)
+    proj = project(elevation=30)
+    tower = O.make_prop("Tower", "a stone watch tower", project=proj, client=client, seed=2,
+                        directions=4, height_people=1.0)
+    assert tower.extra["directions"] == 4 and (tower.folder / "model.glb").exists()
+    for d in ("E", "S", "W", "N"):
+        assert (tower.folder / f"drawn_{d}.png").exists()
+    assert len(O.load_world(tower)) == 4
+    sides = [wf for wf in fake.prompts if any(n["class_type"] == "VAEEncode" for n in wf.values())]
+    assert len(sides) >= 4                                   # each side drawn over the model

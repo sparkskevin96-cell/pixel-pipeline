@@ -5,8 +5,9 @@ Left: this kind's assets in the current project (objects.py / assets.py), click 
 Top: describe it (Make, your GPU), or start from a photo or a 3D model. Centre: items show the
 icon variations to pick from, the world sprite turning through its directions and the model
 spinning; props show the picture, the model and the sprite. Bottom: name, category / size
-(items) or height next to a person (props), directions, Make; Redo sprites re-renders with new
-settings from the saved model (no GPU).
+(items) or height next to a person (props), directions, the item's look (flat from the icon or
+3D) or the props' hand-pixelled finish, Make; Redo sprites re-renders with new settings from the
+saved model or picture (no GPU).
 """
 from __future__ import annotations
 
@@ -149,10 +150,19 @@ class ObjectsTab(ToolTab):
             self.size_.setToolTip("How big it looks lying in the world, next to a person")
             self.world = QCheckBox("World sprite")
             self.world.setChecked(True)
-            self.world.setToolTip("Also a sprite of the item lying in the world, from a 3D model "
-                                  "(GPU) — or flat from the icon picture with 1 direction")
+            self.world.setToolTip("Also a sprite of the item lying in the world")
+            self.look = QComboBox()
+            for text, data in (("Auto", "auto"), ("Flat (from icon)", "flat"),
+                               ("3D model", "3d")):
+                self.look.addItem(text, data)
+            self.look.setToolTip("How the world sprite is drawn. Flat (from icon): the icon's "
+                                 "picture laid on the ground, thin parts thickened so they read "
+                                 "(no 3D, no GPU). 3D model: rendered from a 3D model (GPU to "
+                                 "make one). Auto: flat for weapons and keys, 3D for potions, "
+                                 "food and armour")
             for w in (QLabel("Category"), self.category, QLabel("Size"), self.size_,
-                      QLabel("Directions"), self.directions, self.world):
+                      QLabel("Directions"), self.directions, self.world, QLabel("Look"),
+                      self.look):
                 keep.addWidget(w)
         else:
             self.height_ = QDoubleSpinBox()
@@ -170,8 +180,14 @@ class ObjectsTab(ToolTab):
                 self.like.addItem(f"like a {names[0]} ({h:g})", (h, d))
             self.like.addItem("Your own height", "own")
             self.like.currentIndexChanged.connect(self._like_changed)
+            self.hand = QCheckBox("Hand-pixelled")
+            self.hand.setChecked(True)
+            self.hand.setToolTip("Finish the sprites the way a pixel artist would: a few colours "
+                                 "per material with warm lights and cool shadows, clean light "
+                                 "and shadow sides, specks cleaned up, a dark outline per "
+                                 "material. Off: the plain render")
             for w in (QLabel("Height"), self.height_, self.like, QLabel("Directions"),
-                      self.directions):
+                      self.directions, self.hand):
                 keep.addWidget(w)
         self.make_btn = QPushButton("Make")
         self.make_btn.setStyleSheet("font-weight:600;")
@@ -312,12 +328,13 @@ class ObjectsTab(ToolTab):
         elev = project.style.elevation
         if self.kind == "item":
             opts = dict(category=self.category.currentText(), size=self.size_.currentText(),
-                        world=self.world.isChecked(), directions=directions)
+                        world=self.world.isChecked(), directions=directions,
+                        style=self.look.currentData())
             maker = O.make_item
         else:
             own = self.like.currentData() is not None
             opts = dict(height_people=self.height_.value() if own else None,
-                        directions=directions)
+                        directions=directions, hand=self.hand.isChecked())
             maker = O.make_prop
 
         def job(say):
@@ -355,9 +372,11 @@ class ObjectsTab(ToolTab):
             return
         project, directions = self.project(), self._directions()
         if self.kind == "item":
-            opts = dict(size=self.size_.currentText(), directions=directions)
+            opts = dict(size=self.size_.currentText(), directions=directions,
+                        style=self.look.currentData())
         else:
-            opts = dict(height_people=self.height_.value(), directions=directions)
+            opts = dict(height_people=self.height_.value(), directions=directions,
+                        hand=self.hand.isChecked())
             if turn:
                 opts["yaw"] = float(asset.extra.get("yaw") or 0.0) + turn
         elev = project.style.elevation
@@ -384,7 +403,7 @@ class ObjectsTab(ToolTab):
             b.setChecked(i == index)
         self.shown["icons"] = [_rgba(p) for p in O.icon_paths(asset)]
         self.icon_view.show_rgba(_rgba(asset.folder / "icon.png"))
-        if asset.extra.get("world_from") == "picture":
+        if asset.extra.get("world_from") in ("picture", "icon"):
             self.shown["world"] = O.load_world(asset)
             self._world_i = 0
             self._tick()
@@ -426,10 +445,13 @@ class ObjectsTab(ToolTab):
                 self.category.setCurrentText(ex["category"])
             if ex.get("size") in O.ITEM_SIZES:
                 self.size_.setCurrentText(ex["size"])
+            j = self.look.findData(ex.get("world_style", "auto"))
+            self.look.setCurrentIndex(max(0, j))
         else:
             self._setting = True
             self.height_.setValue(float(ex.get("height_people", 1.0)))
             self._setting = False
+            self.hand.setChecked(bool(ex.get("hand_pixel", True)))
             self.picture_view.show_rgba(payload["picture"])
         i = self.directions.findData(ex.get("directions"))
         if i >= 0 and ex.get("directions"):
