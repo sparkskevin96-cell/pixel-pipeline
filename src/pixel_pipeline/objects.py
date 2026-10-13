@@ -31,12 +31,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .assets import Asset, Project, Style, current_project, new_asset
+from .assets import Asset, Project, Style, current_project, new_asset, project_style, with_style
 
 CATEGORIES = ("weapon", "armour", "potion", "food", "key", "misc")
 # an item's longest side in the world, in pixels for the default 64 px person (Style.scale)
 ITEM_SIZES = {"tiny": 12, "small": 16, "medium": 24, "large": 36}
-DIRECTION_CHOICES = (1, 4, 8, 16)
+DIRECTION_CHOICES = (1, 2, 4, 8, 16)      # 2 = E, W (side-scrollers)
 ICON_COLOURS = 16              # at most this many colours in an icon (32 px can't show more)
 VARIATIONS = 3
 
@@ -152,7 +152,10 @@ def icon_settings(st: Style):
     return style_settings(st, st.icon, st.icon, min(st.colours, ICON_COLOURS), "center")
 
 
-def icon_prompt(prompt: str, category: str = "misc", icon_px: int = 32) -> tuple[str, str]:
+def icon_prompt(prompt: str, category: str = "misc", icon_px: int = 32,
+                style: Style | None = None) -> tuple[str, str]:
+    """(positive, negative) for an item icon; the house style (style, default: the current
+    project's) is appended (assets.style_words "icon")."""
     text = re.sub(r"^\s*(an?\s+)?pixel[- ]?art\s+(icon\s+|sprite\s+)?(of\s+)?", "", prompt or "",
                   flags=re.IGNORECASE).strip().rstrip(".,; ")
     if not text:
@@ -160,7 +163,7 @@ def icon_prompt(prompt: str, category: str = "misc", icon_px: int = 32) -> tuple
     positive = ICON_PROMPT.format(prompt=text, hint=CATEGORY_HINTS.get(category, "single object"))
     if icon_px <= 24:
         positive += ", " + SMALL_ICON_HINT
-    return positive, ICON_NEGATIVE
+    return with_style(positive, ICON_NEGATIVE, style or project_style(), "icon")   # house style
 
 
 # --------------------------------------------------------------------------- small pictures
@@ -503,6 +506,7 @@ def render_world(model, st: Style, target_px: float, directions: int, measure: s
         opts = dict(hand) if isinstance(hand, dict) else {}
         if s.palette and s.palette != "auto":
             opts.setdefault("palette", s.palette)          # stay on the project's palette
+        opts.setdefault("steps", st.ramp_steps())          # house style shading (soft = 5)
         sprites = hand_pixel(sprites, outline_style(s), **opts)
     return sprites
 
@@ -726,7 +730,8 @@ def _front_frame(sprites) -> np.ndarray:
     from .turnaround import direction_names
     if len(sprites) == 1:
         return sprites[0].rgba
-    return sprites[direction_names(len(sprites)).index("S")].rgba
+    names = direction_names(len(sprites))
+    return sprites[names.index("S") if "S" in names else 0].rgba          # 2 directions: E
 
 
 def load_world(asset: Asset) -> list[np.ndarray]:
@@ -745,7 +750,7 @@ def load_world(asset: Asset) -> list[np.ndarray]:
 
 # --------------------------------------------------------------------------- 3D
 
-def _build_model(folder: Path, prompt, picture, client, seed, say):
+def _build_model(folder: Path, prompt, picture, client, seed, say, st: Style | None = None):
     """Words or a picture -> model.glb (+ model.front.png, model.shape.glb, and from words
     model.back.png) on the GPU. Words: one clean prop picture (PROP_PROMPT); either way only
     the main subject of the cut-out goes to Hunyuan3D."""
@@ -755,15 +760,16 @@ def _build_model(folder: Path, prompt, picture, client, seed, say):
         from .generate import generate_images
         text = re.sub(r"^\s*(an?|the|one)\s+", "", prompt.strip(), flags=re.IGNORECASE)
         say(f"Making a picture of “{prompt}” on your GPU…")
-        (picture, seed), = generate_images(PROP_PROMPT.format(prompt=text.rstrip(".")),
-                                           PROP_NEGATIVE, client=client, seed=seed, aspect=1.0,
-                                           lora="none")
+        positive, negative = with_style(PROP_PROMPT.format(prompt=text.rstrip(".")),
+                                        PROP_NEGATIVE, st or project_style(), "model-object")
+        (picture, seed), = generate_images(positive, negative, client=client, seed=seed,
+                                           aspect=1.0, lora="none")
         views = "front+back"                    # from words: the GPU draws the back too
     say("Cutting out the subject…")
     rgba = main_subject(cut_out(picture))
     say("Building a 3D model on your GPU (Hunyuan3D)…")
     res = prompt_to_model(prompt, folder / "model.glb", subject="object", picture=rgba,
-                          client=client, seed=seed, views=views,
+                          client=client, seed=seed, views=views, style=st,
                           progress=lambda step, text: say(text))
     return seed if res.seed is None else res.seed
 
@@ -866,7 +872,7 @@ def item_model(asset: Asset, client=None, project: Project | None = None, progre
         (asset.folder / old).unlink(missing_ok=True)
     seeds = asset.extra.get("seeds") or []
     seed = seeds[choice - 1] if len(seeds) >= choice else asset.extra.get("seed")
-    _build_model(asset.folder, None, pic, client, seed, _say(progress))
+    _build_model(asset.folder, None, pic, client, seed, _say(progress), _project(project).style)
     asset.extra.update(model_from=choice)
     asset.save()
     if render:
@@ -909,7 +915,7 @@ def make_item(name: str, prompt: str | None = None, picture=None, model=None, *,
         if picture is not None:
             Image.fromarray(load_image(picture), "RGBA").save(f / "picture_v1.png")
         elif prompt:
-            positive, negative = icon_prompt(prompt, category, st.icon)
+            positive, negative = icon_prompt(prompt, category, st.icon, st)
             say(f"Drawing {variations} icons of “{prompt}” on your GPU…")
             raw = generate_images(positive, negative, client=client, seed=seed,
                                   count=max(1, variations), aspect=1.0)
@@ -1004,7 +1010,7 @@ def make_prop(name: str, prompt: str | None = None, picture=None, model=None, *,
         if model is not None:
             shutil.copyfile(model, f / "model.glb")
         else:
-            asset.extra["seed"] = _build_model(f, prompt, picture, client, seed, say)
+            asset.extra["seed"] = _build_model(f, prompt, picture, client, seed, say, proj.style)
         render_prop(asset, hp, dirs, proj, say, hand=hand)
     except BaseException:
         shutil.rmtree(f, ignore_errors=True)
@@ -1147,11 +1153,12 @@ def draw_prop(name: str, prompt: str, *, height_people: float | None = None, dir
                           height_people=hp, directions=directions, look="drawn")
     f = asset.folder
     what = _what(f"{name} {prompt}")
-    text = DRAWN_PROMPT.format(view=view_words(st), prompt=prompt, what=what)
+    text, drawn_negative = with_style(DRAWN_PROMPT.format(view=view_words(st), prompt=prompt,
+                                                          what=what), DRAWN_NEGATIVE, st, "prop")
     target = hp * st.person_height
     if directions == 1 or not (f / "model.glb").exists() and directions > 1:
         say(f"Drawing {name} on your GPU ({variations} versions)…")
-        pics = generate_images(text, DRAWN_NEGATIVE, client=client, seed=seed, count=variations,
+        pics = generate_images(text, drawn_negative, client=client, seed=seed, count=variations,
                                aspect=1.0)
         sprites = []
         for i, (img, used) in enumerate(pics, 1):
@@ -1174,7 +1181,7 @@ def draw_prop(name: str, prompt: str, *, height_people: float | None = None, dir
             init = Image.new("RGB", (view.shape[1] + 80, view.shape[0] + 80), "white")
             init.paste(Image.fromarray(view), (40, 40), Image.fromarray(view))
             say(f"Drawing {name} from the corner…")
-            (img, _), = generate_images(text, DRAWN_NEGATIVE, client=client,
+            (img, _), = generate_images(text, drawn_negative, client=client,
                                         seed=asset.extra["seeds"][0], count=1, init_image=init,
                                         denoise=0.7)
             img.save(f / "drawn_corner.png")
@@ -1195,8 +1202,9 @@ def draw_prop(name: str, prompt: str, *, height_people: float | None = None, dir
                             subject="object", views="front", progress=lambda s, t: say(t))
     # 4 sides drawn over the model seen from each side
     from .turnaround import direction_names, render_model, union_crop
-    names = direction_names(4)
-    views = union_crop(render_model(f / "model.glb", 4, st.elevation, size=768, light=0.5))
+    sides = 2 if directions == 2 else 4                   # 2: E, W (side-scrollers)
+    names = direction_names(sides)
+    views = union_crop(render_model(f / "model.glb", sides, st.elevation, size=768, light=0.5))
     base_seed = (asset.extra.get("seeds") or [seed or 1234])[0]
     sprites = []
     for d, view in zip(names, views):
@@ -1206,15 +1214,15 @@ def draw_prop(name: str, prompt: str, *, height_people: float | None = None, dir
         side = text.replace(", seen from a corner, two sides visible, angled 45 degrees", "")
         side = side.replace(f"pixel art {view_words(st)}",
                             f"pixel art {view_words(st)}, {SIDE_WORDS.get(d, d)} of the {what}")
-        (img, _), = generate_images(side, DRAWN_NEGATIVE, client=client, seed=base_seed, count=1,
+        (img, _), = generate_images(side, drawn_negative, client=client, seed=base_seed, count=1,
                                     init_image=init, denoise=0.7)
         img.save(f / f"drawn_{d}.png")
         sprites.append(drawn_sprite(img, st, target))
     write_world(same_size(sprites), f / "sheet.png")
     make_thumb(sprites[0].rgba, f / "thumb.png")
-    asset.extra.update(height_people=hp, directions=4, look="drawn")
+    asset.extra.update(height_people=hp, directions=sides, look="drawn")
     asset.save()
-    say(f"{name}: drawn from 4 sides. Files: {f}")
+    say(f"{name}: drawn from {sides} sides. Files: {f}")
     return asset
 
 

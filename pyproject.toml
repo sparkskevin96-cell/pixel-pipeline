@@ -41,6 +41,7 @@ pixel-pipeline-model = "pixel_pipeline.ui.model_studio:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
+"pixel_pipeline" = ["mocap_library.json"]
 "pixel_pipeline.ui" = ["icon.png"]
 
 [tool.pytest.ini_options]

@@ -1865,3 +1865,26 @@ def export_map(asset, target: str, out_dir) -> list[Path]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     return _EXPORTERS[target](doc, out, style)
+
+
+# --------------------------------------------------------------------------- project types
+
+# assets.Style.tile_style -> (default map template, default map export) for a project type
+TILE_STYLE_DEFAULTS = {"hd2d": ("harbour", "godot-3d"), "topdown": ("village", "godot-tilemap"),
+                       "iso": ("castle", "godot-iso"), "side": ("flat", "godot-tilemap"),
+                       "none": ("flat", "json")}
+
+
+def defaults_for(style=None) -> tuple[str, str]:
+    """(template, export target) a new map in this project starts with (project types). The
+    type's own template wins when assets.PROJECT_TYPES names one; Unity projects export Tiled
+    maps (SuperTiled2Unity imports them), or plain json for a 3D (HD-2D) map."""
+    style = style or assets.current_project().style
+    template, target = TILE_STYLE_DEFAULTS.get(getattr(style, "tile_style", "hd2d"),
+                                               TILE_STYLE_DEFAULTS["hd2d"])
+    t = assets.PROJECT_TYPES.get(getattr(style, "project_type", "custom"), {})
+    if t.get("map") in _BUILDERS and getattr(style, "project_type", "custom") != "custom":
+        template = t["map"]
+    if getattr(style, "engine", "godot") == "unity":
+        target = "json" if target in ("godot-3d", "json") else "tiled"
+    return template, target

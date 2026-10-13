@@ -587,6 +587,9 @@ def make_portraits(character, expressions=EXPRESSIONS, style: str = "painted",
                                              PAINTED_NEGATIVE) if x)
         template = PAINTED_PROMPT if expr == "neutral" or mask is None else EXPRESSION_PROMPT
         text = template.format(who=who, expression=words, person=person)
+        if expr == "neutral":     # house style on the bust; expressions repaint the face only
+            from .assets import with_style
+            text, negative = with_style(text, negative, st, "portrait")
         if mask is not None:          # the face alone, enlarged to the full generation size
             box = face_crop_box(mask)
             face = image.crop(box)

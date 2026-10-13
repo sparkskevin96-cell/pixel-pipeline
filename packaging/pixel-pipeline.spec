@@ -23,6 +23,8 @@ HIDDEN += collect_submodules("trimesh.exchange") + collect_submodules("trimesh.v
 DATAS = collect_data_files("trimesh")
 # The window/taskbar icon the app loads at runtime.
 DATAS += [(str(SRC / "pixel_pipeline" / "ui" / "icon.png"), "pixel_pipeline/ui")]
+# The curated mocap library index (mocap.py).
+DATAS += [(str(SRC / "pixel_pipeline" / "mocap_library.json"), "pixel_pipeline")]
 # Build number for updates (ui/updater.py); CI writes it, local builds have none (no updates).
 if (SRC / "pixel_pipeline" / "ui" / "build.json").exists():
     DATAS += [(str(SRC / "pixel_pipeline" / "ui" / "build.json"), "pixel_pipeline/ui")]

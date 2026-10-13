@@ -588,6 +588,8 @@ class GenOptions:
     """Generation knobs (all optional). None = default; the defaults suit SDXL + Pixel Art XL."""
     checkpoint: str = DEFAULT_CHECKPOINT   # any SDXL checkpoint in models/checkpoints
     lora: str = DEFAULT_LORA               # pixel-art LoRA in models/loras; "none" = no LoRA
+    style_lora: str | None = None          # a project's trained style (styletrain.py); None =
+    style_lora_strength: float = 0.8       # the current project's, "" = off
     lora_strength: float | None = None     # 1.0 (1.2 with fast)
     vae: str | None = None                 # e.g. sdxl_vae.safetensors (fp16-fix); None = checkpoint's
     fast: bool = False                     # LCM-LoRA: 8 steps, cfg 1.5 (~3x faster, a bit rougher)
@@ -1048,6 +1050,7 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
                                 steps=samp["steps"], cfg=samp["cfg"], sampler=samp["sampler"],
                                 scheduler=samp["scheduler"], filename_prefix=opts.filename_prefix,
                                 mask=mask_name, grow_mask_by=grow_mask_by)
+            _apply_project_style(wf, opts)
         pid = client.queue(wf)
         log.info("Queued ComfyUI prompt %s (seed %d)", pid, s)
         entry = client.wait(pid, opts.timeout)
@@ -1062,14 +1065,16 @@ def generate_sprite(prompt: str, settings: Settings, *, client: ComfyClient | No
                     subject: str | None = None, system: str | None = None,
                     seed: int | None = None, count: int = 1,
                     init_image: ImageSource | None = None, denoise: float = 0.6,
-                    palette: np.ndarray | None = None, **gen_opts) -> list[Generated]:
+                    palette: np.ndarray | None = None, style=None,
+                    **gen_opts) -> list[Generated]:
     """Prompt -> ComfyUI -> convert() -> sprites on the settings' exact grid and palette.
 
     subject: person | animal | object | background, shapes the prompt (default: guessed
     from the settings). system: retro look name (snes, nes, ...) adds style words; the
     caller still applies the system's settings. init_image: sketch for img2img; denoise =
     how much the GPU may change it. palette: force one palette (e.g. shared across a set).
-    gen_opts: see GenOptions. Returns [(sprite, raw_image, seed)], one per image.
+    style: the house style (assets.Style) appended to shaped prompts (None = the current
+    project's, False = none). gen_opts: see GenOptions. Returns [(sprite, raw_image, seed)].
     Raises ComfyUIUnavailable / ComfyUIModelMissing / ComfyUIWorkflowError (all
     ComfyUIError), ValueError for bad arguments, TypeError for unknown options.
     """
@@ -1078,6 +1083,11 @@ def generate_sprite(prompt: str, settings: Settings, *, client: ComfyClient | No
     if opts.shape_prompt:
         positive, negative = sprite_prompt(prompt, subject, system=system,
                                            size=(settings.width, settings.height))
+        if style is not False:                                  # house style (assets.py)
+            from .assets import project_style, with_style
+            positive, negative = with_style(positive, negative, style or project_style(),
+                                            "character" if subject in ("person", "animal")
+                                            else "sprite")
     else:
         positive, negative = (prompt or "").strip(), ""
         if not positive:
@@ -1124,3 +1134,26 @@ def check_setup(client: ComfyClient | None = None, **gen_opts) -> tuple[bool, st
                              f"{DOWNLOADS.get(wanted, wanted)})")
     lines.append("Ready." if ok else "Not ready: install the missing model(s) above.")
     return ok, "\n".join(lines)
+
+
+def _apply_project_style(wf: dict, opts) -> None:
+    """Chain the project's trained style LoRA (Train style) into a built-in workflow and put its
+    trigger word in the prompt. opts.style_lora: None = the current project's, "" = off."""
+    lora, strength, trigger = opts.style_lora, opts.style_lora_strength, ""
+    if lora is None:
+        try:
+            from .styletrain import project_style_lora
+            found = project_style_lora()
+        except Exception:  # noqa: BLE001 - no project, no style: plain generation
+            found = None
+        if not found:
+            return
+        lora, trigger, strength = found["lora"], found.get("trigger", ""), found.get("strength", strength)
+    if not lora:
+        return
+    from .styletrain import apply_style_lora, styled_prompt
+    apply_style_lora(wf, lora, strength)
+    if trigger:
+        for n in wf.values():
+            if n.get("class_type") == "CLIPTextEncode" and n.get("_meta", {}).get("title") == "Prompt":
+                n["inputs"]["text"] = styled_prompt(n["inputs"]["text"], trigger)

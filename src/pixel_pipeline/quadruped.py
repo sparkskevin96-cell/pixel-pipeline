@@ -178,7 +178,16 @@ def find_quadruped_skeleton(pts: np.ndarray, head: str = "auto"
         belly = 0.45 * H
         notes.append("legs: no belly line (lying down?), standard dog proportions")
 
-    low = pts[y < 0.6 * belly]
+    # a tail hanging down behind the hind legs reaches below the belly but not the ground:
+    # it is not a leg (else the wolf's tail walks like its right hind leg)
+    feet = pts[y < 0.05 * H]
+    hanging = np.zeros(len(pts), bool)
+    if legs_ok and len(feet) > 20:
+        zf = float(np.percentile(feet[:, 2], 1))
+        hanging = (y < 0.9 * belly) & (z < zf - 0.03 * L) & (y > 0.04 * H)
+        if hanging.sum() < max(30, 0.002 * len(pts)):
+            hanging[:] = False
+    low = pts[(y < 0.6 * belly) & ~hanging]
     pair_z = None
     if legs_ok and len(low) > 40:
         bins = np.arange(z0, z1 + grid.cell, grid.cell)
@@ -208,7 +217,7 @@ def find_quadruped_skeleton(pts: np.ndarray, head: str = "auto"
     joints: dict[str, np.ndarray] = {}
     tips: dict[str, np.ndarray] = {}
     split_x: dict[str, float] = {}
-    leg_pts = pts[y < 0.9 * belly]
+    leg_pts = pts[(y < 0.9 * belly) & ~hanging]
     for pair in ("front", "back"):
         sel = leg_pts[(leg_pts[:, 2] > pair_z) == (pair == "front")] if legs_ok else leg_pts[:0]
         low_sel = sel[sel[:, 1] < 0.6 * belly]
@@ -287,7 +296,18 @@ def find_quadruped_skeleton(pts: np.ndarray, head: str = "auto"
     while c < c_h and 0 < thick[c] < 0.3 * ref:
         c += 1
     has_tail = (c - c_0) * grid.cell >= 0.06 * L
-    if has_tail:
+    if hanging.any():                                  # the hanging tail: root, middle, tip
+        hp = pts[hanging]
+        top_y = float(hp[:, 1].max())
+        base = np.array([float(np.median(hp[:, 0])), top_y + 0.5 * max(0.0, hips[1] - top_y),
+                         float(np.percentile(hp[:, 2], 90))])
+        tip = hp[np.argmin(hp[:, 1] + 0.3 * (hp[:, 2] - hp[:, 2].min()))]
+        band = np.abs(hp[:, 1] - (top_y + tip[1]) / 2) < 0.05 * H
+        midp = np.median(hp[band], 0) if band.sum() > 3 else (base + tip) / 2
+        joints["tail1"], joints["tail2"], tips["tail_tip"] = base, midp, tip
+        has_tail = True
+        notes.append("tail: hanging down behind the hind legs")
+    elif has_tail:
         base_z = grid.xy(0, c)[0]
 
         def centre(z_lo, z_hi):

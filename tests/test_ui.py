@@ -110,7 +110,7 @@ def test_model_studio_plays_a_rigged_model(app, tmp_path):
 def test_main_window_has_every_tool(app):
     win = MainWindow()
     titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-    assert titles == ["Characters", "Items && props", "World", "Portraits && effects", "Library",
+    assert titles == ["Characters", "Items && props", "World", "Portraits, cards && effects", "Library",
                       "Try in a game", "Sprite", "More tools"]
     assert win.current_tool() is win.studio                       # opens on Characters
     win.show_tool(win.map_editor)

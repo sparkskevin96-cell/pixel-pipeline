@@ -236,10 +236,12 @@ class MainWindow(QMainWindow):
         from .assets_tab import AssetsTab
         from .effects_tab import EffectsTab
         from .map_editor import MapEditor
+        from .cards_tab import CardsTab
         from .portraits_tab import PortraitsTab
         self.map_editor = MapEditor(say)
         self.portraits_tab = PortraitsTab(say)
         self.effects_tab = EffectsTab(say)
+        self.cards_tab = CardsTab(say)
         self.assets_tab = AssetsTab(status=say)
         self.items_tab = self.props_tab = None
         try:
@@ -250,7 +252,7 @@ class MainWindow(QMainWindow):
             pass
         # anything new anywhere shows up everywhere
         for sig in (self.studio.library_changed, self.map_editor.map_saved, self.portraits_tab.changed,
-                    self.effects_tab.changed, *([w.changed for w in (self.items_tab, self.props_tab)
+                    self.effects_tab.changed, self.cards_tab.changed, *([w.changed for w in (self.items_tab, self.props_tab)
                                                  if w is not None and hasattr(w, "changed")])):
             sig.connect(lambda *_: self.assets_tab.refresh())
         self.map_editor.map_saved.connect(lambda *_: self.game_tab.refresh())
@@ -285,6 +287,8 @@ class MainWindow(QMainWindow):
         self.faces_tabs = sub([
             (self.portraits_tab, "Portraits", "Painted and pixel portraits of a character, with "
                                               "expressions"),
+            (self.cards_tab, "Cards", "Card art from a character, item or words + card frames; "
+                                      "export a card scene for Godot or Unity"),
             (self.effects_tab, "Effects", "Slashes, sparks, fire, magic, heal… as sprite sheets"),
         ])
         self.objects_tabs = sub([(w, t, tip) for w, t, tip in (
@@ -298,7 +302,7 @@ class MainWindow(QMainWindow):
                                         "animate and go into your library"),
             (self.objects_tabs, "Items && props", "Items with inventory icons; props and buildings"),
             (self.world_tabs, "World", "Maps and terrain tiles"),
-            (self.faces_tabs, "Portraits && effects", "Character portraits with expressions; effects"),
+            (self.faces_tabs, "Portraits, cards && effects", "Portraits with expressions, cards, effects"),
             (self.assets_tab, "Library", "Everything you've made, by project: search, tag, export "
                                          "to Godot / Unity / GameMaker / Aseprite, re-skin, queue"),
             (self.game_tab, "Try in a game", "Drop your characters onto a map in a Godot tactics "
@@ -325,6 +329,8 @@ class MainWindow(QMainWindow):
                 "then Export or use it in Try in a game.",
         "portraits": "Pick a character, tick expressions, press Make (your GPU paints them).",
         "effects": "Pick an effect, a theme and a size; it plays live; Make saves it.",
+        "cards": "Pick a character, item or prop (or type words), fill the card, Make art (your "
+                 "GPU) and pick one; Save card; Export for Godot or Unity.",
         "library": "Everything in this project. Search, filter, tag; Export… for any engine; "
                    "Re-skin… makes colour variants; the queue makes many in a row.",
         "items": "Describe an item (or use a photo / 3D model) and press Make: icon variations + "
@@ -366,7 +372,7 @@ class MainWindow(QMainWindow):
             key = {self.sprite_split: "sprite", self.prompt_tab: "prompt", self.map_tab: "map",
                    self.game_tab: "game", self.directions_tab: "directions",
                    self.map_editor: "maps", self.portraits_tab: "portraits",
-                   self.effects_tab: "effects", self.assets_tab: "library",
+                   self.effects_tab: "effects", self.assets_tab: "library", self.cards_tab: "cards",
                    self.items_tab: "items", self.props_tab: "props",
                    self.teams_tab: "teams", self.portrait_tab: "portrait",
                    self.demo_tab: "demo"}.get(w)

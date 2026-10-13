@@ -222,6 +222,7 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
     else:
         from .autorig import auto_rig
         auto_rig(ch.model, ch.rigged)
+    add_project_clips(ch.rigged, kind, progress=say)      # house style: the type's clip set
     render_sheets(ch.rigged, ch.sheet, kind, size, progress=say)
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
@@ -305,6 +306,7 @@ def rebuild(ch: Character, model, progress=None) -> Character:
     else:
         from .autorig import auto_rig
         auto_rig(ch.model, ch.rigged)
+    add_project_clips(ch.rigged, ch.kind, progress=say)   # house style: the type's clip set
     render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say)
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
@@ -374,3 +376,117 @@ def _known_motions(kind: str):
     else:
         from .autorig import all_actions
     return all_actions()
+
+
+# --------------------------------------------------------------------------- project clip sets
+
+def add_project_clips(rigged: Path, kind: str = "person", st=None, progress=None) -> list[str]:
+    """Append the project type's extra clips (assets.Style.animations, e.g. a side-scroller's
+    jump) that motions.py can make and the rig doesn't have yet. Clips no motion exists for
+    (fall, land, climb, crouch until someone writes them) are skipped. Returns the added names."""
+    from .anim3d import Gltf
+    from .assets import extra_clips, missing_clips
+    st = st or style()
+    have = [a.get("name") for a in Gltf(rigged).doc.get("animations", [])]
+    todo = extra_clips(st, kind, have)
+    skipped = missing_clips(st, kind)
+    say = progress or (lambda t: None)
+    if skipped:
+        say(f"No motion yet for {', '.join(skipped)}: skipped.")
+    if todo:
+        from .motions import add_animations
+        say(f"Adding the project's clips: {', '.join(todo)}…")
+        add_animations(rigged, todo)
+    return todo
+
+
+# --------------------------------------------------------------------------- mocap + springs
+
+def _render_with_new_clips(ch: Character, tmp: Path, keep, progress=None) -> None:
+    """Re-render ch's sheet from tmp (its rigged.glb plus new clips), framed and coloured from
+    the clips in keep (None = all), then put tmp in place of rigged.glb."""
+    import inspect
+
+    from .anim3d import animated_turnaround, write_animated
+    from .settings import settings_for
+    say = progress or (lambda t: None)
+    p = inspect.signature(render_sheets).parameters.get("clean")
+    clean = bool(p.default) if p is not None and p.default is not inspect.Parameter.empty else False
+    st = style()
+    w, h = frame_size(ch.kind, ch.size, st)
+    colours = st.colours if ch.kind == "person" else max(8, round(st.colours * 2 / 3))
+    s = settings_for(ch.kind if ch.kind == "animal" else "person", width=w, height=h, colors=colours)
+    if st.outline == "none":
+        s.outline = False
+    elif st.outline in ("selout", "solid"):
+        s.outline_style = st.outline
+    if st.palette != "auto":
+        s.palette = st.palette
+    if clean is True and st.palette != "auto":
+        clean = {"palette": st.palette}
+    say(f"Rendering every animation from {st.directions} directions…")
+    anim, _ = animated_turnaround([tmp], s, st.directions, 8, elevation=st.elevation,
+                                  light=st.light, normals=True, clean=clean, frame_with=keep)
+    tmp.replace(ch.rigged)
+    write_animated(anim, ch.sheet, aseprite=True, godot=True, normals=True)
+
+
+def add_mocap(ch: Character, bvh_files_or_library_names, progress=None, *, replace: bool = True,
+              plant_feet: bool = True) -> Character:
+    """Give a library person motion-captured clips (mocap.py): BVH paths, or friendly names from
+    the mocap library index ("walk", "sword slash", ...; the files must be downloaded into
+    mocap.mocap_root()). A file's clip is named after it; a library name after its entry. Old
+    clips keep their frames and the scale (the sheet is framed by them); a mocap clip with an
+    old clip's name (walk) replaces it when replace=True. Springs (capes, hair) are re-baked."""
+    from .anim3d import Gltf
+    from .mocap import resolve, retarget_bvh
+    say = progress or (lambda t: None)
+    if ch.kind == "animal":
+        raise ValueError("Mocap clips are for people (the humanoid rig)")
+    if not ch.rigged.exists():
+        raise ValueError(f"{ch.name} has no rigged.glb (add it to the library again first)")
+    items = [resolve(x) for x in bvh_files_or_library_names]           # fail before any work
+    old = [a.get("name") for a in Gltf(ch.rigged).doc.get("animations", [])]
+    tmp = ch.rigged.with_name("rigged.new.glb")
+    shutil.copyfile(ch.rigged, tmp)
+    try:
+        for it in items:
+            say(f"{ch.name}: retargeting {Path(it['path']).name} as {it['name']}…")
+            retarget_bvh(it["path"], tmp, it["name"], tmp, start=it["start"], end=it["end"],
+                         loop=it["loop"], plant_feet=plant_feet, replace=replace)
+        from .springs import has_springs, rebake
+        if has_springs(tmp):
+            say("Swinging the capes, hair and tails…")
+            rebake(tmp)
+        redone = {it["name"] for it in items}
+        keep = [n for n in old if n not in redone] or None
+        if has_springs(tmp):
+            keep = None                     # every clip's cape moves anew: frame them all
+        _render_with_new_clips(ch, tmp, keep, say)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    make_thumb(ch.sheet, ch.thumb)
+    ch.save()
+    return ch
+
+
+def add_character_springs(ch: Character, progress=None, **options) -> Character:
+    """Capes, hair and tails swing and settle (springs.py): spring bones are added to the
+    character's rig and baked into every clip, then the sheet is rendered again. options go to
+    springs.add_springs (parts, stiffness, damping, gravity)."""
+    from .springs import add_springs
+    say = progress or (lambda t: None)
+    if not ch.rigged.exists():
+        raise ValueError(f"{ch.name} has no rigged.glb (add it to the library again first)")
+    tmp = ch.rigged.with_name("rigged.new.glb")
+    say(f"{ch.name}: finding capes, hair and tails…")
+    try:
+        add_springs(ch.rigged, tmp, **options)
+        _render_with_new_clips(ch, tmp, None, say)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    make_thumb(ch.sheet, ch.thumb)
+    ch.save()
+    return ch

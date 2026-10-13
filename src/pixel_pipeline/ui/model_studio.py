@@ -213,6 +213,10 @@ class ModelStudio(QMainWindow):
         self.frames.setRange(1, 32)
         self.frames.setValue(8)
         self.frames.setToolTip("Frames per animation")
+        self.swing = QCheckBox("Capes/hair/tails swing")
+        self.swing.setToolTip("Find a cape, long hair or a tail hanging off the body, give it spring "
+                              "bones and bake its swing into every animation (it trails when "
+                              "running, settles when standing). Used when a skeleton is added.")
         self.redo_btn = QPushButton("Update sprites")
         self.redo_btn.clicked.connect(self.update_sprites)
         self.save_btn = QPushButton("Save all…")
@@ -257,6 +261,7 @@ class ModelStudio(QMainWindow):
             row.addWidget(QLabel(label))
             row.addWidget(w)
         row.addWidget(self.animate)
+        row.addWidget(self.swing)
         row.addWidget(self.frames)
         row.addStretch(1)
         row.addWidget(self.redo_btn)
@@ -427,12 +432,20 @@ class ModelStudio(QMainWindow):
         kind = self.subject.currentText()
         size = self.size_.currentText()
         model = self.result.model
+        swing = self.swing.isChecked()
         picture = self.result.picture if self.result.picture and \
             Path(self.result.picture).suffix.lower() == ".png" else None
 
         def job(say):
-            return add_character(name, model, kind=kind, size=size, picture=picture, progress=say,
-                                 prompt=prompt)
+            ch = add_character(name, model, kind=kind, size=size, picture=picture, progress=say,
+                               prompt=prompt)
+            if swing:
+                from ..library import add_character_springs
+                try:
+                    ch = add_character_springs(ch, progress=say)
+                except ValueError as e:                  # nothing hangs off this one
+                    say(str(e))
+            return ch
 
         def done(ch):
             self.refresh_library(select=ch)
@@ -533,6 +546,13 @@ class ModelStudio(QMainWindow):
                 else:
                     from ..autorig import auto_rig
                     rig = auto_rig(model, out)
+                if self.swing.isChecked():
+                    from ..springs import add_springs
+                    say("Swinging the capes, hair and tails…")
+                    try:
+                        add_springs(rig.path)
+                    except ValueError as e:              # nothing hangs off this one
+                        say(str(e))
                 target, rigged, names = rig.path, rig.path, rig.clips
             say(f"Playing {len(names)} animations from every side…")
             anim, _ = animated_turnaround([target], s, n, self.frames.value(),

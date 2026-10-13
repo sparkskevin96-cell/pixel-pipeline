@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QButtonGroup, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListView,
     QListWidget, QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QSlider, QSpinBox,
-    QSplitter, QVBoxLayout, QWidget,
+    QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .. import assets as A
@@ -83,37 +83,72 @@ def _words(text: str) -> list[str]:
 
 # --------------------------------------------------------------------------- dialogs
 
+SHADING_CHOICES = (("Soft shading", "soft"), ("Cel shading (hard two-tone)", "cel"),
+                   ("Flat colours", "flat"))
+PROPORTION_CHOICES = (("Chibi (big heads)", "chibi"), ("Normal", "normal"),
+                      ("Tall and heroic", "tall"))
+DETAIL_CHOICES = (("Chunky, low detail", "chunky"), ("Normal", "normal"), ("Fine detail", "fine"))
+ENGINES = (("Godot", "godot"), ("Unity", "unity"))
+LOCK = "__lock__"                       # palette choice: lock one from the assets
+EXAMPLES = Path(__file__).with_name("project_types")    # <type>.png example pictures, if any
+
+
+def _combo(choices, current):
+    box = QComboBox()
+    for label, key in choices:
+        box.addItem(label, key)
+    box.setCurrentIndex(max(0, box.findData(current)))
+    return box
+
+
+def _palette_box(st: A.Style, lock_label: str | None) -> QComboBox:
+    """auto / lock from assets / the project's locked palette / built-in palettes."""
+    from ..palettes import BUILTIN
+    box = QComboBox()
+    box.addItem("Pick colours automatically", "auto")
+    if lock_label:
+        box.addItem(lock_label, LOCK)
+    for p in BUILTIN:
+        box.addItem(p, p)
+    if box.findData(st.palette) < 0:
+        label = st.palette
+        if Path(str(st.palette)).name == A.PALETTE_FILE:
+            label = "This project's locked palette (palette.hex)"
+        box.addItem(label, st.palette)
+    box.setCurrentIndex(box.findData(st.palette))
+    return box
+
+
 class StyleDialog(QDialog):
-    """A project's name + look (assets.Style) in plain words."""
+    """A project's name + look (assets.Style) in plain words, house style first."""
 
     def __init__(self, parent=None, style: A.Style | None = None, name: str = "",
-                 title: str = "New project"):
+                 title: str = "New project", lock_label: str | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        from ..palettes import BUILTIN
         st = style or A.Style()
+        self.base = st                                   # fields this dialog doesn't show
         self.name = QLineEdit(name)
         self.name.setPlaceholderText("e.g. Harbour Tactics")
-        self.palette = QComboBox()
-        self.palette.addItem("Pick colours automatically", "auto")
-        for p in BUILTIN:
-            self.palette.addItem(p, p)
-        if self.palette.findData(st.palette) < 0:
-            self.palette.addItem(st.palette, st.palette)
-        self.palette.setCurrentIndex(self.palette.findData(st.palette))
+        self.style_prompt = QLineEdit(st.style_prompt)
+        self.style_prompt.setPlaceholderText("e.g. 16-bit SNES JRPG, bold outlines, warm palette")
+        self.style_negative = QLineEdit(st.style_negative)
+        self.style_negative.setPlaceholderText("e.g. gradients, photo, blurry")
+        self.shading = _combo(SHADING_CHOICES, st.shading)
+        self.proportions = _combo(PROPORTION_CHOICES, st.proportions)
+        self.detail = _combo(DETAIL_CHOICES, st.detail)
+        self.palette = _palette_box(st, lock_label)
         self.colours = self._spin(2, 64, st.colours, " colours")
-        self.outline = QComboBox()
-        for label, key in OUTLINES:
-            self.outline.addItem(label, key)
-        self.outline.setCurrentIndex(max(0, self.outline.findData(st.outline)))
+        self.outline = _combo(OUTLINES, st.outline)
         self.height_ = self._spin(16, 256, st.person_height, " px tall")
         self.tilt = self._spin(0, 90, round(st.elevation), "°")
         self.tilt.setToolTip("0 = straight from the side, 30 = HD-2D / isometric, 90 = from above")
         self.directions = QComboBox()
-        for n in (4, 8, 16):
-            self.directions.addItem(f"{n} directions", n)
+        for n in (2, 4, 8, 16):
+            self.directions.addItem("2 directions (left, right)" if n == 2 else f"{n} directions", n)
         self.directions.setCurrentIndex(max(0, self.directions.findData(st.directions)))
         self.light = self._spin(0, 100, round(st.light * 100), " %")
+        self.shading.currentIndexChanged.connect(self._shading_changed)
         self.tile = self._spin(4, 256, st.tile, " px")
         self.ppu = QDoubleSpinBox()
         self.ppu.setRange(4, 512)
@@ -122,6 +157,11 @@ class StyleDialog(QDialog):
         self.icon_ = self._spin(8, 256, st.icon, " px")
         form = QFormLayout(self)
         form.addRow("Project name", self.name)
+        form.addRow("Art style", self.style_prompt)
+        form.addRow("Never draw", self.style_negative)
+        form.addRow("Shading", self.shading)
+        form.addRow("Proportions", self.proportions)
+        form.addRow("Detail", self.detail)
         form.addRow("Colours", self.palette)
         form.addRow("Colours per sprite", self.colours)
         form.addRow("Outline", self.outline)
@@ -145,12 +185,211 @@ class StyleDialog(QDialog):
         s.setSuffix(suffix)
         return s
 
+    @Slot(int)
+    def _shading_changed(self, _i):
+        self.light.setValue(round(A.SHADING_LIGHT.get(self.shading.currentData(), 0.2) * 100))
+
+    @property
+    def lock_palette(self) -> bool:
+        """The palette choice was "lock one from the assets" (the caller builds palette.hex)."""
+        return self.palette.currentData() == LOCK
+
     def style(self) -> A.Style:
-        return A.Style(palette=self.palette.currentData(), colours=self.colours.value(),
-                       outline=self.outline.currentData(), person_height=self.height_.value(),
-                       elevation=float(self.tilt.value()), directions=self.directions.currentData(),
-                       light=self.light.value() / 100, tile=self.tile.value(),
-                       ppu=float(self.ppu.value()), icon=self.icon_.value())
+        from dataclasses import replace
+        pal = self.palette.currentData()
+        return replace(self.base, palette=self.base.palette if pal == LOCK else pal,
+                       colours=self.colours.value(), outline=self.outline.currentData(),
+                       person_height=self.height_.value(), elevation=float(self.tilt.value()),
+                       directions=self.directions.currentData(), light=self.light.value() / 100,
+                       tile=self.tile.value(), ppu=float(self.ppu.value()), icon=self.icon_.value(),
+                       style_prompt=self.style_prompt.text().strip(),
+                       style_negative=self.style_negative.text().strip(),
+                       shading=self.shading.currentData(), proportions=self.proportions.currentData(),
+                       detail=self.detail.currentData(), animations=list(self.base.animations))
+
+
+class NewProjectWizard(QDialog):
+    """New project in two pages: 1) what kind of game (a PROJECT_TYPES preset), name, engine;
+    2) the house style in plain words (art style, outline, shading, proportions, detail, sprite
+    size, colours). values() -> (name, type, Style, lock palette from current project?)."""
+
+    def __init__(self, parent=None, lock_from: str | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("New project")
+        self.lock_from = lock_from
+        self._typed_style = False
+        self.pages = QStackedWidget()
+
+        # page 1: type, name, engine
+        self.types = QListWidget()
+        self.types.setIconSize(QSize(64, 64))
+        for key, t in A.PROJECT_TYPES.items():
+            item = QListWidgetItem(t["label"])
+            item.setData(Qt.UserRole, key)
+            pic = EXAMPLES / f"{key}.png"
+            if pic.exists():
+                try:
+                    item.setIcon(_icon(np.asarray(Image.open(pic).convert("RGBA")), 64))
+                except OSError:
+                    pass
+            self.types.addItem(item)
+        self.about = QLabel("")
+        self.about.setWordWrap(True)
+        self.about.setMinimumHeight(48)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("e.g. Harbour Tactics")
+        self.engine = _combo(ENGINES, "godot")
+        p1 = QWidget()
+        f1 = QFormLayout(p1)
+        f1.addRow(QLabel("What kind of game?"))
+        f1.addRow(self.types)
+        f1.addRow(self.about)
+        f1.addRow("Project name", self.name)
+        f1.addRow("Game engine", self.engine)
+
+        # page 2: the house style
+        self.style_prompt = QLineEdit()
+        self.style_prompt.setPlaceholderText("e.g. 16-bit SNES JRPG, bold outlines, warm palette")
+        self.style_negative = QLineEdit()
+        self.style_negative.setPlaceholderText("things never to draw, e.g. gradients, photo")
+        self.outline = _combo(OUTLINES, "selout")
+        self.shading = _combo(SHADING_CHOICES, "soft")
+        self.proportions = _combo(PROPORTION_CHOICES, "normal")
+        self.detail = _combo(DETAIL_CHOICES, "normal")
+        self.size = QComboBox()
+        self.palette = _palette_box(A.Style(), f"Lock the colours of {lock_from}'s assets"
+                                    if lock_from else None)
+        self.summary = QLabel("")
+        self.summary.setWordWrap(True)
+        self.summary.setStyleSheet("color:#9aa3b5;")
+        p2 = QWidget()
+        f2 = QFormLayout(p2)
+        f2.addRow("Art style", self.style_prompt)
+        f2.addRow("Never draw", self.style_negative)
+        f2.addRow("Outline", self.outline)
+        f2.addRow("Shading", self.shading)
+        f2.addRow("Proportions", self.proportions)
+        f2.addRow("Detail", self.detail)
+        f2.addRow("Sprite size", self.size)
+        f2.addRow("Colours", self.palette)
+        f2.addRow(self.summary)
+        self.pages.addWidget(p1)
+        self.pages.addWidget(p2)
+
+        self.back_btn = QPushButton("Back")
+        self.next_btn = QPushButton("Next")
+        self.create_btn = QPushButton("Create project")
+        cancel = QPushButton("Cancel")
+        self.back_btn.clicked.connect(self.back)
+        self.next_btn.clicked.connect(self.next_page)
+        self.create_btn.clicked.connect(self._create_clicked)
+        cancel.clicked.connect(self.reject)
+        self.error = QLabel("")
+        self.error.setStyleSheet("color:#e07070;")
+        row = QHBoxLayout()
+        row.addWidget(self.error, 1)
+        for b in (cancel, self.back_btn, self.next_btn, self.create_btn):
+            row.addWidget(b)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.pages, 1)
+        lay.addLayout(row)
+        self.types.currentRowChanged.connect(self._type_row)
+        self.size.currentIndexChanged.connect(self._update_summary)
+        self.set_type("hd2d")
+        self._show_page(0)
+
+    # -- type page
+    def project_type(self) -> str:
+        item = self.types.currentItem()
+        return item.data(Qt.UserRole) if item is not None else "custom"
+
+    def set_type(self, key: str):
+        for i in range(self.types.count()):
+            if self.types.item(i).data(Qt.UserRole) == key:
+                self.types.setCurrentRow(i)
+                return
+        raise KeyError(key)
+
+    @Slot(int)
+    def _type_row(self, _row):
+        key = self.project_type()
+        t = A.PROJECT_TYPES[key]
+        self.about.setText(t["about"])
+        preset = A.style_for_type(key)
+        self.style_prompt.setText(preset.style_prompt)
+        for box, value in ((self.outline, preset.outline), (self.shading, preset.shading),
+                           (self.proportions, preset.proportions), (self.detail, preset.detail)):
+            box.setCurrentIndex(max(0, box.findData(value)))
+        self.size.blockSignals(True)
+        self.size.clear()
+        for s in A.SPRITE_SIZES:
+            px = t["sizes"][s]
+            self.size.addItem(f"{s.title()} (a person is {px} px tall)", s)
+        self.size.setCurrentIndex(self.size.findData("normal"))
+        self.size.blockSignals(False)
+        self._update_summary()
+
+    @Slot()
+    def _update_summary(self, *_):
+        st = self.style()
+        names = {2: "left and right", 4: "4 ways", 8: "8 ways", 16: "16 ways"}
+        clips = ", ".join(st.animations) or "the built-in six"
+        missing = A.missing_clips(st)
+        self.summary.setText(
+            f"Characters face {names.get(st.directions, st.directions)}, camera tilt "
+            f"{st.elevation:g}°, map tiles {st.tile} px, icons {st.icon} px. Animations: {clips}"
+            + (f" ({', '.join(missing)}: not made yet, skipped)" if missing else "")
+            + f". Exports for {exports.PRESETS.get(st.export, st.export)}.")
+
+    # -- paging
+    def _show_page(self, i: int):
+        self.pages.setCurrentIndex(i)
+        self.back_btn.setEnabled(i > 0)
+        self.next_btn.setVisible(i == 0)
+        self.create_btn.setVisible(i == 1)
+
+    @Slot()
+    def next_page(self):
+        if not self.name.text().strip():
+            self.error.setText("Give the project a name.")
+            return
+        self.error.setText("")
+        self._update_summary()
+        self._show_page(1)
+
+    @Slot()
+    def back(self):
+        self._show_page(0)
+
+    @Slot()
+    def _create_clicked(self):
+        if not self.name.text().strip():
+            self._show_page(0)
+            self.error.setText("Give the project a name.")
+            return
+        self.accept()
+
+    # -- result
+    @property
+    def lock_palette(self) -> bool:
+        return self.palette.currentData() == LOCK
+
+    def style(self) -> A.Style:
+        pal = self.palette.currentData()
+        st = A.style_for_type(self.project_type(), self.size.currentData() or "normal",
+                              self.engine.currentData())
+        st.style_prompt = self.style_prompt.text().strip()
+        st.style_negative = self.style_negative.text().strip()
+        st.outline = self.outline.currentData()
+        A.set_shading(st, self.shading.currentData())
+        st.proportions = self.proportions.currentData()
+        st.detail = self.detail.currentData()
+        if pal and pal != LOCK:
+            st.palette = pal
+        return st
+
+    def values(self) -> tuple[str, str, A.Style, bool]:
+        return self.name.text().strip(), self.project_type(), self.style(), self.lock_palette
 
 
 class ExportDialog(QDialog):
@@ -316,11 +555,25 @@ class AssetsTab(ToolTab):
         new_btn.clicked.connect(self._new_project_clicked)
         style_btn = QPushButton("Project look…")
         style_btn.clicked.connect(self._style_clicked)
+        self.restyle_btn = QPushButton("Restyle…")
+        self.restyle_btn.setToolTip("Re-render this project's characters, items and props in its "
+                                    "current look (no GPU)")
+        self.restyle_btn.clicked.connect(self._restyle_clicked)
+        self.train_btn = QPushButton("Train style…")
+        self.train_btn.setToolTip("Teach your GPU this project's look from the assets you approve "
+                                  "(tag them 'approved'), so new assets match. About 80 minutes for "
+                                  "30 pictures, paced to keep the laptop cool; you can stop and resume.")
+        self.train_btn.clicked.connect(self._train_clicked)
+        self.type_label = QLabel("")
+        self.type_label.setStyleSheet("color:#9aa3b5;")
         top = QHBoxLayout()
         top.addWidget(QLabel("Project"))
         top.addWidget(self.project_box, 1)
+        top.addWidget(self.type_label)
         top.addWidget(new_btn)
         top.addWidget(style_btn)
+        top.addWidget(self.restyle_btn)
+        top.addWidget(self.train_btn)
 
         # filters
         self.chips = QButtonGroup(self)
@@ -492,6 +745,9 @@ class AssetsTab(ToolTab):
             self.project_box.addItem(p.name)
         self.project_box.setCurrentText(self.project.name)
         self.project_box.blockSignals(False)
+        t = A.PROJECT_TYPES.get(self.project.style.project_type)
+        self.type_label.setText(t["label"] if t and self.project.style.project_type != "custom"
+                                else "")
 
     @Slot(int)
     def _project_picked(self, _i):
@@ -514,36 +770,98 @@ class AssetsTab(ToolTab):
         self.library_changed.emit()
         self.say(f"Project: {self.project.name}")
 
-    def new_project(self, name: str, style: A.Style | None = None):
+    def new_project(self, name: str, style: A.Style | None = None, type: str | None = None,
+                    lock_from: str | None = None):
+        """Make a project (type: a PROJECT_TYPES preset; style wins over it) and switch to it.
+        lock_from: lock its palette from that project's (approved) assets."""
         name = name.strip()
         if not name:
             raise ValueError("Give the project a name.")
-        A.create_project(name, style or A.Style())
+        source = A.Project(lock_from, A.projects_folder() / lock_from) if lock_from else None
+        proj = A.create_project(name, style, type)
         self.switch_project(name)
+        if source is not None:          # made and switched to even if there's nothing to lock
+            A.lock_palette(proj, source=source)
+            self.say(f"Project: {name}, colours locked from {lock_from}'s assets.")
         return self.project
 
     @Slot()
     def _new_project_clicked(self):
-        dlg = StyleDialog(self, A.Style(), "")
+        dlg = NewProjectWizard(self, lock_from=self.project.name)
         ok = dlg.exec() == QDialog.Accepted
-        name, style = dlg.name.text(), dlg.style()
+        name, ptype, style, lock = dlg.values()
         dlg.setParent(None)
         if ok:
             try:
-                self.new_project(name, style)
+                self.new_project(name, style, ptype, self.project.name if lock else None)
             except ValueError as e:
                 self.warn(str(e))
 
+    def save_look(self, style: A.Style, lock: bool = False) -> list[str]:
+        """Save the project's look (lock: build palette.hex from its assets) and return what a
+        restyle would change (restyle_plan)."""
+        old = self.project.style
+        self.project.save_style(style)
+        if lock:
+            A.lock_palette(self.project)
+        self._fill_projects()
+        return A.restyle_plan(self.project, old, self.project.style)
+
     @Slot()
     def _style_clicked(self):
-        dlg = StyleDialog(self, self.project.style, self.project.name, "Project look")
+        dlg = StyleDialog(self, self.project.style, self.project.name, "Project look",
+                          lock_label="Lock the colours of this project's assets")
         dlg.name.setEnabled(False)
         ok = dlg.exec() == QDialog.Accepted
-        style = dlg.style()
+        style, lock = dlg.style(), dlg.lock_palette
         dlg.setParent(None)
         if ok:
-            self.project.save_style(style)
-            self.say("Saved the project's look. New assets use it; existing ones keep theirs.")
+            try:
+                plan = self.save_look(style, lock)
+            except ValueError as e:
+                self.warn(str(e))
+                return
+            self.say("Saved the project's look. New assets use it; Restyle… redoes old ones.")
+            if any(":" in line for line in plan[1:]) and not self.sync:
+                self._offer_restyle(plan)
+
+    def restyle_plan(self) -> list[str]:
+        return A.restyle_plan(self.project, None, self.project.style)
+
+    def restyle_now(self) -> None:
+        """Re-render the project's assets in its current look (on a thread; here when sync)."""
+        project = self.project
+        self.run(lambda say: A.restyle(project, progress=say), self._restyled, "Restyling…")
+
+    def _restyled(self, lines):
+        self.refresh()
+        self.library_changed.emit()
+        done = sum(1 for line in lines or [] if line.endswith("restyled"))
+        self.say(f"Restyled {done} asset(s)." + (" " + "; ".join(
+            line for line in lines if not line.endswith("restyled")) if lines else ""))
+
+    def _offer_restyle(self, plan):
+        text = "\n".join(plan[:30]) + ("\n…" if len(plan) > 30 else "")
+        answer = QMessageBox.question(self, "Restyle", "Re-render existing assets in the new "
+                                      f"look? This can take a while (no GPU).\n\n{text}")
+        if answer == QMessageBox.Yes:
+            self.restyle_now()
+
+    @Slot()
+    def _train_clicked(self, _checked=False):
+        """Open the Train style window (non-modal: it keeps training while you work)."""
+        from .style_train import StyleTrainDialog
+        dlg = StyleTrainDialog(self.project, self)
+        dlg.setModal(False)
+        dlg.show()
+        self._train_dlg = dlg            # keep it alive while it trains
+        return dlg
+
+    def _restyle_clicked(self):
+        plan = self.restyle_plan()
+        if self.sync:
+            return
+        self._offer_restyle(plan)
 
     # ---------------------------------------------------------------- browsing
 
@@ -874,3 +1192,4 @@ class AssetsTab(ToolTab):
         self.refresh()
         left = len(self.queue.pending())
         self.say("Queue finished." if not left else f"Queue stopped; {left} still to do.")
+

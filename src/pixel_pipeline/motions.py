@@ -378,45 +378,72 @@ def add_animations(rigged_glb, names, out_glb=None, *, replace: bool = False,
     the file stay byte for byte as they were; names the file already has are skipped
     unless replace=True (then the old clip is dropped and the new one appended).
     out_glb: where to write (default: the same file)."""
-    import json
-    from .anim3d import Gltf, GlbWriter
+    from .anim3d import Gltf
     src = Path(rigged_glb)
     out = Path(out_glb) if out_glb else src
     kind, sk, weapon = read_skeleton(src)
     if weapon_hand:
         weapon = "r" if weapon_hand.startswith("r") else "l"
+    doc = Gltf(src).doc
+    if kind == "humanoid":
+        from .autorig import all_actions, human_clips
+    else:
+        from .quadruped import all_actions, quad_clips
+    known = all_actions()
+    wanted = parse_actions(names, known)
+    have = [a.get("name") for a in doc.get("animations", [])]
+    todo = [f"{name}={motion}" for name, motion in wanted if replace or name not in have]
+    if not todo:
+        if out != src:
+            out.write_bytes(src.read_bytes())
+        return out
+    clips = human_clips(sk, todo, weapon) if kind == "humanoid" else quad_clips(sk, todo)
+    return append_clips(src, clips, out, replace=replace)
+
+
+def append_clips(rigged_glb, clips, out_glb=None, *, replace: bool = True,
+                 extras: dict | None = None) -> Path:
+    """Append ready-made clips [(name, times, poses, loop)] (autorig._clips_json format) to an
+    auto-rigged .glb. Mesh, skin and the other clips stay byte for byte; a clip with a name the
+    file has replaces it (replace=True) or is skipped. extras: {clip name: dict} merged into
+    that animation's extras (e.g. mocap source, travel speed)."""
+    import json
+    from .anim3d import Gltf, GlbWriter
+    from .autorig import _clips_json
+    src = Path(rigged_glb)
+    out = Path(out_glb) if out_glb else src
+    kind, sk, _ = read_skeleton(src)
+    if kind == "humanoid":
+        from .autorig import JOINTS
+    else:
+        from .quadruped import JOINTS
     g0 = Gltf(src)
     doc = json.loads(json.dumps(g0.doc))
     if len(doc.get("buffers", [])) != 1 or "uri" in doc["buffers"][0]:
         raise ValueError(f"{src.name}: expected one binary buffer (a .glb made by the auto-rig)")
-    if kind == "humanoid":
-        from .autorig import JOINTS, all_actions, human_clips
-        known = all_actions()
-    else:
-        from .quadruped import JOINTS, all_actions, quad_clips
-        known = all_actions()
-    wanted = parse_actions(names, known)
     have = [a.get("name") for a in doc.get("animations", [])]
-    todo = []
-    for name, motion in wanted:
-        if name in have and not replace:
-            continue
-        if name in have:
-            doc["animations"] = [a for a in doc["animations"] if a.get("name") != name]
-        todo.append(f"{name}={motion}")
-    if todo:
-        clips = human_clips(sk, todo, weapon) if kind == "humanoid" else quad_clips(sk, todo)
-        g = GlbWriter()
-        g.doc = doc
-        g.bin = bytearray(g0.buffers[0][:doc["buffers"][0]["byteLength"]])
-        index = {n.get("name"): i for i, n in enumerate(doc["nodes"])}
-        joint_names = [n for n, _ in JOINTS]
-        from .autorig import _clips_json
-        doc.setdefault("animations", [])
-        doc["animations"] += _clips_json(g, clips, joint_names, index, joint_names[0], sk.joints)
-        tmp = out.with_name(out.name + ".tmp")
-        g.save(tmp)
-        tmp.replace(out)
-    elif out != src:
-        out.write_bytes(src.read_bytes())
+    keep = []
+    for c in clips:
+        if c[0] in have:
+            if not replace:
+                continue
+            doc["animations"] = [a for a in doc["animations"] if a.get("name") != c[0]]
+        keep.append(c)
+    if not keep:
+        if out != src:
+            out.write_bytes(src.read_bytes())
+        return out
+    g = GlbWriter()
+    g.doc = doc
+    g.bin = bytearray(g0.buffers[0][:doc["buffers"][0]["byteLength"]])
+    index = {n.get("name"): i for i, n in enumerate(doc["nodes"])}
+    joint_names = [n for n, _ in JOINTS]
+    doc.setdefault("animations", [])
+    new = _clips_json(g, keep, joint_names, index, joint_names[0], sk.joints)
+    for a in new:
+        a["extras"].update((extras or {}).get(a["name"], {}))
+    doc["animations"] += new
+    tmp = out.with_name(out.name + ".tmp")
+    g.save(tmp)
+    tmp.replace(out)
     return out

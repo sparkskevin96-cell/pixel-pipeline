@@ -137,6 +137,37 @@ wants terse answers and fixes over polish.
     on one line, sheets over 8192 px repacked into columns. GameMaker: spr_ strips, GML loader,
     not verified (not installed).
   - Updater copies with /IS /IT.
+- **House style + project types (2026-10-13, Kevin: same-artist look per project, types that
+  set everything up; engines Godot + Unity)**: `Style` gained style_prompt/style_negative/
+  shading (soft|cel|flat -> light + hand_pixel steps)/proportions (chibi|normal|tall)/detail
+  (chunky|normal|fine)/project_type/camera/tile_style/engine/export/animations (old style.json
+  loads with defaults; a default Style adds NO words). `assets.style_words(style, kind)` /
+  `with_style` is the one helper every generator appends: generate_sprite, icons, drawn props,
+  prop/character 3D pictures + views (model3d `style=`; pixel-art terms stripped for those),
+  painted portrait (neutral only; expressions repaint the face). style=None = current
+  project's. `lock_palette` -> <project>/palette.hex (stored relative, read back absolute).
+  `PROJECT_TYPES` hd2d/topdown-rpg/side-scroller/isometric/cards-ui/custom via
+  `create_project(name, type=, size=, engine=)`; side-scroller = 2 directions (E, W:
+  turnaround.direction_names(2), objects.DIRECTION_CHOICES). library.add_project_clips adds
+  the type's clips motions.py knows (fall/land/climb/crouch don't exist yet: skipped).
+  maplib.defaults_for(style). UI: NewProjectWizard (type -> house style page), StyleDialog
+  house-style fields + palette lock, Restyle… (assets.restyle: characters rebuild, items,
+  props; drawn 4-side props need the GPU).
+- **Wave 3 (2026-10-13): style LoRA, cards, mocap, springs**:
+  - `styletrain.py` + `ui/style_train.py` (Library -> Train style…, non-modal): trains a LoRA on
+    a project's approved assets with ComfyUI's built-in TrainLoraNode (no downloads), paced, never
+    touches the GPU power limit. Saved in Style.style_lora/style_trigger/style_strength.
+    `generate._apply_project_style` chains it after Pixel Art XL in every built-in workflow and
+    adds the trigger word (GenOptions.style_lora None = current project's, "" = off). Guide:
+    docs/STYLE_TRAINING.md.
+  - `cards.py` + `ui/cards_tab.py` (Portraits, cards & effects -> Cards): "card" is an asset kind
+    (<project>/cards). Card art from a character/item/prop or words, frames, card scenes for
+    Godot and Unity (both verified).
+  - `mocap.py`: BVH parse + retarget onto the 17-joint rig; `mocap_library.json` index; files in
+    $PIXEL_MOCAP or ~/Pixel Pipeline/Mocap. library.add_mocap. No mocap data downloaded yet (CMU
+    plan: 47 BVH, ~33 MB, awaiting Kevin's OK).
+  - `springs.py`: spring bones for capes/hair/tails (add_springs, rebake); Model Studio checkbox
+    "Capes/hair/tails swing"; library.add_character_springs. Quadruped tails now hang.
 - **App layout (2026-10-12, Kevin: "make it feel intuitive")**: tabs in the order you make a
   game: `1 Characters` (ModelStudio + Character Library list on the left; Kind person/animal/
   object, Size words not numbers, Name, Add to library = rig + all clips x16 + normals at the

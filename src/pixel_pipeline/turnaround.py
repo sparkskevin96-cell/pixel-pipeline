@@ -50,8 +50,10 @@ class ModelUnavailable(RuntimeError):
 
 
 def direction_names(n: int) -> list[str]:
-    if n not in DIRECTION_COUNTS:
-        raise ValueError(f"directions must be 4, 8 or 16, not {n}")
+    # 2 = E, W for side-scrollers (assets.py house style; kept out of DIRECTION_COUNTS so the
+    # CLI/MCP choices and photo captures stay 4/8/16)
+    if n not in DIRECTION_COUNTS and n != 2:
+        raise ValueError(f"directions must be 2, 4, 8 or 16, not {n}")
     return list(COMPASS16[:: 16 // n])
 
 

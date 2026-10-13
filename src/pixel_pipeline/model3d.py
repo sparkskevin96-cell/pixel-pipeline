@@ -102,17 +102,29 @@ VIEW_NEGATIVE = {"back": "front view, face, looking at the viewer, ",
 
 # --------------------------------------------------------------------------- picture
 
-def model_prompt(prompt: str, subject: str = "person") -> tuple[str, str]:
+def _house(positive: str, negative: str, subject: str, style) -> tuple[str, str]:
+    """House style hook (assets.style_words): the project's words without pixel-art terms
+    (the 3D model wants a clean picture). style None = the current project's; False = none."""
+    if style is False:
+        return positive, negative
+    from .assets import project_style, with_style
+    kind = "model" if subject in ("person", "animal") else "model-object"
+    return with_style(positive, negative, style or project_style(), kind)
+
+
+def model_prompt(prompt: str, subject: str = "person", style=None) -> tuple[str, str]:
     prompt = (prompt or "").strip().rstrip(".")
     if not prompt:
         raise ValueError("Empty prompt: describe what to make.")
-    return MODEL_PROMPTS.get(subject, MODEL_PROMPTS["object"]).format(prompt=prompt), MODEL_NEGATIVE
+    return _house(MODEL_PROMPTS.get(subject, MODEL_PROMPTS["object"]).format(prompt=prompt),
+                  MODEL_NEGATIVE, subject, style)
 
 
 def picture_for_model(prompt: str, subject: str = "person", *, client: ComfyClient | None = None,
-                      seed: int | None = None, **gen_opts) -> tuple[Image.Image, int]:
-    """A clean front picture to build the model from (SDXL, no pixel-art LoRA)."""
-    positive, negative = model_prompt(prompt, subject)
+                      seed: int | None = None, style=None, **gen_opts) -> tuple[Image.Image, int]:
+    """A clean front picture to build the model from (SDXL, no pixel-art LoRA). style: the
+    house style (assets.Style; None = the current project's, False = none)."""
+    positive, negative = model_prompt(prompt, subject, style)
     opts = {"lora": "none", **gen_opts}
     (img, used), = generate_images(positive, negative, client=client, seed=seed, aspect=1.0, **opts)
     return img, used
@@ -605,19 +617,20 @@ def view_inits(shape, front_picture: np.ndarray, which=("back",), samples: int =
     return out
 
 
-def view_prompt(prompt: str, view: str, subject: str = "person") -> tuple[str, str]:
+def view_prompt(prompt: str, view: str, subject: str = "person", style=None) -> tuple[str, str]:
     prompt = (prompt or "").strip().rstrip(".") or {"person": "a character", "animal": "an animal"}.get(
         subject, "an object")
     what, kind = {"person": ("character", "character"), "animal": ("animal", "creature")}.get(
         subject, ("object", "prop"))
-    return (VIEW_PROMPTS[view].format(prompt=prompt, what=what, kind=kind),
-            VIEW_NEGATIVE[view] + MODEL_NEGATIVE)
+    return _house(VIEW_PROMPTS[view].format(prompt=prompt, what=what, kind=kind),
+                  VIEW_NEGATIVE[view] + MODEL_NEGATIVE, subject, style)
 
 
 def views_for_model(front_picture, prompt: str | None, subject: str = "person",
                     client: ComfyClient | None = None, *, shape, which=("back",),
                     seed: int | None = None, denoise: float = 0.65, cutout_model: str = "isnet-general-use",
-                    progress=None, inits: dict | None = None, **gen_opts) -> dict[str, np.ndarray]:
+                    progress=None, inits: dict | None = None, style=None,
+                    **gen_opts) -> dict[str, np.ndarray]:
     """Matching back (and left / right side) pictures of a character for painting its shape.
 
     front_picture: the front picture (RGBA, background removed). shape: the uncoloured
@@ -642,7 +655,7 @@ def views_for_model(front_picture, prompt: str | None, subject: str = "person",
         say(f"Drawing the {name if name == 'back' else name + ' side'} of it on your GPU…")
         framed = np.asarray(framed_on_white(init, 1024).convert("RGB"))
         mask = np.asarray(framed_on_white(_white_mask(init), 1024).convert("L")) < 128
-        positive, negative = view_prompt(prompt, name, subject)
+        positive, negative = view_prompt(prompt, name, subject, style)
         (img, _), = generate_images(positive, negative, client=client, seed=seed,
                                     init_image=Image.fromarray(framed), denoise=denoise,
                                     aspect=1.0, **{"lora": "none", **gen_opts})
@@ -843,7 +856,7 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
                     cutout_model: str = "isnet-general-use", progress=None,
                     mirror_back: bool = False, colours=None, views: str | None = None,
                     left: ImageSource | None = None, right: ImageSource | None = None,
-                    view_denoise: float = 0.65, **gen_opts) -> ModelResult:
+                    view_denoise: float = 0.65, style=None, **gen_opts) -> ModelResult:
     """Prompt (or a picture, or a picture + a ready shape) -> coloured .glb.
 
     Writes <out>.glb (coloured), <out>.front.png (the picture) and <out>.shape.glb (the
@@ -853,7 +866,8 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
     these colours ('black, white', hex), e.g. a black-and-white dog photographed in shade.
     views: front / front+back / all: the GPU also draws the back (and both sides) from the
     shape (views_for_model), saved as <out>.back.png etc. Default front+back when made from
-    words, front for your own picture. left / right: side pictures you already have."""
+    words, front for your own picture. left / right: side pictures you already have.
+    style: the house style for the pictures (assets.Style; None = the current project's)."""
     out = Path(out_glb)
     out.parent.mkdir(parents=True, exist_ok=True)
     say = progress or (lambda step, text: log.info("%s: %s", step, text))
@@ -864,7 +878,8 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
         if not prompt:
             raise ValueError("Give a prompt or a picture.")
         say("picture", f"Making a front picture of “{prompt}” on your GPU…")
-        img, used_seed = picture_for_model(prompt, subject, client=client, seed=seed, **gen_opts)
+        img, used_seed = picture_for_model(prompt, subject, client=client, seed=seed,
+                                           style=style, **gen_opts)
         picture = img
     say("cutout", "Cutting out the subject…")
     rgba = cut_out(picture, cutout_model)
@@ -903,7 +918,7 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
             starts: dict = {}
             drawn = views_for_model(rgba, prompt, subject, client, shape=glb, which=make_views,
                                     seed=used_seed, denoise=view_denoise,
-                                    cutout_model=cutout_model, inits=starts,
+                                    cutout_model=cutout_model, inits=starts, style=style,
                                     progress=lambda text: say("views", text), **gen_opts)
             for name, pic in drawn.items():
                 path = out.with_suffix(f".{name}.png")

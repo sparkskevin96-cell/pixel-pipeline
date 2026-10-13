@@ -835,7 +835,7 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
 def godot_action_script(directions: list[str], actions: list[str], frames_name: str) -> str:
     dirs = ", ".join(f'&"{n}"' for n in directions)
     acts = ", ".join(f'&"{n}"' for n in actions)
-    south = directions.index("S")
+    south = directions.index("S") if "S" in directions else 0   # 2 directions (E, W): E
     return f"""extends AnimatedSprite2D
 ## Plays an action facing a direction. Set sprite_frames to {frames_name}, then call
 ## face(velocity) whenever the unit moves and act(&"walk") / act(&"idle") to switch.
