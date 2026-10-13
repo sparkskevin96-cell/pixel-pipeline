@@ -205,13 +205,14 @@ def update_script(new: Path, app: Path, pid: int, relaunch: list[str], log: Path
 $ErrorActionPreference = 'Continue'
 $new = {_ps(new)}; $app = {_ps(app)}; $log = {_ps(log)}
 Wait-Process -Id {int(pid)} -Timeout 120 -ErrorAction SilentlyContinue
+# /IS /IT: copy files even when size and time match (robocopy would skip them as "same")
 Start-Sleep -Milliseconds 300
 $ok = $false
 for ($try = 0; $try -lt 3 -and -not $ok; $try++) {{
   if ($try) {{ Start-Sleep -Seconds 2 }}
-  robocopy (Join-Path $new '_internal') (Join-Path $app '_internal') /MIR /R:5 /W:1 /NP /NJH /NJS /LOG+:$log | Out-Null
+  robocopy (Join-Path $new '_internal') (Join-Path $app '_internal') /MIR /IS /IT /R:5 /W:1 /NP /NJH /NJS /LOG+:$log | Out-Null
   $a = $LASTEXITCODE
-  robocopy $new $app /E /XD (Join-Path $new '_internal') /R:5 /W:1 /NP /NJH /NJS /LOG+:$log | Out-Null
+  robocopy $new $app /E /IS /IT /XD (Join-Path $new '_internal') /R:5 /W:1 /NP /NJH /NJS /LOG+:$log | Out-Null
   $ok = ($a -lt 8) -and ($LASTEXITCODE -lt 8)
 }}
 $flag = if ($ok) {{ {_ps(args[FLAGS[0]])} }} else {{ {_ps(args[FLAGS[1]])} }}
