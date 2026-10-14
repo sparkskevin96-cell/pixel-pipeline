@@ -329,6 +329,39 @@ wants terse answers and fixes over polish.
   geometry (`_fit_box`), averaged+renormalised, never palette-snapped; `<sheet>_n.png` packed
   like the sheet. Tests share ONE QApplication (`conftest.qt_app`): a second QApplication after
   the first died with a test crashed the Windows CI run at random.
+- **Lighting + glow (2026-10-13, Kevin's FX priority "torches, magic and sunsets that light up
+  sprites, bloom on bright pixels")**: `glow.py` auto_glow = emissive mask (bright saturated small
+  clusters + white cores; big bright patches = cloth, skipped; effect=True = all of it) ->
+  `<sheet>_glow.png` (white, alpha = strength; read as alpha x max(rgb), so effects.py's own maps
+  work too), written next to lit sheets (anim3d/turnaround/objects with normals), made on the fly
+  by add_unit / exports when missing. HD-2D board: sprite shader light() = per-light toon bands
+  (`bands`, ceil-rounded, B toggles), wrap, rim/backlight, `lift` (ambient on sprites), EMISSION from
+  the glow map; a SHADOWS_ONLY twin pushed back along the light's rays (no self-shadowing);
+  soft blob shadows. `hd2d.LIGHTING` dawn/noon/sunset/night -> res://lighting.json (L cycles,
+  `--light=` arg, make_hd2d(lighting=), Game tab Light, CLI --light). Glow: bloom 0, HDR threshold
+  1.05, screen blend, levels 2-5. Props torch/brazier/lantern/crystal (maplib.PROP_KINDS) =
+  light_flicker.gd OmniLight + pixel flame shader + CPU embers; spell_light() on hits (casters
+  purple/gold/green); add_effect + map.json "effects" = looping lit effects. Exports: godot-hd2d
+  adds <name>_glow.png + <name>_material.tres; unity _EmissionMap secondary texture. Verified
+  Godot 4.6.1 (tests/test_glow.py) + GPU shots `Pictures/PixelPipeline/hd2d_lighting_*.png`.
+- **Premium spell/hit FX (2026-10-13, Kevin: "big hand-crafted-looking fire, ice, lightning and
+  slash effects with many frames", rich palettes not limited)**: `spellfx.py` (14 kinds: fire_burst,
+  fireball fly-loop+impact, ice_shard, frost_nova, lightning_bolt, chain_lightning, sword_combo
+  hits=1-3, hit_spark angle=, holy_light (loop=True ok), poison_cloud, dark_magic, big_explosion,
+  buff_aura, level_up_burst) on `fxcore.py`: shapes as heat fields at 4x on 4 materials (back,
+  smoke, main, accent) -> topmost >=50% coverage, mean heat banded onto Lab-interpolated
+  hue-shifted ramps (THEME_KEYS, 13-29 colours/effect), no dither; finish drops dim specks, fills
+  pinholes, merges 1-step 1 px islands, outline none|dark|rim. Noise = baked fbm texture +
+  cv2.remap (was 80% of the time). Timelines of phases with ms per frame (multiples of 10),
+  physics on real time; fade by shrinking/eroding, not darkening (darkening went muddy brown).
+  effects.render_effect/make_effect dispatch SPELL_KINDS (EFFECT_KINDS = premium + CLASSIC_KINDS);
+  Effect has durations/glow/blend/tags. Files: sheet_glow.png (rgb x emission), json per-frame
+  durations + meta loops/blend, Godot per-frame durations (godot.write_sprite_frames
+  durations_ms), sheet_add.tres (blend_mode 1) + sheet_demo.tscn/.gd; exports read meta loops
+  (Source.is_loop). Optional `fxpaint.paint_effect` (SDXL img2img over a grid of all frames, one
+  call, snapped back to the effect's palette inside its own alpha; tested with the fake ComfyUI
+  only). Effects tab: size small/medium/large/huge, real timing, dark/light ground, bloom preview.
+  `tools/fx_preview.py` -> Pictures/PixelPipeline/fx_preview.png/.gif. Godot 4.6.1 loads it (test).
 - **Isometric tactics look** (`iso_scene.py`, CLI `iso-demo`), 2026-10-11, one of the three looks
   of the tactics demo over `diorama.py`: `write_iso_scene(d, project, {name: sheet.png})` writes
   `iso/` (+ map/map.json if absent, project.godot only if absent). One pre-rendered column per

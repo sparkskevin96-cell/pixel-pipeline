@@ -219,17 +219,31 @@ def project_style(project: "Project | None" = None) -> Style:
 # house-style words, animations, map tiles and exports. "custom" = the plain defaults.
 
 PEOPLE_CLIPS = ("idle", "walk", "run", "attack", "hurt", "death")
+# Kevin's look (2026-10-13): "a bit like SNES but as if 2D consoles never stopped" - SNES-crisp,
+# readable pixel shapes, but BIG rich palettes ("not limited palettes") and great effects.
+NEO16_PROMPT = ("modern 16-bit pixel art, SNES-era sprite craft evolved, rich wide colour palette, "
+                "vibrant hue-shifted shading, crisp clean pixels, readable silhouette")
+NEO16_NEGATIVE = ("blurry, noisy, jpeg artifacts, speckled pixels, dithering noise, muddy colours, "
+                  "washed out, photorealistic, 3d render")
+
+
+def neo16(words: str) -> str:
+    """The neo 16-bit look words plus a project type's own."""
+    return f"{NEO16_PROMPT}, {words}" if words else NEO16_PROMPT
+
+
 PROJECT_TYPES = {
     "hd2d": {
         "label": "HD-2D tactics / RPG",
         "about": "Pixel-art characters standing in a 3D world (Octopath Traveler, Triangle "
                  "Strategy). The camera looks down at 30°; characters face 16 ways.",
         "sizes": {"small": 48, "normal": 64, "large": 80},
-        "style": dict(elevation=30.0, directions=16, tile=32, ppu=42.0, icon=32, colours=24,
+        "style": dict(elevation=30.0, directions=16, tile=32, ppu=42.0, icon=32, colours=48,
                       outline="selout", shading="soft", light=0.35, camera="perspective",
                       tile_style="hd2d", export="godot-hd2d",
-                      style_prompt="HD-2D JRPG pixel art, detailed 16-bit sprites, "
-                                   "rich warm colours"),
+                      style_prompt=neo16("HD-2D JRPG, detailed sprites, glowing light and "
+                                         "magic effects"),
+                      style_negative=NEO16_NEGATIVE),
         "animations": PEOPLE_CLIPS + ("cast", "block", "victory"),
         "map": "harbour",
     },
@@ -238,10 +252,11 @@ PROJECT_TYPES = {
         "about": "Seen from above at a slant (Zelda, Pokémon, Stardew Valley). Small characters "
                  "that walk 4 ways over a tile map.",
         "sizes": {"small": 24, "normal": 32, "large": 48},
-        "style": dict(elevation=55.0, directions=4, tile=16, ppu=16.0, icon=16, colours=16,
+        "style": dict(elevation=55.0, directions=4, tile=16, ppu=16.0, icon=16, colours=32,
                       outline="solid", shading="cel", light=0.25, camera="ortho",
                       tile_style="topdown", export="godot-2d",
-                      style_prompt="16-bit SNES top-down RPG pixel art, clean readable sprites"),
+                      style_prompt=neo16("top-down RPG, clean readable sprites"),
+                      style_negative=NEO16_NEGATIVE),
         "animations": PEOPLE_CLIPS,
         "map": "village",
     },
@@ -250,11 +265,11 @@ PROJECT_TYPES = {
         "about": "Seen straight from the side (Mega Man, Celeste, Hollow Knight). Characters "
                  "face left and right, and jump, fall, climb and crouch.",
         "sizes": {"small": 32, "normal": 48, "large": 64},
-        "style": dict(elevation=0.0, directions=2, tile=16, ppu=16.0, icon=16, colours=16,
+        "style": dict(elevation=0.0, directions=2, tile=16, ppu=16.0, icon=16, colours=32,
                       outline="solid", shading="cel", light=0.25, camera="ortho",
                       tile_style="side", export="godot-2d",
-                      style_prompt="16-bit platformer pixel art, side view, crisp readable "
-                                   "sprites"),
+                      style_prompt=neo16("platformer, side view, crisp readable sprites"),
+                      style_negative=NEO16_NEGATIVE),
         "animations": PEOPLE_CLIPS + ("jump", "fall", "land", "climb", "crouch"),
         "map": "flat",
     },
@@ -263,10 +278,11 @@ PROJECT_TYPES = {
         "about": "Diamond tiles seen from a corner (Final Fantasy Tactics, Disgaea). Characters "
                  "face 8 ways; a flat (orthographic) camera.",
         "sizes": {"small": 32, "normal": 48, "large": 64},
-        "style": dict(elevation=30.0, directions=8, tile=32, ppu=32.0, icon=24, colours=20,
+        "style": dict(elevation=30.0, directions=8, tile=32, ppu=32.0, icon=24, colours=40,
                       outline="selout", shading="soft", light=0.35, camera="ortho",
                       tile_style="iso", export="godot-2d",
-                      style_prompt="isometric tactics RPG pixel art, 16-bit, clean shapes"),
+                      style_prompt=neo16("isometric tactics RPG, clean shapes"),
+                      style_negative=NEO16_NEGATIVE),
         "animations": PEOPLE_CLIPS + ("cast", "block", "victory"),
         "map": "castle",
     },
@@ -275,11 +291,12 @@ PROJECT_TYPES = {
         "about": "Cards, icons, portraits and menus (Slay the Spire, Balatro). Big icons and bold "
                  "outlines; characters are mostly art, not walking sprites.",
         "sizes": {"small": 48, "normal": 64, "large": 96},
-        "style": dict(elevation=30.0, directions=4, tile=32, ppu=42.0, icon=64, colours=24,
+        "style": dict(elevation=30.0, directions=4, tile=32, ppu=42.0, icon=64, colours=48,
                       outline="solid", shading="cel", light=0.25, camera="ortho",
                       tile_style="none", export="godot-2d",
-                      style_prompt="pixel art card game illustration, bold readable shapes, "
-                                   "strong silhouettes"),
+                      style_prompt=neo16("card game illustration, bold readable shapes, "
+                                         "strong silhouettes"),
+                      style_negative=NEO16_NEGATIVE),
         "animations": ("idle", "attack", "hurt"),
         "map": "flat",
     },

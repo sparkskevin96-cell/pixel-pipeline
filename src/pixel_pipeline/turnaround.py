@@ -425,6 +425,10 @@ def write_turnaround(sprites: list[Sprite], out_png, aseprite: bool = False, god
     if normals:
         from .normals import write_normal_sheet
         written.append(write_normal_sheet(sprites, out, columns))
+        from .glow import write_glow_sheet                # lit sheets: emissive pixels too
+        g = write_glow_sheet(out, force=True)
+        if g is not None:
+            written.append(g)
     if aseprite:
         ase = out.with_suffix(".aseprite")
         write_aseprite(ase, frames, sprites[0].palette, durations=100,

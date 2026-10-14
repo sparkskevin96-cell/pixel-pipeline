@@ -562,6 +562,10 @@ def _add_hd2d(sub):
     p.add_argument("--ppu", type=float, default=42.0,
                    help="sprite pixels per tile in 3D (smaller = bigger units, default 42)")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--light", choices=("dawn", "noon", "sunset", "night"), default="sunset",
+                   help="time of day it starts at (L cycles them in the game; default sunset)")
+    p.add_argument("--smooth-light", action="store_true",
+                   help="smooth sprite lighting instead of pixel bands (B toggles in the game)")
     p.set_defaults(func=_cmd_hd2d)
 
 
@@ -574,7 +578,8 @@ def _cmd_hd2d(a) -> int:
         if not sep or not name or not Path(path).exists():
             raise SystemExit(f"error: --unit wants NAME=existing_sheet.png, got {spec!r}")
         units[name.strip()] = Path(path)
-    written = make_hd2d(a.out, units, harbour(seed=a.seed), iso=a.iso, ppu=a.ppu)
+    written = make_hd2d(a.out, units, harbour(seed=a.seed), iso=a.iso, ppu=a.ppu, lighting=a.light,
+                        bands=0.0 if a.smooth_light else 4.0)
     print(f"HD-2D project -> {a.out} ({len(written)} files). Open {a.out / 'project.godot'} in "
           "Godot 4.6 and press F5.")
     return 0

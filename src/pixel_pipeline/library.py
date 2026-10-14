@@ -36,7 +36,7 @@ SIZES = {
 }
 DEFAULT_SIZE = {"person": "normal", "animal": "medium"}
 COLOURS = {"person": 24, "animal": 16}
-SHEET_FILES = (".png", ".json", "_n.png", ".aseprite", ".tres", "_facing.gd")
+SHEET_FILES = (".png", ".json", "_n.png", "_glow.png", ".aseprite", ".tres", "_facing.gd")
 
 
 def root() -> Path:

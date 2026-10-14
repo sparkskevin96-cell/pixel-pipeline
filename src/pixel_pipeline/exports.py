@@ -5,7 +5,8 @@
 
 An asset is a library Character, an assets.Asset or just its folder. Sprite-sheet assets
 (characters, and items/props made with a sheet) have sheet.png + sheet.json (a row per
-action_direction, frames named "{action}_{dir} {i}"), maybe sheet_n.png (normal map),
+action_direction, frames named "{action}_{dir} {i}"), maybe sheet_n.png (normal map) and
+sheet_glow.png (emissive mask, glow.py; made on the fly for the export when missing),
 sheet.aseprite, sheet.tres + sheet_facing.gd. Items may have only icon.png; that is exported
 as a one-frame sprite.
 
@@ -57,6 +58,14 @@ class Source:
     normals: Path | None
     icon: Path | None
     image: Path | None     # the main picture: sheet, else icon, else any png
+    glow: Path | None = None   # <sheet>_glow.png (emissive mask), if the asset has one
+    loops: dict | None = None  # {animation: loops?} from sheet.json meta "loops" (effects)
+
+    def is_loop(self, key: str) -> bool:
+        """Does animation `key` loop: the sheet's own flag, else by action name."""
+        if self.loops and key in self.loops:
+            return bool(self.loops[key])
+        return key.rsplit("_", 1)[0] not in ONCE
 
     @property
     def file_name(self) -> str:
@@ -135,9 +144,10 @@ def source(asset) -> Source:
             kind = "character"
         sheet = folder / "sheet.png"
     icon = folder / "icon.png" if (folder / "icon.png").exists() else None
-    frames, tags, normals = [], [], None
+    frames, tags, normals, loops = [], [], None, None
     if sheet.exists() and sheet.with_suffix(".json").exists():
         meta = json.loads(sheet.with_suffix(".json").read_text(encoding="utf-8"))
+        loops = meta.get("meta", {}).get("loops")
         frames = _frames(meta)
         tags = _tags(meta, frames)
         n = sheet.with_name(sheet.stem + "_n.png")
@@ -153,7 +163,31 @@ def source(asset) -> Source:
     if not frames:
         w, h = Image.open(image).size
         frames = [Frame(file_name(name), 0, 0, w, h)]
-    return Source(name, kind, folder, sheet, frames, tags, normals, icon, image)
+    glow = sheet.with_name(sheet.stem + "_glow.png") if sheet is not None else None
+    return Source(name, kind, folder, sheet, frames, tags, normals, icon, image,
+                  glow if glow is not None and glow.exists() else None, loops)
+
+
+def _glow_into(src: Source, dst: Path, written: list) -> Path | None:
+    """The asset's glow map at dst: copied, or made by glow.auto_glow from the sheet (effects:
+    all of it glows) when it has none. None when nothing glows."""
+    if src.glow is not None:
+        return _copy(src.glow, dst, written)
+    if src.sheet is None:
+        return None
+    from .glow import write_glow_sheet
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.stem + "_src.png")          # frames from the sheet's own .json
+    shutil.copyfile(src.sheet, tmp)
+    shutil.copyfile(src.sheet.with_suffix(".json"), tmp.with_suffix(".json"))
+    try:
+        out = write_glow_sheet(tmp, out=dst, force=True, effect=src.kind == "effect")
+    finally:
+        tmp.unlink(missing_ok=True)
+        tmp.with_suffix(".json").unlink(missing_ok=True)
+    if out is not None:
+        written.append(out)
+    return out
 
 
 def _rgba(path: Path) -> np.ndarray:
@@ -209,7 +243,7 @@ def _godot_2d(src: Source, out: Path, res_path: str | None = None, **_) -> list[
         for key, fs in src.groups():
             idx = [src.frames.index(f) for f in fs]
             anims[key] = {"frames": idx, "duration_ms": fs[0].duration,
-                          "loop": key.rsplit("_", 1)[0] not in ONCE}
+                          "loop": src.is_loop(key)}
         write_sprite_frames(tres, png.name, rects, animations=anims)
         if res_path:
             text = tres.read_text(encoding="utf-8").replace(f'path="{png.name}"', f'path="{tex}"')
@@ -230,6 +264,7 @@ def _godot_2d(src: Source, out: Path, res_path: str | None = None, **_) -> list[
             written.append(gd)
     if src.normals:
         _copy(src.normals, out / f"{n}_n.png", written)
+    _glow_into(src, out / f"{n}_glow.png", written)
     if src.icon and src.icon != src.image:
         _copy(src.icon, out / f"{n}_icon.png", written)
     return written
@@ -255,14 +290,45 @@ def _directions_actions(src: Source) -> tuple[list[str], list[str]]:
 
 
 def _godot_hd2d(src: Source, out: Path, ppu: float | None = None, **_) -> list[Path]:
-    """out = the Godot project folder: writes res://units/<name>/ like hd2d.add_unit."""
-    from .hd2d import add_unit
+    """out = the Godot project folder: writes res://units/<name>/ like hd2d.add_unit (sheet,
+    normal map, glow map) + <name>_material.tres (the HD-2D sprite ShaderMaterial with the
+    three textures; the shader goes to res://shaders/sprite.gdshader if the project has none)."""
+    from .hd2d import SPRITE_SHADER, add_unit
     if src.sheet is None:
         raise ValueError(f"'{src.name}' has no sprite sheet; HD-2D units need one.")
     if ppu is None:
         ppu = _project_style_value("ppu", 42.0)
-    folder = add_unit(out, src.file_name, src.sheet, ppu)
+    n = src.file_name
+    folder = add_unit(out, n, src.sheet, ppu, glow=src.kind != "effect")
+    if src.kind == "effect" and not (folder / f"{n}_glow.png").exists():
+        _glow_into(src, folder / f"{n}_glow.png", [])
+    shader = out / "shaders" / "sprite.gdshader"
+    if not shader.exists():
+        shader.parent.mkdir(parents=True, exist_ok=True)
+        shader.write_text(SPRITE_SHADER, encoding="utf-8")
+    (folder / f"{n}_material.tres").write_text(hd2d_material(n, (folder / f"{n}_n.png").exists(),
+                                                             (folder / f"{n}_glow.png").exists()),
+                                               encoding="utf-8")
     return sorted(p for p in folder.iterdir() if p.is_file())
+
+
+def hd2d_material(name: str, normals: bool, glow: bool) -> str:
+    """A ShaderMaterial .tres for res://units/<name>/: the sheet, its normal map and glow map
+    (EMISSION: only those pixels bloom with WorldEnvironment glow). Set `frame` per frame."""
+    base = f"res://units/{name}/{name}"
+    ext = [("sh", "Shader", "res://shaders/sprite.gdshader"), ("sheet", "Texture2D", f"{base}.png")]
+    if normals:
+        ext.append(("nrm", "Texture2D", f"{base}_n.png"))
+    if glow:
+        ext.append(("glw", "Texture2D", f"{base}_glow.png"))
+    lines = [f'[gd_resource type="ShaderMaterial" load_steps={len(ext) + 1} format=3]', ""]
+    lines += [f'[ext_resource type="{t}" path="{p}" id="{i}"]' for i, t, p in ext]
+    lines += ["", "[resource]", 'shader = ExtResource("sh")', 'shader_parameter/sheet = ExtResource("sheet")']
+    if normals:
+        lines += ['shader_parameter/normals = ExtResource("nrm")', "shader_parameter/has_normals = true"]
+    if glow:
+        lines += ['shader_parameter/glow = ExtResource("glw")', "shader_parameter/has_glow = true"]
+    return "\n".join(lines) + "\n"
 
 
 def _project_style_value(field_name: str, default):
@@ -370,11 +436,12 @@ def _unity_max_size(size: tuple[int, int]) -> int:
 
 def unity_meta(guid: str, size: tuple[int, int], frames: list[Frame] | None, *, ppu: float = 32,
                normal_map: bool = False, pivot: tuple[float, float] = (0.5, 0.0),
-               normal_guid: str | None = None) -> str:
+               normal_guid: str | None = None, emission_guid: str | None = None) -> str:
     """Unity TextureImporter .meta: point filter, no compression, no mipmaps. frames given ->
     Sprite (Multiple) with one sprite per frame (Unity rects start bottom-left, so y is
     flipped); None -> a single sprite; normal_map -> texture type Normal map (linear);
-    normal_guid -> that texture is the sprites' _NormalMap secondary texture (URP 2D lights)."""
+    normal_guid -> that texture is the sprites' _NormalMap secondary texture (URP 2D lights);
+    emission_guid -> the glow map as their _EmissionMap secondary texture."""
     w, h = size
     max_size = _unity_max_size(size)
     sprites = ""
@@ -410,10 +477,10 @@ def unity_meta(guid: str, size: tuple[int, int], frames: list[Frame] | None, *, 
     # Unity writes the name table sorted by name (ordinal)
     names = "".join(f"      {nm}: {i}\n" for nm, i in sorted(table))
     secondary = "    secondaryTextures: []\n"
-    if normal_guid and not normal_map:
-        secondary = ("    secondaryTextures:\n"
-                     f"    - texture: {{fileID: 2800000, guid: {normal_guid}, type: 3}}\n"
-                     "      name: _NormalMap\n")
+    extra = [(g, nm) for g, nm in ((normal_guid, "_NormalMap"), (emission_guid, "_EmissionMap")) if g]
+    if extra and not normal_map:
+        secondary = "    secondaryTextures:\n" + "".join(
+            f"    - texture: {{fileID: 2800000, guid: {g}, type: 3}}\n      name: {nm}\n" for g, nm in extra)
     sprite_mode = 0 if normal_map else (2 if frames else 1)
     texture_type = 1 if normal_map else 8
     return f"""fileFormatVersion: 2
@@ -528,7 +595,7 @@ How to use
      SpriteRenderer; Unity adds an Animator). Frame times (ms) are in {name}_frames.json.
   3. Pixel-perfect: add a Pixel Perfect Camera (URP 2D) with Assets Pixels Per Unit = {ppu:g}.
   4. Normal map: the sheet's sprites already carry {npng} as their _NormalMap secondary
-     texture, so a Sprite-Lit material (URP 2D) lights them with it.
+     texture, so a Sprite-Lit material (URP 2D) lights them with it.{glow_line}
 """
 
 
@@ -560,7 +627,7 @@ def unity_clip_plan(src: Source) -> list[dict]:
         plans.append({"name": _yaml_name(key), "sprites": [names[i] for i in idx],
                       "ids": [unity_sprite_file_id(i) for i in idx], "times": times,
                       "length": round(t / 1000, 6), "fps": round(1000 / _gcd_ms(fs), 6),
-                      "loop": key.rsplit("_", 1)[0] not in ONCE})
+                      "loop": src.is_loop(key)})
     return plans
 
 
@@ -661,21 +728,39 @@ def _unity(src: Source, out: Path, ppu: float | None = None, clips: bool = True,
     size = Image.open(src.image).size
     layout = unity_layout(sheet_frames, size) if sheet_frames else None
     npng = f"{n}_n.png"
+    gpng = f"{n}_glow.png"
+    glow = _glow_into(src, out / gpng, []) if src.sheet is not None else None
     if layout:                                   # too tall for Unity: rows into columns
         sheet_frames, size = layout
         png = _repack(src.image, src.frames, sheet_frames, size, out / f"{n}.png")
         written.append(png)
         if src.normals:
             written.append(_repack(src.normals, src.frames, sheet_frames, size, out / npng))
+        if glow is not None:
+            written.append(_repack(glow, src.frames, sheet_frames, size, out / gpng))
     else:
         png = _copy(src.image, out / f"{n}.png", written)
         if src.normals:
             _copy(src.normals, out / npng, written)
+        if glow is not None:
+            written.append(glow)
     guid = unity_guid(f"{src.kind}/{src.name}")
     normal_guid = unity_guid(f"{src.kind}/{src.name}/normals") if src.normals else None
+    emission_guid = unity_guid(f"{src.kind}/{src.name}/emission") if glow is not None else None
     meta = out / f"{n}.png.meta"
-    _unity_write(meta, unity_meta(guid, size, sheet_frames, ppu=ppu, normal_guid=normal_guid))
+    _unity_write(meta, unity_meta(guid, size, sheet_frames, ppu=ppu, normal_guid=normal_guid,
+                                  emission_guid=emission_guid))
     written.append(meta)
+    glow_line = ""
+    if glow is not None:
+        gmeta = out / f"{gpng}.meta"
+        _unity_write(gmeta, unity_meta(emission_guid, Image.open(out / gpng).size, None, ppu=ppu))
+        written.append(gmeta)
+        glow_line = (f"\n  5. Glow: {gpng} (white where the sprite gives off light, alpha = how much) is the\n"
+                     "     sprites' _EmissionMap secondary texture: in a Shader Graph sprite shader add a\n"
+                     "     Texture2D property named _EmissionMap, multiply the sprite colour by its alpha and\n"
+                     "     feed that (x an intensity) to Emission, then Bloom in a URP Volume blooms only those\n"
+                     "     pixels (fire, crystals, lanterns, eyes).")
     normal_line = ""
     if src.normals:
         nmeta = out / f"{npng}.meta"
@@ -717,7 +802,8 @@ def _unity(src: Source, out: Path, ppu: float | None = None, clips: bool = True,
     written.append(frames_json)
     readme = out / f"{n}_README.txt"
     readme.write_text(UNITY_README.format(name=n, png=png.name, count=len(src.frames), ppu=ppu,
-                                          normal_line=normal_line + clip_line, npng=npng),
+                                          normal_line=normal_line + clip_line, npng=npng,
+                                          glow_line=glow_line),
                       encoding="utf-8")
     written.append(readme)
     return written
@@ -881,6 +967,7 @@ def _generic(src: Source, out: Path, single_frames: bool = True, **_) -> list[Pa
     written.append(js)
     if src.normals:
         _copy(src.normals, out / f"{n}_n.png", written)
+    _glow_into(src, out / f"{n}_glow.png", written)
     if src.icon and src.icon != src.image:
         _copy(src.icon, out / f"{n}_icon.png", written)
     if single_frames and src.sheet is not None:

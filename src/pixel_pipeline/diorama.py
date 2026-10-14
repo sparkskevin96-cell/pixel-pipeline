@@ -108,7 +108,7 @@ class Diorama:
                    d.get("name", "map"), bool(d.get("sea", True)))
 
 
-BLOCKING_PROPS = {"crate", "barrel", "post", "tree", "rock", "house", "wall", "well", "fence"}
+BLOCKING_PROPS = {"crate", "barrel", "post", "tree", "rock", "house", "wall", "well", "fence", "brazier", "crystal"}
 
 
 def place_units(d: Diorama, blue: list[str], red: list[str]) -> Diorama:

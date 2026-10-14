@@ -48,7 +48,13 @@ SPECS = {
     "splash":       ((32, 32), 8, 70, False, "water", "Splash (water)"),
     "level_up":     ((48, 64), 10, 80, False, "holy", "Level-up glow"),
 }
-EFFECT_KINDS = tuple(SPECS)
+CLASSIC_KINDS = tuple(SPECS)
+from .spellfx import SPELL_KINDS, SPELL_THEMES, SPELLS  # noqa: E402  (premium many-frame FX)
+EFFECT_KINDS = SPELL_KINDS + CLASSIC_KINDS
+
+
+def effect_label(kind: str) -> str:
+    return SPELLS[kind][0] if kind in SPELLS else SPECS[kind][5]
 
 # dark -> bright
 THEMES = {
@@ -846,6 +852,16 @@ class Effect:
     theme: str | None
     ramp: np.ndarray = field(repr=False, default=None)
     rim: np.ndarray | None = field(repr=False, default=None)   # the rim colour, if one was used
+    durations: list | None = None    # ms per frame (None = frame_ms each)
+    glow: list | None = field(repr=False, default=None)        # emissive RGBA per frame
+    blend: str = "mix"               # "add" = draw additively in the engine
+    tags: list | None = None         # [(name, first, last, loop)]; None = one tag, the kind
+
+    def frame_durations(self) -> list:
+        return list(self.durations) if self.durations else [self.frame_ms] * len(self.frames)
+
+    def tag_list(self) -> list:
+        return list(self.tags) if self.tags else [(self.kind, 0, len(self.frames) - 1, self.loop)]
 
     @property
     def size(self) -> tuple[int, int]:
@@ -869,12 +885,17 @@ def effect_size(kind: str, size=None, style=None) -> tuple[int, int]:
 def render_effect(kind: str, *, theme: str | None = None, colours=None, size=None,
                   frames: int | None = None, loop: bool | None = None, seed: int = 0,
                   dither: float = 0.5, style=None, palette: np.ndarray | None = None,
-                  wind: float = 0.0, rim=None) -> Effect:
+                  wind: float = 0.0, rim=None, **opts) -> Effect:
     """Draw an effect in memory. palette: snap colours to it (default: the style's fixed
     palette, if it has one). dither: 0 = flat bands, 0.5 = a little Bayer at band edges.
     wind: -1 (blowing left) .. 1 (right), for smoke and dust. rim: a light colour for the dark
     outer pixels so a dark effect reads on dark ground (None = the theme's, e.g. dark's light
-    purple; False = none)."""
+    purple; False = none). Premium kinds (SPELL_KINDS) go to spellfx.render_spell (opts:
+    hits, angle, outline; size may be small/medium/large/huge)."""
+    if kind in SPELLS:
+        from .spellfx import render_spell
+        return render_spell(kind, theme=theme, colours=colours, size=size, frames=frames, loop=loop,
+                            seed=seed, style=style, palette=palette, **opts)
     if kind not in SPECS:
         raise ValueError(f"Unknown effect '{kind}' (use {', '.join(EFFECT_KINDS)})")
     _, n0, ms, loop0, theme0, _ = SPECS[kind]
@@ -925,31 +946,87 @@ def render_effect(kind: str, *, theme: str | None = None, colours=None, size=Non
 # --------------------------------------------------------------------------- files
 
 def write_effect(effect: Effect, folder, name: str = "sheet", gif_scale: int | None = None) -> list[Path]:
-    """sheet.png + .json (Aseprite json-array with one tag) + .aseprite + .tres + preview.gif
-    + thumb.png in folder."""
+    """sheet.png + .json (Aseprite json-array: per-frame durations, a tag per animation,
+    meta loop/loops/blend) + .aseprite + .tres (Godot SpriteFrames) + preview.gif + thumb.png in
+    folder; premium effects also sheet_glow.png (emissive map, same layout) + sheet_glow.tres,
+    sheet_add.tres (CanvasItemMaterial, additive) and sheet_demo.tscn/.gd (plays it)."""
     from .aseprite import write_aseprite
-    from .export import pack_sheet, write_sheet
+    from .export import pack_sheet, sheet_json
     from .godot import write_sprite_frames
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     png = folder / f"{name}.png"
     n = len(effect.frames)
-    js = write_sheet(effect.frames, png, n, effect.frame_ms, effect.kind,
-                     [f"{effect.kind} {i}" for i in range(n)])
-    meta = json.loads(js.read_text(encoding="utf-8"))
+    durs = effect.frame_durations()
+    tags = effect.tag_list()
+    names = []
+    for tname, a, b, _ in tags:
+        names += [f"{tname} {i}" for i in range(b - a + 1)]
+    sheet, rects = pack_sheet(effect.frames, n)
+    Image.fromarray(sheet, "RGBA").save(png)
+    meta = sheet_json(rects, png.name, durs, None, names)
+    meta["meta"]["frameTags"] = [{"name": t, "from": a, "to": b, "direction": "forward"}
+                                 for t, a, b, _ in tags]
     meta["meta"]["loop"] = effect.loop
+    meta["meta"]["loops"] = {t: bool(lp) for t, _, _, lp in tags}
+    meta["meta"]["blend"] = effect.blend
+    written = [png]
+    if effect.glow is not None:
+        gpng = folder / f"{name}_glow.png"
+        Image.fromarray(pack_sheet(effect.glow, n)[0], "RGBA").save(gpng)
+        meta["meta"]["glow"] = gpng.name
+        written.append(gpng)
+    js = png.with_suffix(".json")
     js.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     ase = folder / f"{name}.aseprite"
-    write_aseprite(ase, effect.frames, effect.palette, durations=effect.frame_ms,
-                   tags=[(effect.kind, 0, n - 1)], layer_name=effect.kind)
-    _, rects = pack_sheet(effect.frames, n)
-    tres = write_sprite_frames(folder / f"{name}.tres", png.name, rects,
-                               animations={effect.kind: {"frames": list(range(n)),
-                                                         "duration_ms": effect.frame_ms,
-                                                         "loop": effect.loop}})
+    write_aseprite(ase, effect.frames, effect.palette, durations=durs,
+                   tags=[(t, a, b) for t, a, b, _ in tags], layer_name=effect.kind)
+    anims = {t: {"frames": list(range(a, b + 1)), "duration_ms": durs[a], "loop": bool(lp),
+                 "durations_ms": durs[a:b + 1]} for t, a, b, lp in tags}
+    tres = write_sprite_frames(folder / f"{name}.tres", png.name, rects, animations=anims)
+    written += [js, ase, tres]
+    if effect.glow is not None:
+        written.append(write_sprite_frames(folder / f"{name}_glow.tres", f"{name}_glow.png", rects,
+                                           animations=anims))
+        written += write_godot_fx_extras(effect, folder, name)
     gif = write_preview_gif(effect, folder / "preview.gif", gif_scale)
     thumb = write_thumb(effect, folder / "thumb.png")
-    return [png, js, ase, tres, gif, thumb]
+    return written + [gif, thumb]
+
+
+DEMO_GD = 'extends Node2D\n## Plays every animation of the effect in turn (one-shots restart after a short pause).\n\n@onready var fx: AnimatedSprite2D = $Fx\n@onready var glow: AnimatedSprite2D = $Glow\nvar names: PackedStringArray\nvar i := 0\n\nfunc _ready() -> void:\n\tnames = fx.sprite_frames.get_animation_names()\n\tfx.animation_finished.connect(_next)\n\t_play()\n\nfunc _play() -> void:\n\tvar n := names[i % names.size()]\n\tfx.play(n)\n\tglow.play(n)\n\nfunc _next() -> void:\n\tawait get_tree().create_timer(0.4).timeout\n\ti += 1\n\t_play()\n'
+
+
+def write_godot_fx_extras(effect: Effect, folder, name: str = "sheet") -> list[Path]:
+    """<name>_add.tres (CanvasItemMaterial, blend_mode Add) + <name>_demo.tscn/.gd: the effect
+    (additive when effect.blend is "add") with its glow sheet on top, additive, playing every
+    animation in turn."""
+    folder = Path(folder)
+    mat = folder / f"{name}_add.tres"
+    mat.write_text('[gd_resource type="CanvasItemMaterial" format=3]\n\n[resource]\nblend_mode = 1\n',
+                   encoding="utf-8")
+    first = effect.tag_list()[0][0]
+    w, h = effect.size
+    gd = folder / f"{name}_demo.gd"
+    gd.write_text(DEMO_GD, encoding="utf-8")
+    fx_mat = 'material = ExtResource("3_add")\n' if effect.blend == "add" else ""
+    scene = folder / f"{name}_demo.tscn"
+    scene.write_text(
+        '[gd_scene load_steps=5 format=3]\n\n'
+        f'[ext_resource type="SpriteFrames" path="{name}.tres" id="1_fx"]\n'
+        f'[ext_resource type="SpriteFrames" path="{name}_glow.tres" id="2_glow"]\n'
+        f'[ext_resource type="Material" path="{name}_add.tres" id="3_add"]\n'
+        f'[ext_resource type="Script" path="{gd.name}" id="4_gd"]\n\n'
+        '[node name="FxDemo" type="Node2D"]\ntexture_filter = 1\nscript = ExtResource("4_gd")\n\n'
+        '[node name="Background" type="ColorRect" parent="."]\n'
+        f'offset_left = {-w * 2}\noffset_top = {-h * 2}\noffset_right = {w * 2}\noffset_bottom = {h * 2}\n'
+        'color = Color(0.09, 0.086, 0.14, 1)\n\n'
+        '[node name="Fx" type="AnimatedSprite2D" parent="."]\n' + fx_mat +
+        f'scale = Vector2(3, 3)\nsprite_frames = ExtResource("1_fx")\nanimation = &"{first}"\n\n'
+        '[node name="Glow" type="AnimatedSprite2D" parent="."]\nmaterial = ExtResource("3_add")\n'
+        'modulate = Color(1, 1, 1, 0.6)\nscale = Vector2(3, 3)\n'
+        f'sprite_frames = ExtResource("2_glow")\nanimation = &"{first}"\n', encoding="utf-8")
+    return [mat, gd, scene]
 
 
 def write_preview_gif(effect: Effect, out, scale: int | None = None,
@@ -957,11 +1034,11 @@ def write_preview_gif(effect: Effect, out, scale: int | None = None,
     w, h = effect.size
     k = scale or max(1, min(8, 192 // max(w, h)))
     images, durations = [], []
-    for f in effect.frames:
+    for f, ms in zip(effect.frames, effect.frame_durations()):
         im = Image.new("RGBA", (w, h), background + (255,))
         im.alpha_composite(Image.fromarray(f, "RGBA"))
         images.append(im.convert("RGB").resize((w * k, h * k), Image.NEAREST))
-        durations.append(effect.frame_ms)
+        durations.append(ms)
     if not effect.loop:                          # a beat of nothing so one-shots read as one-shots
         images.append(Image.new("RGB", (w * k, h * k), background))
         durations.append(400)
@@ -993,24 +1070,33 @@ def write_thumb(effect: Effect, out, px: int = 96) -> Path:
 
 def make_effect(kind: str, name: str | None = None, *, theme: str | None = None, colours=None,
                 size=None, frames: int | None = None, project=None, loop: bool | None = None,
-                seed: int = 0, dither: float = 0.5, tags=None, wind: float = 0.0, rim=None):
+                seed: int = 0, dither: float = 0.5, tags=None, wind: float = 0.0, rim=None,
+                paint: bool = False, paint_options: dict | None = None, **opts):
     """Make an effect and save it as an asset (kind "effect") in the project (default: the
-    current one) at its scale and palette. Returns the Asset."""
+    current one) at its scale and palette. opts go to premium kinds (hits, angle, outline).
+    paint=True: hand-painted pass over it by SDXL img2img (fxpaint.paint_effect, needs
+    ComfyUI; paint_options go there). Returns the Asset."""
     from .assets import current_project, new_asset, set_tags
     proj = project or current_project()
     style = proj.style
     fx = render_effect(kind, theme=theme, colours=colours, size=size, frames=frames, loop=loop,
-                       seed=seed, dither=dither, style=style, wind=wind, rim=rim)
-    label = name or (SPECS[kind][5].split(" (")[0] + (f" ({fx.theme})" if fx.theme and
-                                                     fx.theme != SPECS[kind][4] else ""))
+                       seed=seed, dither=dither, style=style, wind=wind, rim=rim, **opts)
+    if paint:
+        from .fxpaint import paint_effect
+        fx = paint_effect(fx, style=style, seed=seed, **(paint_options or {}))
+    own = SPELLS[kind][3] if kind in SPELLS else SPECS[kind][4]
+    label = name or (effect_label(kind).split(" (")[0] + (f" ({fx.theme})" if fx.theme and
+                                                         fx.theme != own else ""))
     w, h = fx.size
     asset = new_asset("effect", label, proj, effect=kind, theme=fx.theme,
                       colours=[rgb_to_hex(c) for c in fx.ramp], size=[w, h],
                       frames=len(fx.frames), frame_ms=fx.frame_ms, loop=fx.loop, seed=seed,
                       dither=dither, wind=float(wind) if kind in WINDY else 0.0,
                       rim=rgb_to_hex(fx.rim) if fx.rim is not None else None,
-                      files=["sheet.png", "sheet.json", "sheet.aseprite", "sheet.tres",
-                             "preview.gif", "thumb.png"])
-    write_effect(fx, asset.folder)
+                      durations=fx.frame_durations(), blend=fx.blend, painted=bool(paint),
+                      animations=[{"name": t, "from": a, "to": b, "loop": bool(lp)} for t, a, b, lp in fx.tag_list()],
+                      options={k: v for k, v in opts.items() if not k.startswith("_")})
+    files = write_effect(fx, asset.folder)
+    asset.extra["files"] = [p.name for p in files]
     set_tags(asset, sorted({"effect", kind, *([fx.theme] if fx.theme else []), *(tags or [])}))
     return asset

@@ -63,6 +63,10 @@ class GameTab(ToolTab):
         self.name = QLineEdit("Harbour Skirmish")
         self.map_pick = QComboBox()
         self.map_pick.setToolTip("Any map from your Map Library (2 World), or the built-in harbour")
+        self.light = QComboBox()
+        self.light.addItems(["Sunset", "Night", "Dawn", "Noon"])
+        self.light.setToolTip("Time of day the game starts at: sun or moon, torches, glow "
+                              "(press L in the game to change it)")
         self.iso = QCheckBox("Also the isometric 2D look")
         self.iso.setChecked(True)
         self.make_btn = QPushButton("Make game")
@@ -83,7 +87,8 @@ class GameTab(ToolTab):
         self.godot_label = QLabel()
         self.godot_label.setWordWrap(True)
         row = QHBoxLayout()
-        for w in (QLabel("Map"), self.map_pick, QLabel("Game name"), self.name, self.iso, self.make_btn,
+        for w in (QLabel("Map"), self.map_pick, QLabel("Light"), self.light, QLabel("Game name"), self.name,
+                  self.iso, self.make_btn,
                   self.play_btn, self.folder_btn):
             row.addWidget(w, 1 if w is self.name else 0)
         lay = QVBoxLayout(self)
@@ -163,6 +168,7 @@ class GameTab(ToolTab):
         out = games_root() / slug(self.name.text() or "game")
         iso = self.iso.isChecked()
         map_asset = self.map_pick.currentData()
+        light = self.light.currentText().lower()
 
         def job(say):
             say("Writing the game…")
@@ -178,7 +184,7 @@ class GameTab(ToolTab):
                 d = place_units(harbour(), blue_names, red_names)
             for u in d.units:
                 u.hp, u.attack, u.defence, u.move, u.jump, u.reach = stats[u.name]
-            make_hd2d(out, sheets, d, name=self.name.text() or "Tactics", iso=iso)
+            make_hd2d(out, sheets, d, name=self.name.text() or "Tactics", iso=iso, lighting=light)
             from ..assets import current_project
             from ..maplib import install_board_extras
             install_board_extras(out, current_project().style.tile)   # trees, houses, walls in 3D

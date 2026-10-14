@@ -15,12 +15,18 @@ def _write(path, text: str) -> Path:
     return path
 
 
+def _num(v: float) -> str:
+    t = f"{v:.6g}"
+    return t if "." in t or "e" in t else t + ".0"
+
+
 def write_sprite_frames(out_tres, sheet_png, rects: list[tuple[int, int, int, int]],
                         animations: dict[str, dict] | None = None, name: str = "default",
                         duration_ms: int = 100, loop: bool = True) -> Path:
     """rects: (x, y, w, h) of every frame in the sheet.
-    animations: {name: {"frames": [frame indices], "duration_ms": int, "loop": bool}};
-    default is one animation `name` using every frame."""
+    animations: {name: {"frames": [frame indices], "duration_ms": int, "loop": bool,
+    "durations_ms": [ms per frame] (optional: non-uniform timing as Godot's relative frame
+    durations)}}; default is one animation `name` using every frame."""
     if animations is None:
         animations = {name: {"frames": list(range(len(rects))), "duration_ms": duration_ms,
                              "loop": loop}}
@@ -32,10 +38,12 @@ def write_sprite_frames(out_tres, sheet_png, rects: list[tuple[int, int, int, in
                   f"region = Rect2({x}, {y}, {w}, {h})", ""]
     anims = []
     for anim_name, a in animations.items():
+        base = max(1, a.get("duration_ms", duration_ms))
+        rel = [ms / base for ms in a.get("durations_ms") or [base] * len(a["frames"])]
         frames = ",\n".join(
-            '{\n"duration": 1.0,\n' f'"texture": SubResource("AtlasTexture_{i}")\n' "}"
-            for i in a["frames"])
-        speed = 1000.0 / max(1, a.get("duration_ms", duration_ms))
+            '{\n' f'"duration": {_num(r)},\n' f'"texture": SubResource("AtlasTexture_{i}")\n' "}"
+            for i, r in zip(a["frames"], rel))
+        speed = 1000.0 / base
         anims.append("{\n" f'"frames": [{frames}],\n'
                      f'"loop": {"true" if a.get("loop", True) else "false"},\n'
                      f'"name": &"{anim_name}",\n'

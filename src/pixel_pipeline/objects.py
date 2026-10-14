@@ -95,7 +95,7 @@ PROP_PRESETS = (
     (("rock", "boulder", "stone", "pot", "vase", "urn"), 0.5, 1),
     (("chest", "anvil"), 0.4, 4),
 )
-SHEET_FILES = (".png", ".json", "_n.png", ".aseprite", ".tres", "_facing.gd")
+SHEET_FILES = (".png", ".json", "_n.png", "_glow.png", ".aseprite", ".tres", "_facing.gd")
 
 
 def _say(progress):
@@ -356,6 +356,10 @@ def _write_single(sprite, out: Path) -> list[Path]:
     written = [out, out_json]
     if sprite.normal is not None:
         written.append(write_normal_sheet([sprite], out, 1))
+        from .glow import write_glow_sheet                # lanterns, crystals, braziers glow
+        g = write_glow_sheet(out, force=True)
+        if g is not None:
+            written.append(g)
     ase = out.with_suffix(".aseprite")
     write_aseprite(ase, [sprite.rgba], sprite.palette, durations=100)
     _, rects = pack_sheet([sprite.rgba], 1)

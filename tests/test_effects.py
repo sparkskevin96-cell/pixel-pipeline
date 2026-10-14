@@ -10,7 +10,7 @@ from pixel_pipeline.assets import Style, create_project, list_assets
 from pixel_pipeline.palettes import BUILTIN, hex_to_rgb
 
 
-@pytest.mark.parametrize("kind", effects.EFFECT_KINDS)
+@pytest.mark.parametrize("kind", effects.CLASSIC_KINDS)
 def test_every_kind_renders(kind):
     fx = effects.render_effect(kind)
     (w, h), n = effects.SPECS[kind][0], effects.SPECS[kind][1]
@@ -185,3 +185,40 @@ def test_effects_tab(tmp_path):
     assert tab.options()["wind"] == 1.0
     tab.colours.setText("#zzz")
     tab.preview()                                             # bad colours -> message, no crash
+
+
+def test_effects_tab_premium(tmp_path):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from conftest import qt_app
+    qt_app()
+    from pixel_pipeline.ui.effects_tab import EffectsTab
+    tab = EffectsTab()
+    tab.sync = True
+    tab.timer.stop()
+    assert tab.current_kind() == effects.SPELL_KINDS[0]
+    tab.select_kind("sword_combo")
+    assert tab.hits.isEnabled() and not tab.angle.isEnabled() and not tab.dither.isEnabled()
+    tab.size_name.setCurrentIndex(tab.size_name.findData("small"))
+    tab.hits.setValue(2)
+    assert max(tab.fx.size) == 64 and len(tab.fx.tag_list()) == 2
+    assert tab.options()["hits"] == 2 and "dither" not in tab.options()
+    dark = tab.view.rgba.copy()
+    tab.ground.setCurrentIndex(tab.ground.findData("light"))
+    assert not np.array_equal(dark, tab.view.rgba)                # light ground
+    tab.glow.setChecked(False)
+    tab.frame_i = 3
+    tab._show()
+    plain = tab.view.rgba.copy()
+    tab.glow.setChecked(True)
+    assert not np.array_equal(plain, tab.view.rgba)               # bloom on
+    tab.frame_i = 0
+    tab._timed()                                                  # real timing: next frame's ms
+    assert tab.timer.interval() == tab.fx.frame_durations()[1]
+    tab.timer.stop()
+    tab.select_kind("hit_spark")
+    tab.angle.setCurrentIndex(1)
+    assert abs(tab.options()["angle"] - 3.1416) < 1e-3
+    tab.make()
+    assert tab.last.extra["effect"] == "hit_spark" and (tab.last.folder / "sheet_glow.png").exists()

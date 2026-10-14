@@ -40,7 +40,8 @@ TEMPLATES = ("flat", "harbour", "forest", "castle", "snowfield", "village")
 DEFAULT_SIZES = {"flat": (16, 12), "harbour": (18, 14), "forest": (20, 16), "castle": (22, 18),
                  "snowfield": (20, 16), "village": (20, 16)}
 MIN_SIZE = {"castle": (14, 12), "harbour": (12, 10)}
-PROP_KINDS = ("tree", "rock", "house", "wall", "well", "fence", "battlement", "crate", "barrel", "post", "torch")
+PROP_KINDS = ("tree", "rock", "house", "wall", "well", "fence", "battlement", "crate", "barrel", "post", "torch",
+              "brazier", "lantern", "crystal")   # the last four light the HD-2D board
 TARGETS = ("godot-3d", "godot-tilemap", "godot-iso", "tiled", "json")
 MIN_LEVEL, MAX_LEVEL = 0, 12
 JUMP = 2
@@ -929,7 +930,9 @@ def prop_sprite(kind: str, w: int, snow: bool = False, along_col: bool = True):
     if kind == "post":
         img = post_sprite(4, max(6, int(w * 0.6)))
         return img, (2, img.shape[0] - 1)
-    if kind == "torch":
+    if kind == "crystal":
+        return box_sprite(w, (90, 190, 240), max(4, w // 3))
+    if kind in ("torch", "brazier", "lantern"):
         strip = torch_frames(w)
         tw = strip.shape[1] // 4
         img = np.ascontiguousarray(strip[:, :tw])
@@ -971,8 +974,12 @@ def prop_icon(kind: str, cell: int) -> np.ndarray:
         g.ellipse((m * 2, m * 2, cell - 1 - m * 2, cell - 1 - m * 2), fill=(128, 84, 48), outline=dark)
     elif kind == "post":
         g.rectangle((cell // 2 - m, cell // 2 - m, cell // 2 + m, cell // 2 + m), fill=(104, 70, 42), outline=dark)
-    elif kind == "torch":
-        g.ellipse((cell * 0.35, cell * 0.35, cell * 0.65, cell * 0.65), fill=(255, 170, 40), outline=(200, 70, 20))
+    elif kind in ("torch", "brazier", "lantern"):
+        r = 0.35 if kind == "torch" else (0.22 if kind == "brazier" else 0.4)
+        g.ellipse((cell * r, cell * r, cell * (1 - r), cell * (1 - r)), fill=(255, 170, 40), outline=(200, 70, 20))
+    elif kind == "crystal":
+        g.polygon([(cell / 2, m), (cell - 1 - m * 2, cell / 2), (cell / 2, cell - 1 - m), (m * 2, cell / 2)],
+                  fill=(110, 200, 245), outline=(30, 80, 140))
     else:
         g.rectangle((m * 2, m * 2, cell - 1 - m * 2, cell - 1 - m * 2), fill=(170, 120, 190), outline=dark)
     return np.asarray(img).copy()

@@ -902,6 +902,10 @@ def write_animated(anim: AnimatedSet, out_png, aseprite: bool = False,
     if normals:
         from .normals import write_normal_sheet
         written.append(write_normal_sheet(anim.flat(), out, f))
+        from .glow import write_glow_sheet                # lit sheets: emissive pixels too
+        g = write_glow_sheet(out, force=True)
+        if g is not None:
+            written.append(g)
     if aseprite:
         ase = out.with_suffix(".aseprite")
         durations = [a.frame_ms for a in anim.actions for _ in range(f * len(anim.directions))]
