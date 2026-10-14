@@ -18,7 +18,8 @@ CAMERA_CHOICES = (("The project's", None), ("Top-down", "topdown"), ("Side-scrol
 ROLE_NOTES = {
     "ground": "16 corner tiles blend it into the base (Godot: Terrains tab, Match Corners).",
     "water": "47 shore tiles with a foam line (Godot: Match Corners and Sides).",
-    "cliff": "47 tiles: raised ground with a rock face on its south side.",
+    "cliff": "47 tiles: raised ground with a lit lip, plus rock wall tiles 1-2 tiles high below "
+             "open south sides (maps place them by the drop).",
     "line": "16 fence/wall tiles by connected sides, with collision; paint them on a layer "
             "above the ground (Godot: Match Sides).",
 }
@@ -49,6 +50,9 @@ class TilegenTab(ToolTab):
         self.count = spin(1, 4, 3)
         self.variants = spin(1, 4, 3)
         self.seams = QCheckBox("Repaint the seams on the GPU (one more pass each)")
+        self.overhang = QCheckBox("Cliffs: grass hangs over the edge, moss in the rock")
+        self.overhang.setChecked(True)
+        self.overhang.toggled.connect(self._rebuild)
         self.note = QLabel()
         self.note.setWordWrap(True)
         box = QGroupBox("Terrain")
@@ -60,6 +64,7 @@ class TilegenTab(ToolTab):
         form.addRow("Pictures to pick from", self.count)
         form.addRow("Inside variations", self.variants)
         form.addRow(self.seams)
+        form.addRow(self.overhang)
         form.addRow(self.note)
         self.picks = QListWidget()
         self.picks.setViewMode(QListWidget.IconMode)
@@ -118,6 +123,13 @@ class TilegenTab(ToolTab):
         self.picks.blockSignals(False)
         self.picks.setCurrentRow(0)
         self._picked(0)
+        off = [str(i + 1) for i, sw in enumerate(self.swatches) if getattr(sw, "colour_miss", 0) > 0]
+        if off:
+            self.say(f"Texture(s) {', '.join(off)} still don't look like {self.swatches[0].terrain} "
+                     "after the retries (wrong colours); try other words or Make again.")
+
+    def _rebuild(self, _on=None):
+        self._picked(self.picks.currentRow())
 
     def _picked(self, row: int):
         if not 0 <= row < len(self.swatches):
@@ -127,7 +139,8 @@ class TilegenTab(ToolTab):
         try:
             self.tileset = build_tileset(sw.terrain, sw.texture, picture=sw.picture,
                                          base=self.base.currentText(), camera=self._camera(),
-                                         variants=self.variants.value(), seed=sw.seed)
+                                         variants=self.variants.value(), seed=sw.seed,
+                                         overhang=self.overhang.isChecked())
         except ValueError as e:
             self.tileset = None
             self.save_btn.setEnabled(False)

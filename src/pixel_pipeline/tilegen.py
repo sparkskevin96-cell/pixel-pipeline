@@ -15,7 +15,8 @@ house style, built into proper tilesets.
    - ground (dirt path, road, sand, snow, stone over the base, usually grass): 16 corner tiles
      (maptiles, Godot Match Corners).
    - water: 47 "blob" tiles (Godot Match Corners and Sides): shore with a foam line.
-   - cliff: 47 blob tiles: raised ground, a darker rock face row on open south sides.
+   - cliff: 47 blob tiles (raised ground, a lit lip, rock down to the tile's foot on open south
+     sides) + rock wall tiles 1-2 tiles high that maps place on the low cells below them.
    - fence / wall: 16 line tiles by connected sides (post, ends, straight, corners, T, cross),
      transparent, with collision; the base ground follows in the last row.
    Side-scroller projects get tilesets.build_side_set (ground + top), isometric ones floors +
@@ -90,6 +91,85 @@ NEGATIVE = ("perspective, horizon, sky, objects, characters, people, text, borde
             "shadows, 3d render, photo")
 
 
+# Per terrain: the material words that lead the prompt (weighted, ComfyUI "(words:1.3)") whatever
+# the user adds, and what must stay out. "forest path" alone made SDXL draw a leafy forest floor.
+MATERIAL = {
+    "grass": ("(short green grass lawn:1.2), small leaves and clover", "dirt, path, stones, water, flowers"),
+    "dirt": ("(packed dirt path:1.3), (bare worn brown earth:1.2), small pebbles, top-down ground texture",
+             "leaves, grass, plants, trees, moss, forest, roots, ferns, flowers, mushrooms, water, green"),
+    "road": ("(cobblestone road:1.3), rounded grey paving stones, mortar joints",
+             "grass, leaves, moss, plants, trees, forest, water, dirt"),
+    "stone": ("(stone floor:1.3), worn grey flagstones, square slabs", "grass, leaves, moss, plants, trees"),
+    "sand": ("(fine beach sand:1.3), small ripples, warm pale sand", "grass, leaves, plants, rocks, water, shells"),
+    "snow": ("(fresh white snow:1.3), soft drifts, blue shadows", "grass, leaves, trees, rocks, dirt"),
+    "water": ("(clear blue water surface:1.3), gentle ripples, light glints",
+              "lily pads, leaves, islands, land, rocks, moss, sand, green, swamp, algae"),
+    "cliff": ("(grey rock:1.2), layered stone, rough rock surface", "grass, trees, leaves, water, sky"),
+    "fence": ("(weathered wooden planks:1.2), wood grain", "grass, leaves, metal, stone"),
+    "wall": ("(stone brick wall:1.2), mortar lines, cut stone blocks", "grass, leaves, wood, plants"),
+}
+
+# The colour a terrain's swatch must have (HSV of the picture's mean; hue in degrees, None = any)
+# plus share limits for green / blue pixels; a miss is re-drawn (make_swatches retries).
+COLOUR_RULES = {
+    "dirt": {"hue": (5, 55), "sat": (0.1, 0.7), "val": (0.16, 0.8), "green": 0.2},
+    "road": {"sat": (0.0, 0.45), "val": (0.18, 0.85), "green": 0.2},
+    "stone": {"sat": (0.0, 0.35), "val": (0.18, 0.9), "green": 0.25},
+    "sand": {"hue": (20, 60), "sat": (0.1, 0.65), "val": (0.45, 1.0), "green": 0.15},
+    "snow": {"sat": (0.0, 0.3), "val": (0.6, 1.0), "green": 0.1},
+    "grass": {"hue": (55, 160), "green_min": 0.35},
+    "water": {"hue": (170, 260), "blue_min": 0.35, "green": 0.3},
+    "cliff": {"sat": (0.0, 0.5), "green": 0.35},
+    "fence": {"hue": (5, 55), "sat": (0.1, 0.75), "green": 0.15},
+    "wall": {"sat": (0.0, 0.4), "green": 0.25},
+}
+COLOUR_WORDS = {"dirt": "(brown:1.2)", "road": "(grey stone:1.2)", "stone": "(grey:1.2)",
+                "sand": "(pale yellow sand:1.2)", "snow": "(white:1.2)", "grass": "(green:1.2)",
+                "water": "(blue:1.3)", "cliff": "(grey:1.2)", "fence": "(brown wood:1.2)",
+                "wall": "(grey:1.2)"}
+
+
+def colour_stats(picture) -> dict:
+    """{hue (deg), sat, val (0..1) of the mean colour, green, blue: share of saturated pixels of
+    that hue}: the cheap check of what a swatch is made of."""
+    import colorsys
+
+    import cv2
+    rgb = _rgb(picture)
+    small = np.asarray(Image.fromarray(rgb).resize((96, 96), Image.BILINEAR))
+    m = small.reshape(-1, 3).mean(0) / 255
+    h, s, v = colorsys.rgb_to_hsv(*m)
+    hsv = cv2.cvtColor(small, cv2.COLOR_RGB2HSV).reshape(-1, 3).astype(int)
+    hue, sat = hsv[:, 0] * 2, hsv[:, 1]
+    return {"hue": h * 360, "sat": s, "val": v,
+            "green": float(((hue > 70) & (hue < 170) & (sat > 60)).mean()),
+            "blue": float(((hue >= 170) & (hue < 260) & (sat > 60)).mean())}
+
+
+def colour_miss(terrain: str, picture=None, stats: dict | None = None) -> float:
+    """How far a swatch's colours are from its terrain's (0 = fine; COLOUR_RULES)."""
+    rule = COLOUR_RULES.get(terrain)
+    if not rule:
+        return 0.0
+    st = stats or colour_stats(picture)
+    miss = 0.0
+    if "hue" in rule and st["sat"] > 0.08:
+        lo, hi = rule["hue"]
+        hue = st["hue"]
+        miss += max(0.0, lo - hue, hue - hi) / 60
+    for key in ("sat", "val"):
+        if key in rule:
+            lo, hi = rule[key]
+            miss += max(0.0, lo - st[key], st[key] - hi) * 3
+    if "green" in rule:
+        miss += max(0.0, st["green"] - rule["green"]) * 3
+    if "green_min" in rule:
+        miss += max(0.0, rule["green_min"] - st["green"]) * 3
+    if "blue_min" in rule:
+        miss += max(0.0, rule["blue_min"] - st["blue"]) * 3
+    return round(miss, 4)
+
+
 def role_of(terrain: str) -> str:
     return TERRAINS[terrain][1] if terrain in TERRAINS else "ground"
 
@@ -105,13 +185,24 @@ def camera_for(style: assets.Style | None = None) -> str:
 
 
 def swatch_prompt(terrain: str, words: str = "", camera: str = "topdown",
-                  style: assets.Style | None = None) -> tuple[str, str]:
-    """(positive, negative) for a texture swatch, with the house style appended."""
+                  style: assets.Style | None = None, colour: bool = False) -> tuple[str, str]:
+    """(positive, negative) for a texture swatch, with the house style appended. The terrain's
+    material words lead (MATERIAL: "forest path" still draws packed earth, not a forest floor)
+    and its negatives keep leaves / grass / water out (unless the words ask for them); colour:
+    a retry after a colour miss, the terrain's colour word weighted in."""
     if camera not in CAMERAS:
         raise ValueError(f"camera must be one of {', '.join(CAMERAS)}")
     text = (words or "").strip().rstrip(".,; ") or (TERRAINS[terrain][0] if terrain in TERRAINS
                                                      else terrain)
-    return assets.with_style(PROMPTS[camera].format(words=text), NEGATIVE,
+    material, avoid = MATERIAL.get(terrain, ("", ""))
+    if material:
+        text = f"{material}, {text}"
+    if colour and terrain in COLOUR_WORDS:
+        text = f"{COLOUR_WORDS[terrain]}, {text}"
+    asked = text.lower()
+    neg = ", ".join([NEGATIVE] + [w for w in (x.strip() for x in avoid.split(","))
+                                  if w and w not in asked])
+    return assets.with_style(PROMPTS[camera].format(words=text), neg,
                              style or assets.project_style(), "tile")
 
 
@@ -414,6 +505,7 @@ class Swatch:
     seed: int = 0
     prompt: str = ""
     raw: np.ndarray | None = None   # what SDXL drew
+    colour_miss: float = 0.0        # 0 = its colours fit the terrain (colour_miss)
 
 
 def builtin_swatch(terrain: str, size: int = 32, seed: int = 0,
@@ -433,9 +525,12 @@ def builtin_swatch(terrain: str, size: int = 32, seed: int = 0,
 def make_swatches(terrain: str, words: str = "", *, count: int = 3, camera: str | None = None,
                   size: int | None = None, client=None, seed: int | None = None,
                   style: assets.Style | None = None, inpaint_seams: bool = False, even: bool = True,
-                  say=None, **gen_opts) -> list[Swatch]:
+                  retries: int = 2, say=None, **gen_opts) -> list[Swatch]:
     """`count` texture variations from the GPU (seeds seed, seed+1, ...), each made seamless,
-    evened out (even_out) and pixelized at the project's tile size."""
+    evened out (even_out) and pixelized at the project's tile size. A picture whose colours miss
+    the terrain's (colour_miss: dirt must be brown and dull, water blue...) is drawn again, up to
+    `retries` times, with a new seed and the terrain's colour word weighted in; the closest one
+    is kept (Swatch.colour_miss says how far it still is)."""
     from .generate import generate_images
     st = style or assets.project_style()
     camera = camera or camera_for(st)
@@ -446,12 +541,25 @@ def make_swatches(terrain: str, words: str = "", *, count: int = 3, camera: str 
     pics = generate_images(pos, neg, client=client, seed=seed, count=count, aspect=1.0, **gen_opts)
     out = []
     for i, (img, s) in enumerate(pics):
+        prompt = pos
+        miss = colour_miss(terrain, img)
+        for k in range(max(0, retries)):
+            if miss <= 0:
+                break
+            say(f"Texture {i + 1} came out the wrong colour for {terrain}; drawing it again "
+                f"({k + 1} of {retries})…")
+            p2, n2 = swatch_prompt(terrain, words, camera, st, colour=True)
+            (img2, s2), = generate_images(p2, n2, client=client, seed=s + 1000 * (k + 1), count=1,
+                                          aspect=1.0, **gen_opts)
+            m2 = colour_miss(terrain, img2)
+            if m2 < miss:
+                img, s, miss, prompt = img2, s2, m2, p2
         say(f"Making texture {i + 1} of {len(pics)} seamless…")
         raw = np.asarray(img.convert("RGB"))
-        pic = seamless(raw, client=client, prompt=pos, negative=neg, seed=s, inpaint=inpaint_seams)
+        pic = seamless(raw, client=client, prompt=prompt, negative=neg, seed=s, inpaint=inpaint_seams)
         if even:
             pic = even_out(pic)
-        out.append(Swatch(terrain, pixel_texture(pic, size, st), pic, s, pos, raw))
+        out.append(Swatch(terrain, pixel_texture(pic, size, st), pic, s, prompt, raw, miss))
     return out
 
 
@@ -543,22 +651,78 @@ def water_tile(base: np.ndarray, water: np.ndarray, region: np.ndarray) -> np.nd
     return out
 
 
+FACE_PARTS = ("foot", "mid", "base")   # 1-tile face | top row of a 2-tile face | its bottom row
+FACE_PHASES = 3                         # face tiles cut from a 3-tile-wide rock strip: x % 3
+
+
+def _blend(rgb, colour, k: float) -> np.ndarray:
+    return np.clip(np.asarray(rgb, np.float32) * (1 - k) + np.asarray(colour, np.float32) * k,
+                   0, 255).astype(np.uint8)
+
+
+@dataclass
+class CliffArt:
+    """A cliff set's rock: one strip (FACE_PHASES tiles wide, wraps in x) the blob tiles' faces
+    and the face tiles below them are all cut from, so strata and blocks run on across tiles."""
+    strip: np.ndarray            # (pad + ms + 2t, 3t, 4)
+    pad: int                     # strip rows above the highest face pixel of a blob tile
+    ms: int                      # the blob tiles' south margin (face height inside the tile)
+    ramp: np.ndarray             # rock colours dark -> light
+    drips: np.ndarray            # (t,) overhang length per column (0 = none)
+    overhang: bool = True
+
+
+def cliff_art(t: int, rock: np.ndarray, base: np.ndarray, geo, seed: int = 0,
+              overhang: bool = True) -> CliffArt:
+    """The rock of a cliff set in the rock texture's colours (neo_terrain.rock_face: strata,
+    blocks lit from the upper left, cracks; moss from the base's colours in the joints when
+    overhang)."""
+    from .neo_terrain import _steps, neo_ramp, ramp_of, rock_face
+    m, jx, _ = geo
+    ms = m[S]
+    pad = int(np.ceil(np.abs(jx).max())) + 2
+    ramp = neo_ramp(rock, 7)
+    moss = ramp_of(base, 5)[1:] if overhang else None
+    strip, _ = rock_face(FACE_PHASES * t, pad + ms + 2 * t, ramp, seed,
+                         seams=(pad + ms, pad + ms + t), moss=moss, unit=t)
+    rng = np.random.default_rng(zlib.crc32(f"drips/{t}/{seed}".encode()))
+    drips = 1 + np.clip(_steps(t, max(1, t // 8), rng, (1, 4)) + max(1, t // 8) // 2, 0, None)
+    if not overhang:
+        drips[:] = 0
+    return CliffArt(strip, pad, ms, ramp, drips, overhang)
+
+
 def cliff_tile(base: np.ndarray, rock: np.ndarray, region: np.ndarray, face: np.ndarray,
-               edge: tuple[int, int, int]) -> np.ndarray:
-    """Raised ground (the base, a little lighter) where region is; the rock face (darker, with
-    strata) where face is; rims, outline and a shadow on the low ground."""
+               edge: tuple[int, int, int], art: CliffArt | None = None) -> np.ndarray:
+    """Raised ground (the base, a little lighter) where region is, its south edge a warm lit lip
+    (grass hanging over it with art.overhang); the rock face cut from art's strip where face is
+    (it runs on into the face tiles below: its last row is a joint, the foot when nothing is
+    below); dark outline, shadow on the low ground."""
     t = base.shape[0]
     out = base.copy()
     out[region, :3] = _shade(base[region, :3], 1.15)
     if face.any():
-        y = np.arange(t)[:, None] + np.zeros((1, t), int)
-        f = _shade(rock[..., :3], 0.62)
-        strata = (y % 4 == 3)
-        f[strata] = _shade(f[strata], 0.8)
-        out[face, :3] = f[face]
-        out[_touch(face, region), :3] = edge                       # lip under the top
-        out[face & (y == t - 1), :3] = edge                        # foot of the face
-        out[_touch(region, face), :3] = _shade(base[_touch(region, face), :3], 1.25)
+        if art is None:
+            art = cliff_art(t, rock, base, (({N: 0, E: 0, S: int(face.sum(0).max()), W: 0}),
+                                            np.zeros(t), np.zeros(t)))
+        y, x = np.mgrid[0:t, 0:t]
+        r = np.clip(y - (t - art.ms) + art.pad, 0, art.strip.shape[0] - 1)
+        out[face, :3] = art.strip[r, x][face][:, :3]
+        top = _touch(face, region)                                 # the face's top row: lit rock
+        out[top, :3] = art.ramp[-2]
+        lip = _touch(region, face)                                 # the plateau's lit lip
+        out[lip, :3] = _blend(base[lip, :3], (255, 244, 214), 0.35)
+        if art.overhang:                                           # grass / moss hanging over
+            first = np.where(top.any(0), top.argmax(0), -1)
+            for xx in np.nonzero(first >= 0)[0]:
+                y0, L = int(first[xx]), int(art.drips[xx])
+                for yy in range(y0, min(t, y0 + L)):
+                    if face[yy, xx]:
+                        out[yy, xx, :3] = _shade(base[yy, xx, :3], 1.0 - 0.12 * (yy - y0))
+                if L and y0 + L < t and face[y0 + L, xx]:
+                    out[y0 + L, xx, :3] = _shade(out[y0 + L, xx, :3], 0.6)    # shadow under it
+        ends = face & _touch(face, ~region & ~face)                # left / right ends of the face
+        out[ends, :3] = edge
     low = ~region & ~face
     rim = _touch(region, low)
     out[rim, :3] = edge
@@ -567,11 +731,43 @@ def cliff_tile(base: np.ndarray, rock: np.ndarray, region: np.ndarray, face: np.
     return out
 
 
+def face_tile(part: str, ends: int, phase: int, base: np.ndarray, art: CliffArt, geo,
+              edge) -> np.ndarray:
+    """A tile of rock wall below a cliff's open south side (on the low ground). part: foot (a
+    1-tile face, ground at its bottom), mid / base (the upper / lower row of a 2-tile face);
+    ends: 1 = the face carries on west, 2 = east (else it ends there, outlined, the east end
+    throwing a shadow); phase: which third of the strip (map column % 3, so neighbours join)."""
+    m, _, _ = geo
+    t = base.shape[0]
+    out = base.copy()
+    x0 = 0 if ends & 1 else m[W]
+    x1 = t if ends & 2 else t - m[E]
+    ground = max(3, round(t * 0.25)) if part in ("foot", "base") else 0
+    y1 = t - ground
+    r0 = art.pad + art.ms + (t if part == "base" else 0)
+    piece = art.strip[r0:r0 + t, phase * t:(phase + 1) * t]
+    out[:y1, x0:x1, :3] = piece[:y1, x0:x1, :3]
+    if ground:
+        foot = out[y1 - 2:y1, x0:x1, :3]
+        out[y1 - 2:y1, x0:x1, :3] = _shade(foot, 0.8)              # darker base of the wall
+        out[y1 - 1, x0:x1, :3] = edge                              # foot line
+        sx1 = min(t, x1 + 1)
+        out[y1:y1 + 1, x0:sx1, :3] = _shade(out[y1:y1 + 1, x0:sx1, :3], 0.6)    # its shadow
+        out[y1 + 1:y1 + 2, x0:sx1, :3] = _shade(out[y1 + 1:y1 + 2, x0:sx1, :3], 0.8)
+    if not ends & 1:
+        out[:y1, x0, :3] = edge
+    if not ends & 2:
+        out[:y1, x1 - 1, :3] = edge
+        sx = slice(x1, min(t, x1 + 2))
+        out[:y1 + (1 if ground else 0), sx, :3] = _shade(out[:y1 + (1 if ground else 0), sx, :3], 0.7)
+    return out
+
+
 def _blob_geometry(t: int, role: str, seed: int):
     rng = np.random.default_rng(zlib.crc32(f"blob/{t}/{seed}".encode()))
     if role == "cliff":
         m = {N: max(2, round(t * 0.12)), E: max(2, round(t * 0.12)), W: max(2, round(t * 0.12)),
-             S: max(3, round(t * 0.45))}
+             S: max(3, round(t * 0.4))}
     else:
         m = {k: max(2, round(t * 0.25)) for k in (N, E, S, W)}
     jx = _tapered_jitter(t, t * 0.07, rng)
@@ -579,7 +775,8 @@ def _blob_geometry(t: int, role: str, seed: int):
     return m, jx, jy
 
 
-def blob_tile(role: str, mask: int, base: np.ndarray, over: np.ndarray, edge, geo) -> np.ndarray:
+def blob_tile(role: str, mask: int, base: np.ndarray, over: np.ndarray, edge, geo,
+              art: CliffArt | None = None) -> np.ndarray:
     m, jx, jy = geo
     t = base.shape[0]
     region = blob_region(t, mask, m, jx, jy)
@@ -587,7 +784,7 @@ def blob_tile(role: str, mask: int, base: np.ndarray, over: np.ndarray, edge, ge
         no_face = dict(m)
         no_face[S] = 0
         face = blob_region(t, mask, no_face, jx, jy) & ~region
-        return cliff_tile(base, over, region, face, edge)
+        return cliff_tile(base, over, region, face, edge, art)
     return water_tile(base, over, region)
 
 
@@ -720,9 +917,15 @@ def tile_choices(tiles: list) -> dict:
     out: dict = {}
     for t in tiles:
         key = "ground" if t.get("ground") else t.get("mask", t.get("corners"))
+        if t.get("face"):
+            key = ("face", t["face"], int(t["ends"]))
         if key is None:
             continue
         xy, w = out.setdefault(tuple(key) if isinstance(key, list) else key, ([], []))
+        if t.get("face"):                             # face tiles: in phase order
+            xy.insert(int(t.get("phase", len(xy))), (t["col"], t["row"]))
+            w.append(1.0)
+            continue
         xy.append((t["col"], t["row"]))
         w.append(float(t.get("probability", 1.0)))
     return out
@@ -768,12 +971,14 @@ def _snap(img: np.ndarray, style) -> np.ndarray:
 def build_tileset(terrain: str, texture: np.ndarray, *, picture: np.ndarray | None = None,
                   base: str | np.ndarray = "grass", camera: str | None = None, variants: int = 3,
                   seed: int = 0, style: assets.Style | None = None,
-                  project: assets.Project | None = None, mix: bool = True) -> GenTileset:
+                  project: assets.Project | None = None, mix: bool = True,
+                  overhang: bool = True) -> GenTileset:
     """The terrain's tileset (no GPU). texture: its seamless tile (Swatch.texture); picture:
     the seamless picture it came from (variants come from other pieces of it); base: the
     terrain it blends into (a name -> base_texture, or a texture). variants (1-4): pieces of
     the picture; mix: up to 8 interior tiles per terrain sharing the probability (variety),
-    False = the 2026-10-13 way (1-4 shifted interiors, each a third as likely as the plain tile)."""
+    False = the 2026-10-13 way (1-4 shifted interiors, each a third as likely as the plain tile).
+    overhang (cliffs): grass hangs over the lip and moss grows in the rock's joints."""
     st = style or (project.style if project is not None else assets.project_style())
     camera = camera or camera_for(st)
     if camera not in CAMERAS:
@@ -810,7 +1015,8 @@ def build_tileset(terrain: str, texture: np.ndarray, *, picture: np.ndarray | No
     elif role == "ground":
         ts = _corner_set(terrain, over_vars, base_vars, base_name, edge, seed, over_w, base_w)
     else:
-        ts = _blob_set(terrain, role, over_vars, base_vars, base_name, edge, seed, over_w, base_w)
+        ts = _blob_set(terrain, role, over_vars, base_vars, base_name, edge, seed, over_w, base_w,
+                       overhang)
     ts.atlas = _snap(ts.atlas, st)
     if ts.extra_atlas is not None:
         ts.extra_atlas = _snap(ts.extra_atlas, st)
@@ -867,11 +1073,12 @@ def _corner_set(terrain, over_vars, base_vars, base_name, edge, seed, over_w=Non
 
 
 def _blob_set(terrain, role, over_vars, base_vars, base_name, edge, seed, over_w=None,
-              base_w=None) -> GenTileset:
+              base_w=None, overhang: bool = True) -> GenTileset:
     t = over_vars[0].shape[0]
     over_w = over_w or [1.0] + [0.35] * (len(over_vars) - 1)
     base_w = base_w or [1.0] + [0.35] * (len(base_vars) - 1)
     geo = _blob_geometry(t, role, seed)
+    art = cliff_art(t, over_vars[0], base_vars[0], geo, seed, overhang) if role == "cliff" else None
     imgs, tiles = [], []
     cols = 8
     for v, tile in enumerate(base_vars):            # row 0: plain base (+ variants)
@@ -880,7 +1087,7 @@ def _blob_set(terrain, role, over_vars, base_vars, base_name, edge, seed, over_w
                       "bits": {n: 0 for _, n in BITS8}, **_prob(base_w[v])})
     imgs += [np.zeros((t, t, 4), np.uint8)] * (cols - len(base_vars))
     for i, m in enumerate(BLOB_MASKS):              # rows 1-6: the 47 blob tiles
-        img = blob_tile(role, m, base_vars[0], over_vars[0], edge, geo)
+        img = blob_tile(role, m, base_vars[0], over_vars[0], edge, geo, art)
         imgs.append(img)
         r, c = divmod(cols + i, cols)
         tiles.append({"col": c, "row": r, "terrain": 1, "mask": m,
@@ -888,16 +1095,68 @@ def _blob_set(terrain, role, over_vars, base_vars, base_name, edge, seed, over_w
     # then full-tile variants (a plateau's full tile is its raised base: the base's variants)
     full, weights = (base_vars, base_w) if role == "cliff" else (over_vars, over_w)
     for v, tile in enumerate(full[1:], start=1):
-        img = blob_tile(role, 255, tile if role == "cliff" else base_vars[0], tile, edge, geo)
+        img = blob_tile(role, 255, tile if role == "cliff" else base_vars[0], tile, edge, geo, art)
         imgs.append(img)
         r, c = divmod(len(imgs) - 1, cols)
         tiles.append({"col": c, "row": r, "terrain": 1, "mask": 255, "variant": v,
                       **_prob(weights[v]), "bits": {n: 1 for _, n in BITS8}})
+    if art is not None:                             # the rock wall below open south sides
+        imgs += [np.zeros((t, t, 4), np.uint8)] * (-len(imgs) % cols)
+        for part in FACE_PARTS:
+            for ends in range(4):
+                for phase in range(FACE_PHASES):
+                    imgs.append(face_tile(part, ends, phase, base_vars[0], art, geo, edge))
+                    r, c = divmod(len(imgs) - 1, cols)
+                    tiles.append({"col": c, "row": r, "face": part, "ends": ends, "phase": phase})
     atlas = _grid_atlas(imgs, cols, t)
     gs = GenTileset(terrain, "blob", "topdown", t, atlas, tiles, [base_name, terrain],
                     [_colour(base_vars[0]), _colour(over_vars[0])], over_vars[0], edge, base_name)
-    gs.example = blob_cells(example_blob(16, 10, seed), gs, seed)
+    on = example_blob(16, 10, seed)
+    gs.example = blob_cells(on, gs, seed)
+    if art is not None:
+        hgt = np.where(on, 4, 0)
+        for (y, x), (part, ends) in face_cells(on, hgt, ~on).items():
+            gs.example[y, x] = face_choice(gs.choices(), part, ends, x)
+    gs.meta["overhang"] = overhang
     return gs
+
+
+def face_choice(choices: dict, part: str, ends: int, col: int):
+    """The face tile for a map column (its phase = col % 3, so neighbours join)."""
+    xys = choices[("face", part, ends)][0]
+    return xys[col % len(xys)]
+
+
+def face_cells(top: np.ndarray, hgt: np.ndarray, low_ok: np.ndarray | None = None) -> dict:
+    """{(row, col): (part, ends)} of the rock wall below cliff tops: top = cells drawn as cliff
+    (bool), hgt = levels. Below a top cell whose south neighbour is 2+ levels lower: 1 face tile
+    (a drop of 2-3 levels, part "foot") or 2 ("mid" + "base", 4+ levels, if the second cell is
+    that low too). low_ok: cells a face may cover (default: all)."""
+    rows, cols = top.shape
+    out = {}
+    for y, x in np.argwhere(top):
+        if y + 1 >= rows:
+            continue
+        h = int(hgt[y, x])
+        drop = h - int(hgt[y + 1, x])
+        if drop < 2 or (low_ok is not None and not low_ok[y + 1, x]):
+            continue
+        two = (drop >= 4 and y + 2 < rows and h - int(hgt[y + 2, x]) >= 4
+               and (low_ok is None or low_ok[y + 2, x]))
+        if two:
+            out[(y + 1, x)] = "mid"
+            out[(y + 2, x)] = "base"
+        else:
+            out.setdefault((y + 1, x), "foot")
+    res = {}
+    for (y, x), part in out.items():
+        ends = (1 if (y, x - 1) in out else 0) | (2 if (y, x + 1) in out else 0)
+        if x == 0:
+            ends |= 1                                   # past the map edge: carry on
+        if x == cols - 1:
+            ends |= 2
+        res[(y, x)] = (part, ends)
+    return res
 
 
 def _line_set(terrain, material, base_vars, edge, camera, base_name, seed, base_w=None) -> GenTileset:
@@ -1173,7 +1432,7 @@ def write_godot(gs: GenTileset, out_tres, png_name: str) -> Path:
     t, h = gs.tile, gs.tile / 2
     lines = _godot_header(png_name, t)
     for d in gs.tiles:
-        if d.get("ground"):
+        if d.get("ground") or d.get("face"):            # plain tiles (no terrain): ground, rock walls
             lines.append(f"{d['col']}:{d['row']}/0 = 0")
             continue
         key = f"{d['col']}:{d['row']}/0"
@@ -1208,6 +1467,8 @@ def _wangid(gs: GenTileset, d: dict) -> str | None:
         tl, tr, bl, br = d["corners"]
         return f"0,{tr + 1},0,{br + 1},0,{bl + 1},0,{tl + 1}"
     if gs.kind == "blob":
+        if "mask" not in d:                           # cliff face tiles: placed, not autotiled
+            return None
         m = 0 if d["mask"] == -1 else d["mask"]
         order = (N, NE, E, SE, S, SW, W, NW)
         return ",".join("2" if (d["mask"] != -1 and m & b) else "1" for b in order)
@@ -1308,7 +1569,10 @@ def layout_json(gs: GenTileset) -> dict:
             "columns": gs.columns, "tiles": [clean(d) for d in gs.tiles],
             "masks": {"corner": "corners tl, tr, bl, br = terrain ids",
                       "blob": "N 1, NE 2, E 4, SE 8, S 16, SW 32, W 64, NW 128 (corners only "
-                              "with both sides); -1 = plain base",
+                              "with both sides); -1 = plain base; cliff face tiles (no terrain): "
+                              "face foot|mid|base below an open south side (foot = 1 tile high, "
+                              "mid + base = 2), ends W 1 / E 2 = the wall carries on, phase = "
+                              "map column % 3",
                       "line": "connected sides N 1, E 2, S 4, W 8 (atlas col m % 4, row m // 4)",
                       "side": "ground neighbours top 1, right 2, bottom 4, left 8"}.get(gs.kind, ""),
             **({"example": gs.example.tolist()} if gs.example is not None else {})}
@@ -1355,7 +1619,7 @@ def save_tileset(gs: GenTileset, name: str | None = None, *, project: assets.Pro
                          set=gs.kind, role=gs.meta.get("role", role_of(gs.terrain)), tile=gs.tile,
                          edge=list(gs.edge), words=words,
                          prompt=(swatch.prompt if swatch else ""), seed=(swatch.seed if swatch else 0),
-                         variants=gs.meta.get("variants", 1))
+                         variants=gs.meta.get("variants", 1), overhang=gs.meta.get("overhang", True))
     write_tileset(gs, a.folder)
     if swatch is not None and swatch.raw is not None:
         Image.fromarray(swatch.raw).save(Path(a.folder) / "swatch.png")
@@ -1369,7 +1633,7 @@ def save_tileset(gs: GenTileset, name: str | None = None, *, project: assets.Pro
 
 def make(terrain: str, words: str = "", *, project: assets.Project | None = None, name: str | None = None,
          gpu: bool = True, pick: int = 0, count: int = 3, variants: int = 3, base: str = "grass",
-         client=None, seed: int | None = None, **gen_opts) -> assets.Asset:
+         client=None, seed: int | None = None, overhang: bool = True, **gen_opts) -> assets.Asset:
     """One call: swatches (GPU, or the built-in look) -> pick one -> set -> saved asset."""
     st = project.style if project is not None else assets.project_style()
     if gpu:
@@ -1378,7 +1642,7 @@ def make(terrain: str, words: str = "", *, project: assets.Project | None = None
     else:
         chosen = builtin_swatch(terrain, st.tile, seed or 0, st)
     gs = build_tileset(terrain, chosen.texture, picture=chosen.picture, base=base, variants=variants,
-                       seed=chosen.seed, style=st, project=project)
+                       seed=chosen.seed, style=st, project=project, overhang=overhang)
     return save_tileset(gs, name, project=project, swatch=chosen, words=words)
 
 
@@ -1436,7 +1700,8 @@ def rebuild_tileset(asset: assets.Asset, *, save: bool = False, mix: bool = True
         pic, tex = None, builtin_swatch(terrain, t, int(ex.get("seed", 0)), st, even=mix).texture
     gs = build_tileset(terrain, tex, picture=pic, base=ex.get("base", "grass"),
                        camera=ex.get("camera", "topdown"), variants=int(ex.get("variants", 3)),
-                       seed=int(ex.get("seed", 0)), style=st, project=proj, mix=mix)
+                       seed=int(ex.get("seed", 0)), style=st, project=proj, mix=mix,
+                       overhang=bool(ex.get("overhang", True)))
     if save:
         write_tileset(gs, folder)
         asset.extra.update(variants=gs.meta.get("variants", 3), mix=mix)
@@ -1578,6 +1843,8 @@ class MapLook:
       ground   every cell's plain tiles by weight (a shore cell: the terrain around it),
       corner   path / road / sand sets reach into the cells around theirs (Godot Match Corners),
       blob     shores inside the water cells, cliffs where the ground drops 2+ levels,
+      cliff_face  the rock wall below a cliff's open south side, on the low cells: 1 tile for a
+               drop of 2-3 levels, 2 for 4+ (face_cells; sets saved before 2026-10-13 have none),
       line     fence / wall props by connected sides."""
 
     def __init__(self, sets: dict, tile: int):
@@ -1683,6 +1950,13 @@ class MapLook:
                 if m != 255 and m in s.choices:
                     cells[y, x] = s.choices[m][0][0]
             out += [LookLayer("cliff", s.overlay, cells, s)] if (cells[..., 0] >= 0).any() else []
+            faces = np.full((rows, cols, 2), -1, int)
+            if any(isinstance(k, tuple) and k and k[0] == "face" for k in s.choices):
+                top = cells[..., 0] >= 0
+                for (y, x), (part, ends) in face_cells(top, hgt, ~np.isin(terr, list(wet))).items():
+                    if ("face", part, ends) in s.choices:
+                        faces[y, x] = face_choice(s.choices, part, ends, x)
+            out += [LookLayer("cliff_face", s.overlay, faces, s)] if (faces[..., 0] >= 0).any() else []
         for k in LINE_KEYS:                                   # fences / walls
             if k not in sets:
                 continue

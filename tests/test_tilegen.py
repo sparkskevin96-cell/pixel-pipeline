@@ -42,7 +42,7 @@ def test_gpu_swatches_carry_the_house_style_and_wrap(comfy):
     proj.save_style(st)
     assets.set_current_project("Tiles")
     sw = tg.make_swatches("dirt", "mossy forest path", count=2, client=client, seed=5,
-                          style=proj.style, style_lora="")
+                          style=proj.style, style_lora="", retries=0)
     assert len(sw) == 2 and [s.seed for s in sw] == [5, 6]
     text = json.dumps(fake.prompts[0])
     assert "mossy forest path" in text and "moonlit watercolour pixels" in text and "top-down" in text
@@ -53,11 +53,40 @@ def test_gpu_swatches_carry_the_house_style_and_wrap(comfy):
     # seam repaint on the GPU: an inpaint pass (mask) over the offset copy
     n = len(fake.prompts)
     tg.make_swatches("water", count=1, client=client, seed=1, style=proj.style, style_lora="",
-                     inpaint_seams=True)
+                     inpaint_seams=True, retries=0)
     assert len(fake.prompts) == n + 2
     side = assets.style_for_type("side-scroller")
     pos, _ = tg.swatch_prompt("cliff", "", tg.camera_for(side), side)
     assert "side view" in pos and "cliff" in pos
+
+
+def test_path_prompts_and_the_colour_check(comfy, monkeypatch):
+    pos, neg = tg.swatch_prompt("dirt", "forest path")
+    assert pos.index("packed dirt path") < pos.index("forest path")      # the material leads
+    assert "leaves" in neg and "grass" in neg and ", forest," not in neg   # asked for: kept out of neg
+    _, neg2 = tg.swatch_prompt("dirt", "mossy forest path")
+    assert "moss," not in neg2
+    brown = np.zeros((64, 64, 3), np.uint8)
+    brown[:] = (125, 84, 52)
+    green = brown.copy()
+    green[:] = (40, 120, 40)
+    assert tg.colour_miss("dirt", brown) == 0 and tg.colour_miss("dirt", green) > 0.5
+    assert tg.colour_miss("water", green) > 0 and tg.colour_miss("water", np.full((8, 8, 3), (40, 90, 200), np.uint8)) == 0
+    # a swatch that misses is drawn again (new seed, colour word), up to `retries` times
+    fake, client = comfy
+    calls = []
+
+    def fake_generate(prompt, negative="", *, seed=None, count=1, **kw):
+        from PIL import Image as I
+        calls.append((prompt, seed))
+        col = (125, 84, 52) if "(brown" in prompt and len(calls) >= 3 else (40, 120, 40)
+        return [(I.new("RGB", (64, 64), col), (seed or 0) + i) for i in range(count)]
+    monkeypatch.setattr("pixel_pipeline.generate.generate_images", fake_generate)
+    sw, = tg.make_swatches("dirt", "forest path", count=1, seed=7, style=assets.Style(tile=16), retries=2)
+    assert len(calls) == 3 and sw.colour_miss == 0 and sw.seed == 7 + 2000
+    calls.clear()
+    sw, = tg.make_swatches("dirt", count=1, seed=7, style=assets.Style(tile=16), retries=0)
+    assert len(calls) == 1 and sw.colour_miss > 0
 
 
 def test_palette_lock_snaps_every_tile():
@@ -100,6 +129,45 @@ def test_blob_tiles_agree_across_every_shared_edge():
             a = region[(y + 1) * t - 1, x * t:(x + 1) * t]
             b = region[(y + 1) * t, x * t:(x + 1) * t]
             assert (a == b).all(), (y, x)
+
+
+def test_cliff_faces_are_real_rock_walls(tmp_path):
+    t = 16
+    rock = tg.builtin_swatch("cliff", t).texture
+    grass = tg.builtin_swatch("grass", t).texture
+    gs = tg.build_tileset("cliff", rock, base=grass)
+    ch = gs.choices()
+    assert len(ch[255][0]) > 1 and all(m in ch for m in tg.BLOB_MASKS)          # the 47 + variants
+    faces = [d for d in gs.tiles if d.get("face")]
+    assert len(faces) == len(tg.FACE_PARTS) * 4 * tg.FACE_PHASES
+    def tile(xy):
+        c, r = xy
+        return gs.atlas[r * t:(r + 1) * t, c * t:(c + 1) * t, :3].astype(int)
+    # an open-south tile's face is ~40% of the tile and the wall tile below carries it a whole
+    # tile further: their seam is a joint over a lit block top (strata run on)
+    edge = tile(ch[255 & ~(tg.S | tg.SE | tg.SW)][0][0])
+    mid = tile(tg.face_choice(ch, "mid", 3, 0))
+    base = tile(tg.face_choice(ch, "base", 3, 0))
+    assert (np.abs(edge - grass[..., :3]).sum(-1) > 30)[-3:, 3:-3].mean() > 0.75  # rock (some moss) to the bottom
+    assert (np.abs(mid - grass[..., :3]).sum(-1) > 30).mean() > 0.8                # a full tile of rock
+    assert edge[-1].sum(-1).mean() < mid[0].sum(-1).mean()                      # joint, then lit top
+    assert (np.abs(base - grass[..., :3]).sum(-1) < 30)[-2:].mean() > 0.5        # ground at its foot
+    # neighbouring phases are neighbouring pieces of one strip: no seam between wall tiles
+    for p in range(tg.FACE_PHASES):
+        a = tile(ch[("face", "mid", 3)][0][p])
+        b = tile(ch[("face", "mid", 3)][0][(p + 1) % tg.FACE_PHASES])
+        assert np.abs(a[:, -1] - b[:, 0]).mean() < np.abs(a[:, :-1] - a[:, 1:]).mean() * 3 + 10
+    plain = tg.build_tileset("cliff", rock, base=grass, overhang=False)
+    assert not (plain.atlas == gs.atlas).all() and plain.meta["overhang"] is False
+    # the example map shows the walls; Godot / Tiled: face tiles are plain tiles, no terrain
+    used = {tuple(c) for c in gs.example.reshape(-1, 2).tolist()}
+    assert used & {(d["col"], d["row"]) for d in faces}
+    tg.write_tileset(gs, tmp_path / "c")
+    tres = (tmp_path / "c" / "tileset.tres").read_text(encoding="utf-8")
+    d = faces[0]
+    assert f"{d['col']}:{d['row']}/0 = 0" in tres and f"{d['col']}:{d['row']}/0/terrain" not in tres
+    layout = json.loads((tmp_path / "c" / "tileset.json").read_text(encoding="utf-8"))
+    assert tg.tile_choices(layout["tiles"])[("face", "foot", 0)][0] == ch[("face", "foot", 0)][0]
 
 
 def test_line_set_connects_and_has_collision():
@@ -412,7 +480,7 @@ def test_map_look_layers_follow_the_autotile_rules(look_project):
     look = maplib.map_look(doc, look_project)
     assert set(look.sets) == {"water", "dirt", "cliff", "fence"} and look.props == {"fence"}
     layers = {ly.key: ly for ly in look.layers(doc.diorama, doc.seed)}
-    assert list(layers) == ["ground", "dirt", "water", "cliff", "fence"]
+    assert list(layers) == ["ground", "dirt", "water", "cliff", "cliff_face", "fence"]
     has = {k: {(int(y), int(x)) for y, x in np.argwhere(ly.cells[..., 0] >= 0)} for k, ly in layers.items()}
     water = {(r, c) for r in range(2, 5) for c in range(2, 6)}
     assert has["water"] == water - {(3, 3), (3, 4)}               # shores; the middle is plain water
@@ -420,6 +488,12 @@ def test_map_look_layers_follow_the_autotile_rules(look_project):
     assert g[2, 2][1] == look.terrains.index("grass") and g[3, 3][1] == look.terrains.index("water")
     assert {(6, 3), (8, 3), (6, 0), (8, 9)} <= has["dirt"] and not has["dirt"] & {(7, 3), (4, 3), (0, 0)}
     assert {(3, 8), (3, 11), (2, 8)} <= has["cliff"] and not has["cliff"] & {(4, 9), (2, 10), (0, 0)}
+    # the rock wall stands on the low cells below the plateau's south edge (a 3-level drop: 1 tile)
+    assert has["cliff_face"] == {(4, 8), (4, 9), (4, 10), (4, 11)}
+    face = layers["cliff_face"].cells
+    choices = look.sets["cliff"].choices
+    assert tuple(face[4, 8]) == tg.face_choice(choices, "foot", 2, 8)            # its west end
+    assert tuple(face[4, 9]) == tg.face_choice(choices, "foot", 3, 9) != tuple(face[4, 10])
     fence = layers["fence"].cells
     assert tuple(fence[8, 2]) == (tg.LE % 4, tg.LE // 4) and tuple(fence[8, 4]) == ((tg.LE | tg.LW) % 4, 2)
     img = look.render(doc.diorama, doc.seed)
@@ -496,7 +570,7 @@ def test_exports_match_the_editor_look(look_project, tmp_path):
     out = tmp_path / "tm"
     maplib.export_map(asset, "godot-tilemap", out)
     scene = (out / "map.tscn").read_text(encoding="utf-8")
-    for node in ("Terrain", "Dirt", "Water", "Cliff", "Fence", "Height", "Props"):
+    for node in ("Terrain", "Dirt", "Water", "Cliff", "Cliff_Face", "Fence", "Height", "Props"):
         assert f'[node name="{node}" type="TileMapLayer"' in scene, node
     assert 'path="res://ground.tres"' in scene and "probability" in (out / "ground.tres").read_text()
     ov = (out / "tilesets" / "water-one" / "overlay.tres").read_text(encoding="utf-8")

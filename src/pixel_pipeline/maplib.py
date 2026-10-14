@@ -1568,12 +1568,9 @@ def _export_godot3d(doc: MapDoc, out: Path, style: assets.Style, look=None) -> l
     from .hd2d import make_hd2d
     d = doc.copy().diorama
     d.units = []
-    files = make_hd2d(out, {}, d, name=d.name, iso=False, tile_px=style.tile, ppu=style.ppu)
-    if look is not None:                  # generated sets: their plain tile tops the terrain's blocks
-        for name in set(d.terrain.ravel()):
-            p = out / "map" / "tex" / f"{name}_top.png"
-            if p.exists() and (name in look.sets or any(s.base == name for s in look.sets.values())):
-                Image.fromarray(np.ascontiguousarray(look.plain(name)[0][0])).save(p)
+    # generated sets texture the blocks (tops: a terrain's own set, variants per cell; walls)
+    files = make_hd2d(out, {}, d, name=d.name, iso=False, tile_px=style.tile, ppu=style.ppu,
+                      tiles=look if look is not None else False)
     (out / "map" / "map.json").write_text(json.dumps(doc.to_dict(), indent=1), encoding="utf-8")
     files += install_board_extras(out, style.tile)
     for rel, text in (("view.tscn", VIEW_TSCN), ("view.gd", VIEW_GD),

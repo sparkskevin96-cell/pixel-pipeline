@@ -144,3 +144,63 @@ def test_fight_damage_turns_and_victory(tmp_path, dog_hp):
         assert "END 2 " in log
     else:
         assert "END 1 Blue wins!" in log                          # death, then victory
+
+
+def test_board_textures_neo_fallback(tmp_path):
+    from pixel_pipeline import neo_terrain as nt
+    out = tmp_path / "proj"
+    make_hd2d(out, {"dog": fake_sheet(tmp_path / "dog.png"), "knight": fake_sheet(tmp_path / "knight.png")},
+              iso=False, tiles=False)
+    tex = out / "map" / "tex"
+    info = json.loads((tex / "terrain.json").read_text())
+    assert set(info["terrains"]) == {"stone", "cobble", "planks", "grass", "dirt", "water"}
+    for name, e in info["terrains"].items():
+        assert e["source"] == "built-in" and e["variants"] >= 2
+        tops = np.asarray(Image.open(tex / f"{name}_tops.png"))
+        assert tops.shape == (32, 32 * e["variants"], 4)
+        n = np.asarray(Image.open(tex / f"{name}_tops_n.png"))
+        assert n.shape == tops.shape and np.abs(n[..., 2].astype(int) - 128).min() >= 0
+        assert (tex / f"{name}_side_n.png").exists()
+    assert (tex / "grass_lip.png").exists() and "lip" not in info["terrains"]["water"]
+    lip = np.asarray(Image.open(tex / "grass_lip.png"))
+    assert lip[0, :, 3].all() and not lip[-1, :, 3].all()        # lit edge, drips, then see-through
+    # every procedural texture wraps and is made of few colours, no salt-and-pepper noise
+    for name in ("grass", "dirt", "sand", "snow", "stone", "cobble", "planks"):
+        top, _ = nt.paint_top(name, 32, 1)
+        a = top[..., :3].astype(int)
+        assert len(np.unique(a.reshape(-1, 3), axis=0)) <= 9, name
+        seam = np.abs(a[:, 0] - a[:, -1]).sum(-1).mean()
+        inner = np.abs(np.diff(a, axis=1)).sum(-1).mean()
+        assert seam <= inner * 2.5 + 5, name
+    nmap = nt.tile_normals(*nt.paint_top("cobble", 32, 0), 1.6)
+    assert nmap[..., 0].std() > 8                                # the stones have relief
+
+
+def test_board_uses_the_projects_tilesets(tmp_path):
+    from pixel_pipeline import assets, tilegen as tg
+    proj = assets.create_project("Board", type="topdown-rpg")
+    grass = tg.builtin_swatch("grass", 16).texture
+    for terrain in ("dirt", "cliff", "wall", "fence"):
+        gs = tg.build_tileset(terrain, tg.builtin_swatch(terrain, 16).texture, project=proj, base=grass)
+        tg.save_tileset(gs, f"{terrain} set", project=proj)
+    d = harbour()
+    d.terrain[6:8, 0:3] = "dirt"
+    d.units = []
+    out = tmp_path / "b"
+    make_hd2d(out, {}, d, iso=False, tile_px=16, tiles=proj)
+    tex = out / "map" / "tex"
+    info = json.loads((tex / "terrain.json").read_text())["terrains"]
+    assert info["dirt"]["source"] == "dirt-set" and info["planks"]["source"] == "fence-set"
+    assert info["grass"]["source"] == "built-in"                 # no grass set: the neo look
+    look = tg.MapLook.for_project(proj, tile=16)
+    want = np.concatenate(look.plain("dirt")[0], 1)
+    assert (np.asarray(Image.open(tex / "dirt_tops.png")) == want).all()
+    from pixel_pipeline.neo_terrain import neo_ramp
+    side = np.asarray(Image.open(tex / "cobble_side.png"))[..., :3].reshape(-1, 3)
+    wall = {tuple(c) for c in neo_ramp(np.asarray(Image.open(look.sets["wall"].asset.folder / "texture.png"))).tolist()}
+    assert {tuple(c) for c in side.tolist()} <= wall             # stone tiers in the wall set's colours
+    if GODOT:
+        run = subprocess.run([GODOT, "--headless", "--path", str(out), "res://real3d.tscn", "--quit-after", "30"],
+                             capture_output=True, text=True, timeout=180)
+        log = run.stdout + run.stderr
+        assert "SCRIPT ERROR" not in log and "ERROR" not in log, log[-2000:]

@@ -557,34 +557,84 @@ func _sprite_lighting(mat: ShaderMaterial) -> void:
 	var amb := _c(L.get("ambient"), Color(0.45, 0.38, 0.62)) * float(L.get("ambient_energy", 0.55))
 	mat.set_shader_parameter("lift", Vector3(amb.r, amb.g, amb.b) * float(L.get("lift", 0.3)))
 
+var tex_info := {}       # res://map/tex/terrain.json: variants, weights, lips per terrain
+
+func _material(albedo: Texture2D, normal: Texture2D, rough: float, vcol: bool) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_texture = albedo
+	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS
+	m.roughness = rough
+	if normal != null:
+		m.normal_enabled = true
+		m.normal_texture = normal
+		m.normal_scale = 1.0
+	m.vertex_color_use_as_albedo = vcol
+	return m
+
 func _materials() -> Dictionary:
+	# [top, side, lip] per terrain; tops = the variants side by side (_tops.png) when
+	# terrain.json lists them, else the single _top.png repeated per cell (older projects)
+	if FileAccess.file_exists("res://map/tex/terrain.json"):
+		var j = JSON.parse_string(FileAccess.get_file_as_string("res://map/tex/terrain.json"))
+		if j is Dictionary:
+			tex_info = j.get("terrains", {})
 	var mats := {}
 	for name in ["grass", "stone", "cobble", "planks", "dirt", "sand", "water", "snow"]:
-		var top := _tex("res://map/tex/%s_top.png" % name)
+		var info: Dictionary = tex_info.get(name, {})
+		var top: Texture2D = null
+		var top_n: Texture2D = null
+		if info.has("variants"):
+			top = _tex("res://map/tex/%s_tops.png" % name)
+			top_n = _tex("res://map/tex/%s_tops_n.png" % name)
+		if top == null:
+			info = {}
+			top = _tex("res://map/tex/%s_top.png" % name)
 		if top == null:
 			continue
-		var m := StandardMaterial3D.new()
-		m.albedo_texture = top
-		m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS
-		m.roughness = 0.95
-		var s := StandardMaterial3D.new()
-		s.albedo_texture = _tex("res://map/tex/%s_side.png" % name)
-		s.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS
-		s.roughness = 1.0
-		s.albedo_color = Color(0.86, 0.84, 0.9)
-		mats[name] = [m, s]
+		tex_info[name] = info
+		var m := _material(top, top_n, 0.95, false)
+		var s := _material(_tex("res://map/tex/%s_side.png" % name), _tex("res://map/tex/%s_side_n.png" % name), 1.0, true)
+		if not info.has("variants"):
+			s.albedo_color = Color(0.86, 0.84, 0.9)
+		var lip: StandardMaterial3D = null
+		if info.has("lip"):
+			lip = _material(_tex("res://map/tex/" + str(info["lip"])), null, 0.95, false)
+			lip.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			lip.alpha_scissor_threshold = 0.3
+		mats[name] = [m, s, lip]
 	return mats
 
-func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, n: Vector3, uv: Array) -> void:
-	for idx in [[a, uv[0]], [b, uv[1]], [c, uv[2]], [a, uv[0]], [c, uv[2]], [d, uv[3]]]:
+func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, n: Vector3, uv: Array, col: Array = []) -> void:
+	var verts := [[a, uv[0], 0], [b, uv[1], 1], [c, uv[2], 2], [a, uv[0], 0], [c, uv[2], 2], [d, uv[3], 3]]
+	for idx in verts:
 		st.set_normal(n)
 		st.set_uv(idx[1])
+		if not col.is_empty():
+			st.set_color(col[idx[2]])
 		st.add_vertex(idx[0])
+
+func _variant(name: String, c: int, r: int) -> int:
+	# which top variant a cell shows: a hash of the cell, by weight (same every run)
+	var info: Dictionary = tex_info.get(name, {})
+	var w: Array = info.get("weights", [])
+	if w.size() <= 1:
+		return 0
+	var u := fposmod(sin(float(c) * 12.9898 + float(r) * 78.233) * 43758.5453, 1.0)
+	var total := 0.0
+	for x in w:
+		total += float(x)
+	var acc := 0.0
+	for i in w.size():
+		acc += float(w[i]) / total
+		if u < acc:
+			return i
+	return w.size() - 1
 
 func _build_terrain() -> void:
 	var mats := _materials()
 	var tops := {}
 	var sides := {}
+	var lips := {}
 	var used := {}
 	var body := StaticBody3D.new()
 	add_child(body)
@@ -599,8 +649,16 @@ func _build_terrain() -> void:
 				tops[t].begin(Mesh.PRIMITIVE_TRIANGLES)
 				sides[t] = SurfaceTool.new()
 				sides[t].begin(Mesh.PRIMITIVE_TRIANGLES)
+				lips[t] = SurfaceTool.new()
+				lips[t].begin(Mesh.PRIMITIVE_TRIANGLES)
+			var info: Dictionary = tex_info.get(t, {})
+			var uv_top := [Vector2(c, r), Vector2(c + 1, r), Vector2(c + 1, r + 1), Vector2(c, r + 1)]
+			if info.has("variants"):
+				var nv := float(info["variants"])
+				var v := float(_variant(t, c, r))
+				uv_top = [Vector2(v / nv, 0), Vector2((v + 1.0) / nv, 0), Vector2((v + 1.0) / nv, 1), Vector2(v / nv, 1)]
 			_quad(tops[t], Vector3(c, y, r), Vector3(c + 1, y, r), Vector3(c + 1, y, r + 1), Vector3(c, y, r + 1),
-				Vector3.UP, [Vector2(c, r), Vector2(c + 1, r), Vector2(c + 1, r + 1), Vector2(c, r + 1)])
+				Vector3.UP, uv_top)
 			# walls down to each lower neighbour (or below the water for edges)
 			for nb in [[1, 0], [-1, 0], [0, 1], [0, -1]]:
 				var nc: int = c + nb[0]
@@ -625,8 +683,19 @@ func _build_terrain() -> void:
 				used[t] = true
 				var u0 := 0.0
 				var u1 := 1.0
+				# darker toward the foot of the wall (occlusion); its lit top stays full
+				var foot := clampf(1.0 - 0.16 * (y - ny), 0.6, 0.92)
+				var top_c := Color(1, 1, 1)
+				var foot_c := Color(foot, foot * 0.97, foot * 1.02)
 				_quad(sides[t], p0 + Vector3(0, y, 0), p1 + Vector3(0, y, 0), p1 + Vector3(0, ny, 0), p0 + Vector3(0, ny, 0),
-					n, [Vector2(u0, -y), Vector2(u1, -y), Vector2(u1, -ny), Vector2(u0, -ny)])
+					n, [Vector2(u0, -y), Vector2(u1, -y), Vector2(u1, -ny), Vector2(u0, -ny)], [top_c, top_c, foot_c, foot_c])
+				if info.has("lip"):
+					# the overhang strip: the top's ground hanging over the wall's edge
+					var full := float(info.get("lip_height", 0.5))
+					var lh: float = minf(full, y - ny)
+					var off := n * 0.004
+					_quad(lips[t], p0 + Vector3(0, y, 0) + off, p1 + Vector3(0, y, 0) + off, p1 + Vector3(0, y - lh, 0) + off,
+						p0 + Vector3(0, y - lh, 0) + off, n, [Vector2(u0, 0), Vector2(u1, 0), Vector2(u1, lh / full), Vector2(u0, lh / full)])
 			var shape := CollisionShape3D.new()
 			var box := BoxShape3D.new()
 			box.size = Vector3(1, y + 1.0, 1)
@@ -636,14 +705,18 @@ func _build_terrain() -> void:
 			body.add_child(shape)
 	body.set_meta("terrain", true)
 	for t in tops:
-		for pair in [[tops[t], 0], [sides[t], 1]]:
-			if pair[1] == 1 and not used.has(t):
+		for pair in [[tops[t], 0], [sides[t], 1], [lips[t], 2]]:
+			if pair[1] >= 1 and not used.has(t):
+				continue
+			if pair[1] == 2 and (not mats.has(t) or mats[t][2] == null):
 				continue
 			var st: SurfaceTool = pair[0]
 			st.generate_tangents()
 			var mi := MeshInstance3D.new()
 			mi.mesh = st.commit()
 			mi.material_override = mats[t][pair[1]] if mats.has(t) else null
+			if pair[1] == 2:
+				mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			add_child(mi)
 	# posts under the pier, down into the water
 	for r in rows:
@@ -1700,14 +1773,32 @@ def add_effect(project, name: str, sheet_png, ppu: float = 42.0, loop: bool | No
     return folder
 
 
+def board_look(tiles, tile_px: int):
+    """make_hd2d's tiles= -> a tilegen.MapLook or None (see make_hd2d)."""
+    if tiles is False:
+        return None
+    if tiles is not None and hasattr(tiles, "sets"):
+        return tiles
+    try:
+        from .tilegen import MapLook
+        return MapLook.for_project(tiles, tile=tile_px)
+    except Exception:  # noqa: BLE001 - no project / unreadable sets: the procedural look
+        return None
+
+
 def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str = "HD-2D Tactics",
               iso: bool = True, tile_px: int = 32, ppu: float = 42.0, lighting: str = "sunset",
-              bands: float = 4.0, effects: dict | None = None, place_effects=()) -> list[Path]:
+              bands: float = 4.0, effects: dict | None = None, place_effects=(),
+              tiles=None) -> list[Path]:
     """Write the Godot project: menu, real 3D and fake 3D scenes (and the iso 2D look when
     iso_scene is available). units: {name: sheet.png from turnaround --animate}. lighting: the
     time of day it starts at (LIGHTING: dawn, noon, sunset, night; L cycles them), bands: toon
     steps for sprite lighting (0 = smooth). effects: {name: effect sheet.png};
-    place_effects: [(name, col, row)] looping on the map."""
+    place_effects: [(name, col, row)] looping on the map. tiles: what textures the terrain -
+    None = the current project's saved tilesets at tile_px when it has any (tilegen.MapLook:
+    tops from each terrain's own set with a variant per cell, walls in the cliff set's rock,
+    stone tiers in the wall set's, planks from the fence set), a Project / MapLook = those,
+    False = the procedural neo 16-bit look."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     d = diorama or harbour()
@@ -1724,7 +1815,7 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
     written.append(write_lighting(out, lighting, bands))
     for ename, sheet in (effects or {}).items():
         written.append(add_effect(out, ename, sheet, ppu))
-    write_textures(d, out / "map" / "tex", tile_px)
+    write_textures(d, out / "map" / "tex", tile_px, look=board_look(tiles, tile_px))
     for uname, sheet in units.items():
         written.append(add_unit(out, uname, sheet, ppu))
     (out / "shaders").mkdir(exist_ok=True)

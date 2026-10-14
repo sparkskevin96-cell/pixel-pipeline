@@ -232,6 +232,23 @@ wants terse answers and fixes over polish.
     tilesets/<name>/overlay.tres), tiled (hidden data layer + look layers), json colour.png,
     godot-3d tops all match: Godot's composite = look.render within 1 grey level (test).
     godot-iso and the iso preview still use built-in textures.
+  - Cliffs, paths, 3D terrain (2026-10-13): cliff sets = the 47 blob tiles (lit lip, grass drips,
+    rock to the tile foot) + 36 face tiles (plain, no terrain; foot = 1-tile wall, mid + base = 2,
+    ends W1/E2, phase = column % 3) cut from ONE strip (`CliffArt`, neo_terrain.rock_face in the
+    rock texture's `neo_ramp`; seams are joints so strata run on); `face_cells` places them below
+    open south sides (drop 2-3 -> 1 tile, 4+ -> 2), MapLook layer "cliff_face" (exports: node
+    Cliff_Face); build_tileset(overhang=) = drips + moss. Swatch prompts: MATERIAL words lead
+    (weighted) + negatives (dropped if the user's words ask for them); `colour_miss` (COLOUR_RULES:
+    mean HSV + green/blue share) redraws up to `retries` (2) with a colour word, Swatch.colour_miss.
+    The GPU dirt (forest floor) and water (swampy) swatches of 2026-10-13 fail it; cliff/fence pass.
+    `neo_terrain.py`: neo 16-bit procedural tops/sides (diorama.textures, iso, editor built-ins)
+    and `write_board_textures`: <t>_tops.png variants + _tops_n/_side_n (normals.from_drawing on
+    a 3x3 copy) + <t>_lip.png overhang + terrain.json; board.gd picks a variant per cell (hash by
+    weight), NEAREST + normal maps, vertex-colour wall AO, alpha-scissor lip quads. make_hd2d(tiles=
+    None current project's sets | Project | MapLook | False): tops from a terrain's OWN set, walls
+    in the cliff set's rock, stone tiers in the wall set's, planks from the fence set; godot-3d
+    passes the map's look. Shots: Pictures/PixelPipeline/terrain_before_after.png,
+    cliff_path_preview.png.
 - **App layout (2026-10-12, Kevin: "make it feel intuitive")**: tabs in the order you make a
   game: `1 Characters` (ModelStudio + Character Library list on the left; Kind person/animal/
   object, Size words not numbers, Name, Add to library = rig + all clips x16 + normals at the

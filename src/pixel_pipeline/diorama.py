@@ -3,7 +3,7 @@
 
     d = harbour(seed=0)        # stone tiers, stairs, a cobble quay, a wooden pier over water
     d.save("map.json")         # what the Godot scenes read
-    tex = textures(d)          # {terrain: (top RGBA, side RGBA)} seamless pixel-art tiles
+    tex = textures(d)          # {terrain: (top RGBA, side RGBA)} seamless neo 16-bit tiles
 
 Cells: height in levels (0 = water level; one level = half a tile tall, like Triangle
 Strategy's steps), a terrain name, and props (crates, barrels, torches, posts, fences).
@@ -17,7 +17,6 @@ from pathlib import Path
 
 import numpy as np
 
-from .maptiles import builtin_texture
 
 TERRAINS = ("grass", "stone", "cobble", "planks", "dirt", "sand", "water", "snow")
 WALKABLE = {"grass", "stone", "cobble", "planks", "dirt", "sand", "snow"}
@@ -194,83 +193,24 @@ def harbour(cols: int = 18, rows: int = 14, seed: int = 0) -> Diorama:
 
 # --------------------------------------------------------------------------- textures
 
-def _planks(size: int = 32, seed: int = 0) -> np.ndarray:
-    """Weathered wooden boards running one way, with dark gaps and nail dots (seamless)."""
-    rng = np.random.default_rng(seed + 7)
-    ramp = np.array([[74, 48, 30], [102, 68, 42], [128, 88, 56], [152, 108, 70], [176, 132, 90]])
-    board = max(4, size // 6)
-    img = np.zeros((size, size, 3), np.float32)
-    yy, xx = np.mgrid[0:size, 0:size]
-    for b in range(0, size, board):
-        tone = rng.uniform(1.2, 3.2)
-        grain = np.sin((xx / size) * 2 * np.pi * rng.integers(2, 5) + rng.uniform(0, 6)) * 0.5
-        rows = (yy >= b) & (yy < b + board)
-        img[rows] = (tone + grain + rng.normal(0, 0.25, (size, size)))[rows][..., None]
-    idx = np.clip(np.rint(img[..., 0]), 0, 4).astype(int)
-    out = ramp[idx].astype(np.uint8)
-    out[(yy % board) == board - 1] = ramp[0]                       # gaps between boards
-    for b in range(0, size, board):                                # nails
-        for x in (size // 4, 3 * size // 4):
-            out[min(size - 1, b + board // 2), x] = (52, 40, 34)
-    return np.dstack([out, np.full((size, size), 255, np.uint8)])
-
-
-def _cobble(size: int = 32, seed: int = 0) -> np.ndarray:
-    """Rounded paving stones with dark mortar (seamless)."""
-    rng = np.random.default_rng(seed + 11)
-    n = 9
-    pts = rng.random((n, 2)) * size
-    pts = np.concatenate([pts + [dx, dy] for dx in (-size, 0, size) for dy in (-size, 0, size)])
-    yy, xx = np.mgrid[0:size, 0:size]
-    d = np.sqrt((xx[..., None] - pts[:, 0]) ** 2 + (yy[..., None] - pts[:, 1]) ** 2)
-    srt = np.sort(d, -1)
-    cell = np.argmin(d, -1) % n
-    edge = (srt[..., 1] - srt[..., 0]) < 1.6
-    ramp = np.array([[66, 64, 70], [96, 94, 102], [122, 120, 128], [148, 146, 152], [176, 174, 180]])
-    tone = (rng.integers(1, 4, n)[cell] + (srt[..., 0] < size / 8)).clip(0, 4)
-    out = ramp[tone].astype(np.uint8)
-    out[edge] = ramp[0]
-    return np.dstack([out, np.full((size, size), 255, np.uint8)])
-
-
-def _side(top: np.ndarray, name: str, size: int) -> np.ndarray:
-    """The texture for a block's sides: stone walls under stone/cobble/grass, dirt under dirt,
-    wooden beams under planks."""
-    if name == "planks":
-        return np.ascontiguousarray(np.rot90(_planks(size, 3)))
-    if name in ("dirt", "sand"):
-        return builtin_texture("dirt", size, 1)
-    wall = _cobble(size, 5)
-    wall[..., :3] = (wall[..., :3].astype(np.float32) * 0.82).astype(np.uint8)
-    return wall
-
-
 def textures(d: Diorama | None = None, size: int = 32, seed: int = 0) -> dict:
-    """{terrain: (top RGBA, side RGBA)} for every terrain the map uses (all, if no map)."""
+    """{terrain: (top RGBA, side RGBA)} for every terrain the map uses (all, if no map): the
+    neo 16-bit procedural look (neo_terrain: hue-shifted ramps, lit stones, boards and tufts;
+    rock strata under soft ground, ashlar under stone, boards under planks)."""
+    from .neo_terrain import paint_side, paint_top
     names = sorted(set(d.terrain.ravel())) if d is not None else list(TERRAINS)
-    out = {}
-    for name in names:
-        if name == "planks":
-            top = _planks(size, seed)
-        elif name == "cobble":
-            top = _cobble(size, seed)
-        else:
-            top = builtin_texture(name, size, seed)
-        out[name] = (top, _side(top, name, size))
-    return out
+    return {name: (paint_top(name, size, seed)[0], paint_side(name, size, seed)[0]) for name in names}
 
 
-def write_textures(d: Diorama, folder, size: int = 32, seed: int = 0) -> dict:
-    """Save <terrain>_top.png / <terrain>_side.png; returns {terrain: {"top": name, "side": name}}."""
-    from PIL import Image
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
-    names = {}
-    for name, (top, side) in textures(d, size, seed).items():
-        Image.fromarray(top).save(folder / f"{name}_top.png")
-        Image.fromarray(side).save(folder / f"{name}_side.png")
-        names[name] = {"top": f"{name}_top.png", "side": f"{name}_side.png"}
-    return names
+def write_textures(d: Diorama, folder, size: int = 32, seed: int = 0, look=None) -> dict:
+    """Save the board's textures (neo_terrain.write_board_textures: <terrain>_top.png /
+    _side.png as before, plus per-cell top variants, normal maps, wall-top overhangs and
+    terrain.json). look: a tilegen.MapLook whose saved tilesets texture the terrain (None =
+    procedural). Returns {terrain: {"top": name, "side": name}}."""
+    from .neo_terrain import write_board_textures
+    names = sorted(set(d.terrain.ravel()))
+    write_board_textures(names, folder, size, seed, look)
+    return {name: {"top": f"{name}_top.png", "side": f"{name}_side.png"} for name in names}
 
 
 def path_cost(d: Diorama, start: tuple[int, int], move: int = 4, jump: int = 2) -> dict:
