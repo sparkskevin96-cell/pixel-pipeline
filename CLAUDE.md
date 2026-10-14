@@ -202,7 +202,16 @@ wants terse answers and fixes over polish.
   init_*, key_*, keys.json with the camera: reused, so add_character_animations/mocap/springs
   bend the same drawings, no GPU). Knight (Neo16 test, knight-hybrid): 16 dirs ~4 min GPU +
   ~100 s bending. Limits: SDXL moving a part (sword) vs the model -> it follows the wrong bone
-  in big moves; death (lying) foreshortens. Shots: Pictures/PixelPipeline/hybrid_*.
+  in big moves; death (lying) foreshortens. Shots: Pictures/PixelPipeline/hybrid_* (_v1 = first).
+  v2 (Kevin: S good, diagonals soft, keys disagree): `draw_keys_paired` (default) draws S first,
+  then every view as INPAINT of the right panel of [S key | outlined blocky render] (back views
+  [S | E or W | render], ~768/640 px panels); CANDIDATES (outlined init 0.6/0.72; outlined beat
+  plain everywhere) scored IoU + sharpness - Lab-histogram colour distance to S - off-model
+  share (`trim_outside` drops pixels >2 px off the model). `model_words` drops held things from
+  the words (the init shows what the model has); `absent=("shield",)` -> negative (SDXL adds a
+  shield to any knight; nothing detects that the model lacks one). Torso turned > 45 deg out of
+  the drawing (death lying) -> `model_frame`: model points coloured from the drawings, majority
+  filtered. Knight colour distance to S 0.33 -> 0.24 mean.
 - **UI kit (2026-10-13)** (`uikit.py` + `ui/uikit_tab.py`, Portraits, cards & effects -> UI kit):
   asset kind "ui" (<project>/ui, in assets.KINDS). Procedural, no GPU: THEMES wood/stone/
   parchment/metal/crystal/sci-fi; Style outline/shading/detail/palette shape every piece; drawn

@@ -94,22 +94,33 @@ def test_drawn_animation_with_the_fake_comfyui(comfy, tmp_path):  # noqa: F811
     s = settings_for("person", width=W, height=H, colors=12)
     s.outline_style = "selout"
     keys = tmp_path / "keys"
-    anim, info = dr.drawn_animation(rigged, "a robot", s, directions=4, frames=3,
+    anim, info = dr.drawn_animation(rigged, "a robot with a shield", s, directions=4, frames=3,
                                     animations=["wave", "fall"], seed=7, style=Style(),
                                     client=client, folder=keys, points=40_000, retries=0)
-    assert len(fake.prompts) == 4                      # one drawing per direction
+    assert len(fake.prompts) == 4 * len(dr.CANDIDATES)  # candidates per direction
     ks = [n for n in fake.prompts[0].values() if n["class_type"] == "KSampler"][0]["inputs"]
     assert ks["seed"] == 7 and 0 < ks["denoise"] < 1   # img2img over the model's render
+    first = fake.prompts[0]                            # S, the reference: plain img2img
+    assert not any(n["class_type"] == "LoadImageMask" for n in first.values())
+    for wf in fake.prompts[len(dr.CANDIDATES):]:       # the rest: inpaint beside the reference
+        assert any(n["class_type"] == "LoadImageMask" for n in wf.values())
+        img = next(n for n in wf.values() if n["class_type"] == "LoadImage")["inputs"]["image"]
+        w, h = fake.uploads[img].size
+        assert w in (2 * h, 3 * h)                     # [reference(s) | this view]
+    assert set(info["keys_report"]) == {"E", "S", "W", "N"}
+    assert info["keys_report"]["N"]["refs"] == ["S", "E"]   # back view: front + side
     texts = [n["inputs"]["text"] for wf in fake.prompts for n in wf.values()
              if n["class_type"] == "CLIPTextEncode" and n.get("_meta", {}).get("title") == "Prompt"]
     assert any("facing right" in t for t in texts) and any("back view" in t for t in texts)
+    assert any("turnaround" in t for t in texts)
+    assert not any("shield" in t for t in texts)       # words never add held things
     assert anim.directions == ["E", "S", "W", "N"] and anim.frames == 3
     assert [a.name for a in anim.actions] == ["wave", "fall"]
     pal = anim.sprites[0][0][0].palette
     for sp in anim.flat():
         assert sp.rgba.shape == (H, W, 4) and sp.normal is not None
         assert sp.palette is pal                       # one palette, no new colours
-    assert (keys / "drawn_S.png").exists() and (keys / "key_S.png").exists()
+    assert (keys / "drawn_S_o60.png").exists() and (keys / "key_S.png").exists()
     assert set(info["ious"]) == {"E", "S", "W", "N"}
     written = write_animated(anim, tmp_path / "sheet.png", aseprite=True, godot=True, normals=True)
     meta = json.loads((tmp_path / "sheet.json").read_text())
@@ -119,7 +130,7 @@ def test_drawn_animation_with_the_fake_comfyui(comfy, tmp_path):  # noqa: F811
     again, _ = dr.drawn_animation(rigged, "a robot", s, directions=4, frames=3,
                                   animations=["wave", "fall"], seed=7, style=Style(),
                                   client=client, folder=keys, points=40_000, retries=0)
-    assert len(fake.prompts) == 4                      # drawings reused: no GPU
+    assert len(fake.prompts) == 4 * len(dr.CANDIDATES)  # drawings reused: no GPU
     assert np.array_equal(again.sprites[0][1][0].rgba, anim.sprites[0][1][0].rgba)
 
 
@@ -146,3 +157,41 @@ def test_library_render_sheets_drawn(comfy, tmp_path, monkeypatch):  # noqa: F81
     assert library.is_drawn(ch)
     library.render_sheets(rigged, out, "person", "normal", frames=2, drawn=True, prompt="a robot")
     assert len(fake.prompts) == drew                   # kept drawings, same scale
+
+
+def test_model_words_drop_held_things():
+    assert dr.model_words("an armored knight in steel plate armour with a red cape, sword and "
+                          "shield") == "an armored knight in steel plate armour with a red cape"
+    assert dr.model_words("a wizard holding a glowing staff, blue robes") == "a wizard, blue robes"
+    assert dr.model_words("a swordsman in blue") == "a swordsman in blue"
+
+
+def test_consistency_scores():
+    rgb = np.zeros((8, 8, 3), np.uint8)
+    rgb[:, :4] = (200, 30, 30)
+    rgb[:, 4:] = (30, 30, 200)
+    m = np.ones((8, 8), bool)
+    assert dr.colour_distance(rgb, m, rgb, m) == 0
+    other = np.full_like(rgb, (30, 200, 30))
+    assert dr.colour_distance(rgb, m, other, m) == pytest.approx(1.0)
+    flat = np.full_like(rgb, 128)
+    assert dr.sharpness(rgb, m) > dr.sharpness(flat, m) == 0
+
+
+def test_lying_down_uses_the_model_frame(robot):
+    rig, body, rest, poses, cams = robot
+    torso = rig.names.index("root")
+    fall = [c.name for c in rig.clips].index("slide")
+    assert dr.turned_away(rest, rest, cams[1], torso) == pytest.approx(0, abs=1e-6)
+    assert dr.turned_away(rest, poses[fall][2], cams[1], torso) < 1   # sliding stays upright
+    idx, normals = dr.model_frame(body, rest, cams[1], np.full(len(body.bind), 2, np.int32))
+    view = dr.rest_view(body, cams[1], rest)
+    assert dr.iou(idx >= 0, view.mask) > 0.9 and set(np.unique(idx)) <= {-1, 2}
+
+
+def test_majority_calms_speckle():
+    idx = np.full((6, 6), 1, np.int32)
+    idx[2, 3] = 2                                      # one stray colour
+    idx[0, 0] = -1
+    out = dr.majority(idx)
+    assert out[2, 3] == 1 and out[0, 0] == -1 and (out[idx >= 0] == 1).all()

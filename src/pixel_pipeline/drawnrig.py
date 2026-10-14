@@ -75,6 +75,36 @@ KEY_PROMPT = ("pixel art sprite of {prompt}, single character, full body, standi
 KEY_NEGATIVE = ("multiple characters, multiple views, sprite sheet, cropped, out of frame, cut off, "
                 "busy background, scenery, cast shadow, ground, frame, border, text, watermark, "
                 "3d render, photo, blurry, smooth gradient")
+# reference pairing: the drawn reference on the left, the new view painted on the right
+PAIR_PROMPT = ("character turnaround sheet, {n} views of the same character side by side, identical "
+               "design, same armour, same colours, same proportions, pixel art sprite of {prompt}, "
+               "full body, standing, {views}, seen from slightly above, plain white background, "
+               "game asset, clean outline, crisp readable pixel shapes")
+PAIR_NEGATIVE = ("different characters, different outfit, different colours, mismatched design, "
+                 "cropped, out of frame, cut off, busy background, scenery, cast shadow, ground, "
+                 "frame, border, text, watermark, 3d render, photo, blurry, smooth gradient")
+PANEL_WORDS = {"S": "front view", "E": "side view facing right", "W": "side view facing left"}
+# things a character holds or wears that the image model happily adds when the words name them;
+# the init picture already shows the ones the 3D model has
+HELD = ("shield", "buckler", "sword", "greatsword", "bow", "crossbow", "quiver", "staff", "wand",
+        "axe", "spear", "dagger", "knife", "hammer", "mace", "lance", "halberd", "book", "tome",
+        "lantern", "torch", "scythe", "whip", "flail", "club", "orb")
+
+
+def model_words(prompt: str, held=HELD) -> str:
+    """The prompt without held things ("..., sword and shield" -> "..."): the drawing takes those
+    from the model's picture, so words can't add a shield the model doesn't have."""
+    import re
+    nouns = "|".join(held)
+    pat = re.compile(r"(\s*,\s*|\s+and\s+|\s+with\s+|\s+holding\s+|\s+wielding\s+)"
+                     r"(an?\s+|the\s+|his\s+|her\s+)?([\w-]+\s+)?(?:" + nouns + r")s?\b", re.I)
+    out = prompt
+    while True:
+        new = pat.sub("", out)
+        if new == out:
+            break
+        out = new
+    return re.sub(r"\s+", " ", out).strip(" ,")
 
 
 def direction_words(name: str) -> tuple[str, str]:
@@ -537,7 +567,8 @@ def _pose_points(body: Body, mats: np.ndarray, idx: np.ndarray):
 def init_picture(rig: Rig, cam: Camera, region: tuple[float, float, float], pose: Pose,
                  px: int = 384,
                  points: int = 2_000_000, light: float = 0.25, seed: int = 0,
-                 out: int = 1024, blocky: bool = False, cloud=None) -> Image.Image:
+                 out: int = 1024, blocky: bool = False, cloud=None,
+                 view: "RestView | None" = None, outline: bool = False) -> Image.Image:
     """The rest pose big and nearly flat, as the SDXL init: the frame square `region` (x0, y0,
     size in frame px) at out x out, white background. blocky: already on the frame's pixel grid
     (each frame pixel an out/size block, hard edges), so SDXL draws pixels on that grid and the
@@ -561,12 +592,41 @@ def init_picture(rig: Rig, cam: Camera, region: tuple[float, float, float], pose
         cov = cv2.resize(a[..., 0], (size, size), interpolation=cv2.INTER_AREA)
         rgb = pre / np.maximum(cov, 1e-6)[..., None]
         small = np.dstack([np.clip(rgb, 0, 255), np.where(cov >= 0.5, 255, 0)]).astype(np.uint8)
+        if outline:
+            small = _outlined(small, view, region)
         img = Image.fromarray(small, "RGBA").resize((out, out), Image.NEAREST)
     else:
         img = Image.fromarray(rgba, "RGBA").resize((out, out), Image.LANCZOS)
     canvas = Image.new("RGBA", (out, out), (255, 255, 255, 255))
     canvas.alpha_composite(img)
     return canvas.convert("RGB")
+
+
+def _outlined(small: np.ndarray, view: "RestView | None", region) -> np.ndarray:
+    """A pixel-art style init: dark edge pixels on the silhouette and where the depth jumps
+    (an arm in front of the body), so SDXL reads clean separate shapes."""
+    out = small.copy()
+    on = out[..., 3] > 0
+    pad = np.pad(on, 1)
+    edge = on & ~(pad[:-2, 1:-1] & pad[2:, 1:-1] & pad[1:-1, :-2] & pad[1:-1, 2:])
+    if view is not None:
+        x0, y0, size = (int(v) for v in region)
+        H, W = view.mask.shape
+        d = np.full((size, size), np.inf)
+        ys, xs = np.mgrid[0:size, 0:size]
+        fy, fx = ys + y0, xs + x0
+        ok = (fy >= 0) & (fy < H) & (fx >= 0) & (fx < W)
+        d[ys[ok], xs[ok]] = np.where(view.mask[fy[ok], fx[ok]], view.depth[fy[ok], fx[ok]], np.inf)
+        far = np.zeros_like(on)
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nb = np.roll(d, (dy, dx), (0, 1))
+            both = np.isfinite(d) & np.isfinite(nb)
+            far |= both & (np.where(both, d - np.where(both, nb, 0), 0) > 4.0)   # behind a nearer part
+        edge |= far & on
+    rgb = out[..., :3].astype(np.float32)
+    rgb[edge] = rgb[edge] * 0.3 + np.array([20, 16, 28]) * 0.7
+    out[..., :3] = rgb.astype(np.uint8)
+    return out
 
 
 def surface_cloud(rig: Rig, pose: Pose, points: int = 2_000_000, seed: int = 0):
@@ -623,6 +683,46 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
     return float((a & b).sum()) / max(1, int((a | b).sum()))
 
 
+def colour_histogram(rgb: np.ndarray, mask: np.ndarray, bins: int = 8) -> np.ndarray:
+    """Normalised Lab histogram of the masked pixels (L 0-100, a/b -48..48)."""
+    from .color import rgb_to_lab
+    if not mask.any():
+        return np.zeros(bins ** 3)
+    lab = rgb_to_lab(rgb[mask].astype(np.float32))
+    lab = np.clip(lab, (0, -47.9, -47.9), (99.9, 47.9, 47.9))     # saturated colours: edge bins
+    h, _ = np.histogramdd(lab, bins=(bins, bins, bins),
+                          range=((0, 100), (-48, 48), (-48, 48)))
+    return h.reshape(-1) / max(1.0, h.sum())
+
+
+def colour_distance(a_rgb, a_mask, b_rgb, b_mask) -> float:
+    """0 = same colours in the same amounts, 1 = nothing in common (total variation of the Lab
+    histograms): how far a key drawing's colours drift from the reference's."""
+    return 0.5 * float(np.abs(colour_histogram(a_rgb, a_mask) - colour_histogram(b_rgb, b_mask)).sum())
+
+
+def sharpness(rgb: np.ndarray, mask: np.ndarray) -> float:
+    """Mean lightness step between neighbouring pixels inside the sprite: crisp, readable
+    shapes score high, soft muddy drawings low."""
+    from .color import rgb_to_lab
+    L = rgb_to_lab(rgb.astype(np.float32))[..., 0]
+    sx = mask[:, 1:] & mask[:, :-1]
+    sy = mask[1:] & mask[:-1]
+    steps = np.concatenate([np.abs(np.diff(L, axis=1))[sx], np.abs(np.diff(L, axis=0))[sy]])
+    return float(steps.mean()) if len(steps) else 0.0
+
+
+def trim_outside(prep, model_mask: np.ndarray, reach: int = 2):
+    """Remove drawn pixels more than `reach` px outside the model's silhouette (a shield or a
+    plume the model doesn't have would hang off nothing). Returns (prep, share removed)."""
+    import cv2
+    near = cv2.dilate(model_mask.astype(np.uint8), np.ones((2 * reach + 1,) * 2, np.uint8)) > 0
+    out = prep.mask & ~near
+    share = float(out.sum()) / max(1, int(prep.mask.sum()))
+    prep.mask = prep.mask & near
+    return prep, share
+
+
 def _say(progress):
     return progress or (lambda t: None)
 
@@ -658,6 +758,166 @@ class KeySet:
     ious: list[float]
     seeds: list[int]
     mirrored: list[bool]
+    report: dict = field(default_factory=dict)   # per direction: chosen candidate + scores
+
+
+REFERENCE = "S"                    # drawn first; every other direction copies its design
+# (init: o = outlined / p = plain, denoise) tried per view; on the knight the outlined init won
+# every direction over a plain one (sharper), 0.72 most diagonals, 0.6 the reference and backs
+CANDIDATES = (("o", 0.6), ("o", 0.72))
+
+
+def _panel(sprite_rgba: np.ndarray, mask: np.ndarray, y0: int, size: int, k: int) -> Image.Image:
+    """A reference key drawing (frame pixels) as a size x size panel centred on it, at the
+    target's rows (same baseline), each pixel a k x k block on white."""
+    ys, xs = np.nonzero(mask)
+    cx = (xs.min() + xs.max() + 1) / 2
+    x0 = int(round(cx - size / 2))
+    H, W = mask.shape
+    out = np.full((size, size, 3), 255, np.uint8)
+    yy, xx = np.mgrid[0:size, 0:size]
+    fy, fx = yy + y0, xx + x0
+    ok = (fy >= 0) & (fy < H) & (fx >= 0) & (fx < W)
+    on = np.zeros((size, size), bool)
+    on[yy[ok], xx[ok]] = mask[fy[ok], fx[ok]]
+    out[on] = sprite_rgba[(yy + y0)[on], (xx + x0)[on], :3]
+    return Image.fromarray(out).resize((size * k, size * k), Image.NEAREST)
+
+
+def _side_reference(angle: float) -> str:
+    """For a back-facing view: the side view nearest it (E for the right half, W for the left)."""
+    return "E" if (angle >= 270.0 or angle < 90.0) else "W"
+
+
+def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestView], rest: Pose,
+                     prompt: str, settings, *, seed: int = 1234, style=None, client=None,
+                     folder: Path | None = None, reuse: bool = True, candidates=CANDIDATES,
+                     reference: str = REFERENCE, drop_held: bool = True, absent=(),
+                     progress=None) -> KeySet:
+    """Key drawings that agree with each other: the reference direction (S) is drawn first over
+    the model (img2img on the frame grid); every other direction is painted on a canvas
+    [reference | this direction's model render] (back views: [front | side | render]) where
+    only the right panel is repainted (inpaint), so the left panels act as the design sheet.
+    Each direction tries `candidates` (init style, denoise) and keeps the best by silhouette
+    IoU, sharpness, colour distance to the reference and pixels drawn off the model.
+    absent: things the model doesn't have (e.g. "shield"): kept out by the negative prompt (the
+    image model adds a shield to any knight; nothing here can see that the model has none)."""
+    from .assets import project_style, with_style
+    from .generate import generate_images
+    from .pipeline import finish, resolve_palette
+    from .pixelclean import clean_sprite
+    from .settings import Settings
+    say = _say(progress)
+    n = len(cams)
+    names = direction_names(n)
+    W, H = cams[0].width, cams[0].height
+    st = style if style is not None else project_style()
+    words = model_words(prompt) if drop_held else prompt
+    folder = Path(folder) if folder else None
+    if folder:
+        folder.mkdir(parents=True, exist_ok=True)
+    s_plain = Settings(**{**settings.to_dict(), "outline": False})
+    outline_style = settings.outline_style if settings.outline else "none"
+    preps: dict = {}
+    keyrgba: dict = {}
+    report: dict = {}
+    cloud = None
+    ref = reference if reference in names else names[0]
+
+    def order_key(k):
+        d, a = names[k], cams[k].angle
+        if d == ref:
+            return (0, 0)
+        if d in ("E", "W"):
+            return (1, k)
+        return (3 if 180.0 < a < 360.0 else 2, k)
+
+    for k in sorted(range(n), key=order_key):
+        d = names[k]
+        a = cams[k].angle
+        back = 180.0 < a < 360.0
+        refs = []
+        if d != ref:
+            refs = [ref]
+            side = _side_reference(a)
+            if back and side in keyrgba and side != d:
+                refs.append(side)
+        panels = len(refs) + 1
+        target = 1024 if panels == 1 else (768 if panels == 2 else 640)
+        region, kpx = grid_region(views[k], target)
+        P = region[2] * kpx
+        view_words, view_neg = direction_words(d)
+        if panels == 1:
+            text, neg = with_style(KEY_PROMPT.format(prompt=words, view=view_words),
+                                   f"{KEY_NEGATIVE}, {view_neg}", st, "character")
+        else:
+            left = ", ".join(f"{'left' if i == 0 else 'middle'}: {PANEL_WORDS.get(r, r)}"
+                             for i, r in enumerate(refs))
+            text, neg = with_style(
+                PAIR_PROMPT.format(n="two" if panels == 2 else "three", prompt=words,
+                                   views=f"{left}, right: {view_words}"),
+                PAIR_NEGATIVE, st, "character")
+        if absent:
+            neg = f"{neg}, {', '.join(absent)}"
+        best = None
+        for tag, den in candidates:
+            name = f"drawn_{d}_{tag}{int(round(den * 100))}.png"
+            path = folder / name if folder else None
+            if path is not None and reuse and path.exists():
+                drawing = Image.open(path).convert("RGB")
+            else:
+                if cloud is None:
+                    cloud = surface_cloud(rig, rest)
+                init = init_picture(rig, cams[k], region, rest, out=P, blocky=True, cloud=cloud,
+                                    view=views[k], outline=tag == "o")
+                canvas = Image.new("RGB", (P * panels, P), "white")
+                for i, r in enumerate(refs):
+                    canvas.paste(_panel(keyrgba[r], keyrgba[r][..., 3] > 0, region[1], region[2],
+                                        kpx), (i * P, 0))
+                canvas.paste(init, ((panels - 1) * P, 0))
+                if folder:
+                    canvas.save(folder / f"init_{d}_{tag}.png")
+                mask = None
+                if panels > 1:
+                    mask = np.zeros((P, P * panels), np.float32)
+                    mask[:, (panels - 1) * P:] = 1
+                if client is None:
+                    pace(say=say)
+                say(f"Drawing it facing {d} ({'over ' + ' + '.join(refs) if refs else 'reference'}, "
+                    f"denoise {den})...")
+                (drawing, _), = generate_images(text, neg, client=client, seed=seed, count=1,
+                                                init_image=canvas, denoise=den, mask=mask,
+                                                width=P * panels, height=P)
+                drawing = drawing.crop(((panels - 1) * P, 0, panels * P, P))
+                if path is not None:
+                    drawing.save(path)
+            prep = drawing_to_frame(drawing, region, (W, H), settings, kpx)
+            prep, off = trim_outside(prep, views[k].mask)
+            sc_iou = iou(prep.mask, views[k].mask)
+            sharp = sharpness(prep.rgb, prep.mask)
+            dist = (colour_distance(prep.rgb, prep.mask, preps[ref].rgb, preps[ref].mask)
+                    if ref in preps else 0.0)
+            ref_sharp = sharpness(preps[ref].rgb, preps[ref].mask) if ref in preps else sharp
+            score = sc_iou + 0.5 * min(sharp / max(ref_sharp, 1e-6), 1.2) - dist - 2 * off
+            say(f"{d} {tag}{den}: IoU {sc_iou:.2f}, sharp {sharp:.1f}, colour distance "
+                f"{dist:.2f}, off-model {off:.1%} -> {score:.2f}")
+            if best is None or score > best[0]:
+                best = (score, prep, dict(candidate=f"{tag}{den}", iou=sc_iou, sharp=sharp,
+                                          colour_distance=dist, off_model=off, score=score,
+                                          refs=refs))
+        preps[d] = best[1]
+        report[d] = best[2]
+        keyrgba[d] = clean_sprite(finish(preps[d], s_plain, None), outline_style).rgba
+    order = list(names)
+    pixels = np.concatenate([preps[d].rgb[preps[d].mask] for d in order if preps[d].mask.any()])
+    palette = resolve_palette(s_plain, pixels)
+    sprites = [clean_sprite(finish(preps[d], s_plain, palette), outline_style) for d in order]
+    refsp = sprites[order.index(ref)]
+    for d, sp in zip(order, sprites):             # final numbers, on the shared palette
+        report[d]["colour_distance_final"] = colour_distance(
+            sp.rgba[..., :3], sp.indices >= 0, refsp.rgba[..., :3], refsp.indices >= 0)
+    return KeySet(order, sprites, [report[d]["iou"] for d in order], [seed] * n, [False] * n,
+                  report)
 
 
 def draw_keys(rig: Rig, body: Body, cams: list[Camera], views: list[RestView], rest: Pose,
@@ -794,7 +1054,8 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
                     folder=None, reuse: bool = True, points: int = 400_000, clean: bool = True,
                     normals: bool = True, mirror: bool | None = None, key_pose: str = "idle",
                     blocky: bool = True, retries: int = 1, min_iou: float = 0.72,
-                    progress=None) -> tuple[AnimatedSet, dict]:
+                    paired: bool = True, candidates=CANDIDATES, max_turn: float = 45.0,
+                    absent=(), progress=None) -> tuple[AnimatedSet, dict]:
     """A rigged character -> AnimatedSet whose every frame is a key drawing bent by the
     skeleton. settings: converter settings at the frame size (width x height, colours,
     outline). Returns (set, info: keys, ious, seeds, seconds)."""
@@ -829,9 +1090,15 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
     pts, nrm = body.pose(rest.worlds)
     views = [rest_view(body, c, rest, pts, nrm) for c in cams]
     t_keys = time.time()
-    keys = draw_keys(rig, body, cams, views, rest, prompt, settings, seed=seed, denoise=denoise,
-                     style=style, client=client, folder=folder, reuse=reuse, mirror=mirror,
-                     blocky=blocky, retries=retries, min_iou=min_iou, progress=say)
+    if paired:
+        keys = draw_keys_paired(rig, body, cams, views, rest, prompt, settings, seed=seed,
+                                style=style, client=client, folder=folder, reuse=reuse,
+                                candidates=candidates, absent=absent, progress=say)
+    else:
+        keys = draw_keys(rig, body, cams, views, rest, prompt, settings, seed=seed,
+                         denoise=denoise, style=style, client=client, folder=folder, reuse=reuse,
+                         mirror=mirror, blocky=blocky, retries=retries, min_iou=min_iou,
+                         progress=say)
     t_bend = time.time()
     if folder:
         for d, sp in zip(keys.names, keys.sprites):
@@ -841,12 +1108,18 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
     outline = settings.outline_style if settings.outline else "none"
     say("Bending the drawings for every frame…")
     sprites = [[[None] * frames for _ in names] for _ in clips]
+    torso = _torso_node(rig)
+    fallback = 0
     for k, cam in enumerate(cams):
         drawn = glue(body, views[k], cam, rest, keys.sprites[k].indices, palette)
         add_hidden(drawn, body, views[k], rest, colours[k], pts)
         for a, row in enumerate(poses):
             for f, pose in enumerate(row):
-                idx, ncam = bend(drawn, body, pose)
+                if torso is not None and turned_away(rest, pose, cam, torso) > max_turn:
+                    idx, ncam = model_frame(body, pose, cam, colours[k])   # lying down etc.
+                    fallback += 1
+                else:
+                    idx, ncam = bend(drawn, body, pose)
                 if clean:
                     idx = drop_fragments(idx)
                 sp = _sprite(idx, palette, ncam)
@@ -878,10 +1151,81 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
                                       "bending": time.time() - t_bend},
             "ious": dict(zip(keys.names, keys.ious)), "seeds": dict(zip(keys.names, keys.seeds)),
             "mirrored": [n for n, m in zip(keys.names, keys.mirrored) if m],
+            "keys_report": keys.report, "model_frames": fallback,
             "camera": {"scale": cams[0].scale, "ox": cams[0].ox, "oy": cams[0].oy, "width": W,
                        "height": H, "directions": len(names), "elevation": elevation,
                        "key_pose": key_pose}}
     return AnimatedSet(actions, names, sprites), info
+
+
+def _torso_node(rig: Rig) -> int | None:
+    for name in ("chest", "spine", "hips"):
+        if name in rig.names:
+            return rig.names.index(name)
+    return None
+
+
+def turned_away(key: Pose, pose: Pose, cam: Camera, node: int) -> float:
+    """Degrees the torso has turned out of the drawing's plane since the key pose: the larger of
+    how far the camera-facing direction and the body's up direction have tipped (a body lying
+    down ~90; turning on the spot about the vertical, or a lean in the picture plane, is fine
+    for the drawing up to that)."""
+    def rot(w):
+        m = w[node][:3, :3]
+        return m / np.maximum(np.linalg.norm(m, axis=0, keepdims=True), 1e-12)
+    R = rot(pose.worlds) @ rot(key.worlds).T
+    toward = cam.axes()[2]
+    up = np.array([0.0, 1.0, 0.0])
+    tilt = math.degrees(math.acos(np.clip(float(toward @ (R @ toward)), -1, 1)))
+    lie = math.degrees(math.acos(np.clip(float(up @ (R @ up)), -1, 1)))
+    return max(tilt, lie)
+
+
+def model_frame(body: Body, pose: Pose, cam: Camera, point_idx: np.ndarray, sample: int = 250_000):
+    """A frame from the model's own surface coloured with the drawings' palette indices (for
+    poses the drawing can't bend into, e.g. lying down): front surface per pixel, majority
+    colour, no new colours."""
+    W, H = cam.width, cam.height
+    sel = np.nonzero(point_idx >= 0)[0]
+    if len(sel) > sample:
+        sel = sel[:: max(1, len(sel) // sample)]
+    pts, nrm = _pose_points(body, pose.mats, sel)
+    nrm = nrm / np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
+    sx, sy, z = cam.project(pts - pose.shift)
+    ix, iy = np.floor(sx).astype(np.int64), np.floor(sy).astype(np.int64)
+    ok = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
+    lin = iy[ok] * W + ix[ok]
+    z, ci, nrm = z[ok], point_idx[sel][ok], nrm[ok]
+    zmin = np.full(W * H, np.inf)
+    np.minimum.at(zmin, lin, z)
+    front = z <= zmin[lin] + DEPTH_EPS
+    lin, ci, nrm = lin[front], ci[front], nrm[front]
+    count = np.bincount(lin, minlength=W * H)
+    k = int(point_idx.max()) + 2
+    votes = np.bincount(lin * k + ci, minlength=W * H * k).reshape(W * H, k)
+    out = majority(np.where(count >= 2, votes.argmax(1), -1).astype(np.int32).reshape(H, W),
+                   k).reshape(-1)
+    nsum = np.stack([np.bincount(lin, nrm[:, j], W * H) for j in range(3)], -1)
+    nsum /= np.maximum(np.linalg.norm(nsum, axis=1, keepdims=True), 1e-12)
+    return out.reshape(H, W), cam.to_camera(nsum).reshape(H, W, 3)
+
+
+def majority(idx: np.ndarray, k: int | None = None) -> np.ndarray:
+    """Each drawn pixel takes the most common colour of its 3x3 neighbourhood when that colour
+    holds at least 4 of the 9 (calms the speckle of colours sampled off a point cloud)."""
+    H, W = idx.shape
+    k = k or int(idx.max()) + 2
+    votes = np.zeros((H, W, k), np.int16)
+    pad = np.pad(idx, 1, constant_values=-1)
+    yy, xx = np.mgrid[0:H, 0:W]
+    for dy in range(3):
+        for dx in range(3):
+            v = pad[dy:dy + H, dx:dx + W]
+            on = v >= 0
+            np.add.at(votes, (yy[on], xx[on], v[on]), 1)
+    best = votes.argmax(-1)
+    keep = (idx >= 0) & (votes.max(-1) >= 4)
+    return np.where(keep, best, idx).astype(np.int32)
 
 
 def drop_fragments(idx: np.ndarray, share: float = 0.004, least: int = 6,
@@ -924,7 +1268,7 @@ def _sprite(idx: np.ndarray, palette: np.ndarray, ncam: np.ndarray | None = None
 def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None,
                  directions: int | None = None, clips: list[str] | None = None, frames: int = 8,
                  seed: int = 1234, denoise: float = 0.6, kind: str | None = None,
-                 blocky: bool = True,
+                 blocky: bool = True, candidates=CANDIDATES, absent=(),
                  size: str | None = None, client=None, keys_folder=None, reuse: bool = True,
                  progress=None) -> tuple[AnimatedSet, dict, list[Path]]:
     """A library Character (or a rigged .glb + prompt) -> drawn sheets at the library scale of
@@ -961,7 +1305,7 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
                                  frames=frames, animations=clips, elevation=st.elevation,
                                  seed=seed, denoise=denoise, style=st, client=client,
                                  folder=keys_folder, reuse=reuse, blocky=blocky,
-                                 progress=progress)
+                                 candidates=candidates, absent=absent, progress=progress)
     written = write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
     meta = {k: v for k, v in info.items() if k != "keys"}
     Path(keys_folder, "keys.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
