@@ -180,8 +180,16 @@ def make_thumb(sheet_png: Path, out: Path, px: int = 96) -> Path:
 
 
 def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int = 8,
-                  progress=None, clean=True) -> list[Path]:
-    """All animations x 16 directions at the library scale, with normal maps."""
+                  progress=None, clean=True, drawn: bool = False, prompt: str = "",
+                  reuse: bool = True) -> list[Path]:
+    """All animations x 16 directions at the library scale, with normal maps.
+    drawn: the GPU draws the character from every direction and the skeleton bends the drawings
+    (drawnrig.py; key drawings kept in <folder>/keys, reused unless reuse=False)."""
+    if drawn:
+        from .drawnrig import drawn_sheets
+        return drawn_sheets(rigged, prompt, out_png=out_png, kind=kind, size=size, frames=frames,
+                            keys_folder=Path(out_png).parent / "keys", reuse=reuse,
+                            progress=progress)[2]
     from .anim3d import animated_turnaround, write_animated
     from .settings import settings_for
     st = style()
@@ -204,7 +212,7 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int
 
 def add_character(name: str, model, *, kind: str = "person", size: str | None = None,
                   picture=None, role: str = "", folder: Path | None = None,
-                  progress=None, prompt: str = "") -> Character:
+                  progress=None, prompt: str = "", drawn: bool = False) -> Character:
     """A coloured 3D model -> a library character: skeleton + animations (people: idle walk run
     attack hurt death; animals: idle walk run sit happy lie_down death), sheets, thumbnail."""
     say = progress or (lambda t: None)
@@ -223,10 +231,15 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
         from .autorig import auto_rig
         auto_rig(ch.model, ch.rigged)
     add_project_clips(ch.rigged, kind, progress=say)      # house style: the type's clip set
-    render_sheets(ch.rigged, ch.sheet, kind, size, progress=say)
+    render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, drawn=drawn, prompt=prompt)
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
     return ch
+
+
+def is_drawn(ch: Character) -> bool:
+    """Were its sheets drawn by the GPU and bent by the skeleton (drawnrig.py)?"""
+    return (ch.folder / "keys" / "keys.json").exists()
 
 
 def import_sheet(name: str, sheet_png, *, kind: str = "person", size: str | None = None,
@@ -307,7 +320,8 @@ def rebuild(ch: Character, model, progress=None) -> Character:
         from .autorig import auto_rig
         auto_rig(ch.model, ch.rigged)
     add_project_clips(ch.rigged, ch.kind, progress=say)   # house style: the type's clip set
-    render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say)
+    render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say, drawn=is_drawn(ch),
+                  prompt=ch.prompt, reuse=False)          # a new model needs new drawings
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
     return ch
@@ -358,10 +372,16 @@ def add_character_animations(ch: Character, names, progress=None, *, replace: bo
         if clean is True and st.palette != "auto":       # the same clean-up render_sheets did
             clean = {"palette": st.palette}
         say(f"Rendering every animation from {st.directions} directions…")
-        anim, _ = animated_turnaround([tmp], s, st.directions, 8, elevation=st.elevation,
-                                      light=st.light, normals=True, clean=clean, frame_with=keep)
-        tmp.replace(ch.rigged)
-        write_animated(anim, ch.sheet, aseprite=True, godot=True, normals=True)
+        if is_drawn(ch):                    # same drawings and scale, the new clips bent too
+            tmp.replace(ch.rigged)
+            render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say, drawn=True,
+                          prompt=ch.prompt)
+        else:
+            anim, _ = animated_turnaround([tmp], s, st.directions, 8, elevation=st.elevation,
+                                          light=st.light, normals=True, clean=clean,
+                                          frame_with=keep)
+            tmp.replace(ch.rigged)
+            write_animated(anim, ch.sheet, aseprite=True, godot=True, normals=True)
     finally:
         if tmp.exists():
             tmp.unlink()
@@ -425,6 +445,11 @@ def _render_with_new_clips(ch: Character, tmp: Path, keep, progress=None) -> Non
     if clean is True and st.palette != "auto":
         clean = {"palette": st.palette}
     say(f"Rendering every animation from {st.directions} directions…")
+    if is_drawn(ch):
+        tmp.replace(ch.rigged)
+        render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say, drawn=True,
+                      prompt=ch.prompt)
+        return
     anim, _ = animated_turnaround([tmp], s, st.directions, 8, elevation=st.elevation,
                                   light=st.light, normals=True, clean=clean, frame_with=keep)
     tmp.replace(ch.rigged)

@@ -188,6 +188,21 @@ wants terse answers and fixes over polish.
     step at 1024; GPU ~85 C per 150-step chunk, rests bring it to ~58 C (a continuous run hit
     88 C at step 685). First style: Default project, 20 assets mirrored, 900 steps, 37 min ->
     default_style.safetensors (trigger dfltpx), before/after in Pictures/PixelPipeline.
+- **Drawn characters (hybrid, 2026-10-13)** (`drawnrig.py`, `library.render_sheets/add_character(
+  drawn=True)`, Characters page "Drawn sprites" checkbox): Kevin found 3D-rendered sprites
+  lumpy next to SDXL-drawn ones, approved "GPU draws each direction, the skeleton bends the
+  drawing". Key pose = idle frame 0, rendered on the frame grid (blocky init, k px per frame
+  pixel, white bg) -> SDXL img2img 0.6, same seed, direction words -> cut out -> back to the frame
+  grid exactly (no alignment guessing), one palette, IoU check/redraw. Each drawn pixel gets the
+  3D point/normal/skin weights of the front surface under it (tight depth layer, bone-island
+  cleanup, smoothing only between alike weights: mixing arm+cape weights shredded the drawing);
+  per frame exact LBS, 4x4 samples/px, nearest-to-centre of the front surface -> no new colours;
+  parts hidden at rest fill from model points coloured by the nearest direction's drawing;
+  torn bits dropped; normals = skinned 3D + from_drawing relief. Keys in <char>/keys (drawn_*,
+  init_*, key_*, keys.json with the camera: reused, so add_character_animations/mocap/springs
+  bend the same drawings, no GPU). Knight (Neo16 test, knight-hybrid): 16 dirs ~4 min GPU +
+  ~100 s bending. Limits: SDXL moving a part (sword) vs the model -> it follows the wrong bone
+  in big moves; death (lying) foreshortens. Shots: Pictures/PixelPipeline/hybrid_*.
 - **UI kit (2026-10-13)** (`uikit.py` + `ui/uikit_tab.py`, Portraits, cards & effects -> UI kit):
   asset kind "ui" (<project>/ui, in assets.KINDS). Procedural, no GPU: THEMES wood/stone/
   parchment/metal/crystal/sci-fi; Style outline/shading/detail/palette shape every piece; drawn

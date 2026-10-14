@@ -217,6 +217,11 @@ class ModelStudio(QMainWindow):
         self.swing.setToolTip("Find a cape, long hair or a tail hanging off the body, give it spring "
                               "bones and bake its swing into every animation (it trails when "
                               "running, settles when standing). Used when a skeleton is added.")
+        self.drawn = QCheckBox("Drawn sprites")
+        self.drawn.setToolTip("Add to library: the GPU draws the character as pixel art from every "
+                              "direction over the model, and the skeleton bends those drawings "
+                              "for each frame (crisper than rendering the 3D model; ~4 min GPU "
+                              "for 16 directions). People only.")
         self.redo_btn = QPushButton("Update sprites")
         self.redo_btn.clicked.connect(self.update_sprites)
         self.save_btn = QPushButton("Save all…")
@@ -264,6 +269,7 @@ class ModelStudio(QMainWindow):
             row.addWidget(w)
         row.addWidget(self.animate)
         row.addWidget(self.swing)
+        row.addWidget(self.drawn)
         row.addWidget(self.frames)
         row.addStretch(1)
         row.addWidget(self.redo_btn)
@@ -440,12 +446,13 @@ class ModelStudio(QMainWindow):
         size = self.size_.currentText()
         model = self.result.model
         swing = self.swing.isChecked()
+        drawn = self.drawn.isChecked() and kind == "person"
         picture = self.result.picture if self.result.picture and \
             Path(self.result.picture).suffix.lower() == ".png" else None
 
         def job(say):
             ch = add_character(name, model, kind=kind, size=size, picture=picture, progress=say,
-                               prompt=prompt)
+                               prompt=prompt, drawn=drawn)
             if swing:
                 from ..library import add_character_springs
                 try:
