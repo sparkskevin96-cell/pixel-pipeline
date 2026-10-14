@@ -57,7 +57,9 @@ MODEL_PROMPTS = {
 }
 MODEL_NEGATIVE = ("cropped, cut off, out of frame, partial, multiple subjects, crowd, text, "
                   "watermark, busy background, scenery, floor, dramatic lighting, harsh shadows, "
-                  "motion blur, blurry, pixel art, sprite sheet")
+                  "motion blur, blurry, pixel art, sprite sheet, character sheet, model sheet, "
+                  "reference sheet, turnaround, multiple views, two people, duplicate, "
+                  "separate objects, items laid out beside")
 
 
 @dataclass
@@ -128,6 +130,22 @@ def picture_for_model(prompt: str, subject: str = "person", *, client: ComfyClie
     opts = {"lora": "none", **gen_opts}
     (img, used), = generate_images(positive, negative, client=client, seed=seed, aspect=1.0, **opts)
     return img, used
+
+
+PICTURE_TRIES = 3
+
+
+def subject_pieces(alpha: np.ndarray, share: float = 0.08) -> int:
+    """How many separate big things a cut-out holds (pieces at least `share` of the biggest;
+    small bits like a loose strap don't count)."""
+    import cv2
+    m = (alpha > 127).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+    areas = sorted((int(a) for a in stats[1:, cv2.CC_STAT_AREA]), reverse=True)
+    if not areas:
+        return 0
+    return sum(1 for a in areas if a >= share * areas[0])
 
 
 def cut_out(picture: ImageSource, cutout_model: str = "isnet-general-use") -> np.ndarray:
@@ -878,11 +896,22 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
         if not prompt:
             raise ValueError("Give a prompt or a picture.")
         say("picture", f"Making a front picture of “{prompt}” on your GPU…")
-        img, used_seed = picture_for_model(prompt, subject, client=client, seed=seed,
-                                           style=style, **gen_opts)
+        for attempt in range(PICTURE_TRIES):
+            img, used_seed = picture_for_model(prompt, subject, client=client, seed=seed,
+                                               style=style, **gen_opts)
+            say("cutout", "Cutting out the subject…")
+            rgba = cut_out(img, cutout_model)
+            pieces = subject_pieces(rgba[..., 3])
+            if pieces <= 1 or attempt == PICTURE_TRIES - 1:
+                break
+            # SDXL drew a character sheet (two figures, a shield beside them): the 3D shape
+            # would fuse them into one blob, so draw it again
+            say("picture", f"The picture shows {pieces} separate things; drawing it again…")
+            seed = (used_seed or 0) + 1
         picture = img
-    say("cutout", "Cutting out the subject…")
-    rgba = cut_out(picture, cutout_model)
+    else:
+        say("cutout", "Cutting out the subject…")
+        rgba = cut_out(picture, cutout_model)
     pic_path = out.with_suffix(".front.png")
     Image.fromarray(rgba).save(pic_path)
     back_rgba = cut_out(back, cutout_model) if back is not None else None
