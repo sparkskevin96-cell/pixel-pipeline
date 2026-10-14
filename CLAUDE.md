@@ -212,6 +212,41 @@ wants terse answers and fixes over polish.
   shield to any knight; nothing detects that the model lacks one). Torso turned > 45 deg out of
   the drawing (death lying) -> `model_frame`: model points coloured from the drawings, majority
   filtered. Knight colour distance to S 0.33 -> 0.24 mean.
+  v3 (2026-10-14, the app's default for library characters, any subject): `add_character(drawn=
+  None)` = drawn when `drawnrig.available()` (ComfyUI found/answering; PIXEL_DRAWN=0/1 forces,
+  conftest sets 0), else the 3D render (also on ComfyUIUnavailable). Steel came out lavender (a/b
+  of neutrals +10/-8.5 vs model +4.5/+1): `neutral_tint` takes the median cast where the MODEL is
+  grey off near-grey pixels (blurred weights; keeps 20% + saturated parts); fixing S fixes the
+  rest (they copy its panel). Back views: order S, E, W, N, front diagonals, back diagonals;
+  N painted beside [S | side], back diagonals beside [N | side] (`view_refs`), view negatives in
+  the pair prompt, N's colour compared with the side (S rewarded front-like backs); BACK_
+  CANDIDATES k0.6 (outlined + local contrast `crisp`, won most backs) / o0.6 / o0.72; a try that
+  passes GOOD (IoU, colour, sharpness vs S, thin parts) stops the others (knight 39 -> ~27
+  drawings). `thin_cover` (3x3 opening residue of the model silhouette) penalises a dropped
+  staff/blade/tail. Held things: `source_pixels` (colour match within 3 px + drawn colour regions
+  lying >= 35% on forearm/hand pixels take forearm/hand weights; autorig runs the knight's arm
+  chain out along the blade, so hand_r is only the tip). Lying/spins: `facing_choice` bends the
+  drawing whose face now looks at this camera (projected with this camera), model_frame only
+  under cos 0.55; hidden-point colours skip other views' outline pixels (lying wolf was dark).
+  `auto_absent`: shield/buckler unless `has_shield` (forearm+hand part widest inscribed circle
+  >= 0.09 H: library paladin yes, 7 others no); animals saddle/rider/collar unless worded;
+  model_words drops only absent things (a staff stays in the words). Mirror: twin direction
+  mirrored when `symmetric_pair` (silhouette IoU >= 0.93 + model colours); the knight, mage and
+  wolf (head turned) are not. Animals: reference E (front view of a 30 px wolf is a blob),
+  SAME_WORDS, lower GOOD IoU. Resume: keys.json (camera, partial) written first, per-candidate
+  files reused, keys/model.sha1 guards a cancelled add; `cancel()` -> `Cancelled`; `gpu(what)`
+  context per drawing (scripts pass tools/gpu_lock); ETA = median s/drawing. `library.redraw(ch,
+  ["NE"])` = new seed for those, old files to keys/old, palette kept (keys.json "palette") so the
+  rest stay identical; redraw(ch, None) = all (restyle of drawn characters: assets.restyle).
+  Re-skins: reskin writes "recolour" swaps into keys/keys.json, applied to the drawings' palette
+  whenever they are bent again; the prompt is copied. UI: "Drawn sprites" checked when available,
+  animals too, Stop button, right-click a drawn library character -> Redraw one direction /
+  every direction. GPU (4070 laptop, ~22 s/drawing at 640-1024 px): knight 12.5 min first run
+  (27 drawings + model load), mage 13 min, wolf 11.7 min; bending ~75-120 s. Test characters in
+  Neo16 test: knight-v3, mage-v3, wolf-v3 (Default untouched); shots Pictures/PixelPipeline/
+  hybrid_v3_{knight,mage,wolf}.png/.gif. Still weak: mage SE drew no staff (it crosses the robe
+  in the init; thin_cover can't see that), mage back views flat (sharp 2-4 vs 5), death frames
+  speckled, the 30 px wolf front views.
 - **UI kit (2026-10-13)** (`uikit.py` + `ui/uikit_tab.py`, Portraits, cards & effects -> UI kit):
   asset kind "ui" (<project>/ui, in assets.KINDS). Procedural, no GPU: THEMES wood/stone/
   parchment/metal/crystal/sci-fi; Style outline/shading/detail/palette shape every piece; drawn
@@ -273,6 +308,45 @@ wants terse answers and fixes over polish.
     in the cliff set's rock, stone tiers in the wall set's, planks from the fence set; godot-3d
     passes the map's look. Shots: Pictures/PixelPipeline/terrain_before_after.png,
     cliff_path_preview.png.
+- **Game-ready 3D models (2026-10-14)** (`gamemesh.py`, `uvbake.py`, `render3d.py`, `gamemodel.py`,
+  `gamemodel_export.py`, `ui/game_model_dialog.py`, Library "Export 3D model…"): heavy Hunyuan mesh
+  (non-manifold, 3-4 faces per edge in places) -> narrow-band SDF on a 256 grid + skimage marching
+  cubes at +0.45 voxel (closed, manifold, floaters/inner shells gone, thin capes kept) -> optional
+  mirror symmetrize (rig's thigh plane; auto only above 55% mirror match) -> crease-damped Taubin ->
+  batched numpy QEM (independent set of cheap edges per round, link + fold checks, weak point
+  quadric (without it flat/creased parts spiked), rejected edges blocked until their area changes,
+  thin sheets may go non-manifold when stuck) -> LOD0/1/2 (12k/6k/3k characters, 4k props, 2.5k
+  items). UVs: charts grown in a 72 deg cone + merged, LSCM (spsolve), split when folded/overlapping/
+  stretched, crumbs absorbed, raster-packed (lowest free spot, 90 deg TURN not mirror) at one texel
+  density (~62% fill). Bake: colour from the heavy painted model, normals from the cleaned high-poly
+  (same-side closest point), tangents exported, gutters padded. Looks smooth (1024, normal map,
+  linear) / pixel (256, 4x supersampled, palette or k-means 32, NEAREST). Skin weights from the
+  heavy rigged mesh (barycentric blend, top 4); rigged.glb's nodes/skins/animations are copied, so
+  autorig + motions + mocap + springs clips all carry over. <asset>/model_game: lod0-2.glb, pngs,
+  lod0.obj (static), <name>.ppmodel, preview.png/.gif, wire.png, info.json. Presets godot-3d-model
+  (glb + .glb.import with loop flags: Godot keeps our _subresources; statics get a LOD .tscn with
+  visibility ranges) and unity-3d-model (.ppmodel + Editor/PixelPipelineModelImporter.cs: a
+  ScriptedImporter, no packages: LODGroup, skinned/static renderers, URP Lit or Standard, clips with
+  loop flags + .controller). Verified: Godot 4.6.1 (tests/test_gamemodel.py), Unity 6000.3.9f1
+  batch 42/42 (tools/verify_unity/verify_model.py: knight, archer w/ mocap+springs, dog, barrel,
+  pixel potion). ~1.5-2.5 min per model on the CPU. Shots: Pictures/PixelPipeline/
+  game3d_before_after.png, game3d_godot_hd2d_*.png. Test assets: project "3D test".
+- **Make anything (2026-10-14, Kevin: "mostly from words, letting the GPU make it, then picking and
+  tweaking")**: first tab `Make` (`ui/make_tab.py`, the app opens on it). One "Describe it" box ->
+  `makeany.py` router: rule-based, no network (cue words like icon/tiles/spell/card/portrait/ui/map
+  = 10, the head noun = last thing named before with/in/holding… = 5, other things 2, "could also be"
+  1; small lexicons of people/animals/items by category/props/terrains/effect kinds/elements/UI
+  themes/map templates/expressions; phrases first: "skeleton key", "ice nova", "stone wall").
+  `classify(text)` -> Guesses (best + alternatives, each a filled `Plan`: kind, name, prompt, params);
+  `summary()` = "I'll make: … — about N min of GPU" (rough GPU table from measured runs); editable
+  fields per kind (`fields_for`). `run_plan` -> `Made` (asset + variations: item icons, drawn prop
+  drawings, card art, tileset swatches); `keep(made, i)` picks (tilesets are saved only then); then
+  `MainWindow.open_made` opens its own page. Portraits with no library character paint from a
+  picture-only subject (<project>/portrait_subjects/<slug>, not a library character). Batch: one
+  per line -> jobqueue kind "make" (options["plan"]), run_queue(job_ids=) paces only those, summary.
+  `set_llm_router(fn)` = hook for a Claude router (not implemented, no calls). Tests:
+  tests/test_makeany.py (93-phrase table, 100%), test_ui make_page_*. Shot: Pictures/PixelPipeline/
+  makeany_ui.png.
 - **App layout (2026-10-12, Kevin: "make it feel intuitive")**: tabs in the order you make a
   game: `1 Characters` (ModelStudio + Character Library list on the left; Kind person/animal/
   object, Size words not numbers, Name, Add to library = rig + all clips x16 + normals at the
@@ -403,6 +477,32 @@ wants terse answers and fixes over polish.
   call, snapped back to the effect's palette inside its own alpha; tested with the fake ComfyUI
   only). Effects tab: size small/medium/large/huge, real timing, dark/light ground, bloom preview.
   `tools/fx_preview.py` -> Pictures/PixelPipeline/fx_preview.png/.gif. Godot 4.6.1 loads it (test).
+- **Weather, water, skies (2026-10-14)** (World -> Weather && sky, `ui/weather_tab.py`; kinds "weather",
+  "water", "background" in assets.KINDS; exports.KIND_EXPORTS -> `atmos_export.py`). CPU, fxcore heat fields:
+  `weather.py` 12 kinds (rain streaks/splashes/ripples, snow, fog banks, god_rays, leaves, petals, embers,
+  fireflies, dust, sandstorm, lightning one-shot + flash list, cloud_shadows): every overlay LOOPS and TILES
+  (things move whole tiles / whole sway cycles per loop, drawn again across edges), banded alpha steps, glow
+  maps, TOD_TINT dawn/noon/sunset/night (None = neutral). Files = effects.write_effect sheet + particles/*.png
+  strips + weather.json (Emitter list, px and y-up units) + `weather_godot.py`: <sheet>_overlay.tscn
+  (CanvasLayer, weather_overlay(_add).gdshader tiles the loop at whole-pixel scale, follows the camera),
+  _particles2d.tscn (GPUParticles2D per depth layer, 480x270 view), _particles3d.tscn (GPUParticles3D
+  billboards; cloud shadows = drifting 2x2 Decal; lightning = Sprite3D bolt + DirectionalLight flash),
+  weather_fx.gd. `water.py`: seamless looping water (integer-frequency waves + periodic warp, crest lines,
+  2-frame glints), 47 shore tiles on tilegen.blob_region (tide breathes the margins, foam rides the
+  waterline), side surface/body, iso diamonds; animated Godot TileSet (tile (c,r) at atlas (c*n, r), frames to
+  the right; verified: 48 tiles x n frames, terrain painting) + Tiled tsx; make_water(tileset=None) matches the
+  newest tilegen water set (colours, tile, shore ground). `backgrounds.py`: 6 scenes x 4 TODs, 5 layers sky/
+  clouds/far/mid/near (banded sky + 1-row checker blend, sun/moon halos, stars, haze by distance, sizes scale
+  with height), seamless x; background_from_prompt = SDXL (with_style "tile") -> parallax.build_parallax,
+  depth model only if already on disk else guess_depth (no download). Godot Parallax2D (clouds autoscroll),
+  Unity layers + .meta + PixelParallax.cs (not run in Unity). HD-2D: make_hd2d(weather="rain"|"storm"|...|
+  list|asset, water="classic"|"pixel") -> `weather_hd2d.install`: res://weather/<kind>/ + board_weather.gd
+  (board.gd `_build_weather`, fits emitters to the board, splashes from cell-top emission points, wet = darker
+  glossy StandardMaterial3D, snow frosting) + lighting.json presets tweaked per weather; needs godot --import.
+  WATER_SHADER_PIXEL: pixel-stepped ripples, depth-buffer shore foam, screen-texture reflection. Verified:
+  tests/test_weather.py (Godot 4.6.1 headless loads all 36 weather scenes, TileSet, parallax, board), real GPU
+  shots Pictures/PixelPipeline/hd2d_weather_*.png; previews weather_preview.png/.gif, water_preview.gif,
+  parallax_preview.png (`tools/weather_preview.py`).
 - **Isometric tactics look** (`iso_scene.py`, CLI `iso-demo`), 2026-10-11, one of the three looks
   of the tactics demo over `diorama.py`: `write_iso_scene(d, project, {name: sheet.png})` writes
   `iso/` (+ map/map.json if absent, project.godot only if absent). One pre-rendered column per

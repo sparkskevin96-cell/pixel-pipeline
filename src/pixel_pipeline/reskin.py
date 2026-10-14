@@ -117,7 +117,7 @@ def _character(src):
         raise ValueError(f"{folder} is not a library character (no character.json).")
     d = json.loads(meta.read_text(encoding="utf-8"))
     return Character(d.get("name", folder.name), d.get("kind", "person"), d.get("size", "normal"),
-                     d.get("role", ""), d.get("created", 0.0), folder)
+                     d.get("role", ""), d.get("created", 0.0), folder, d.get("prompt", ""))
 
 
 def _options(**kw) -> dict:
@@ -174,7 +174,8 @@ def reskin(src, name: str, *, hue: float | None = None, palette_map: dict | None
     if (ch.folder / "sheet.aseprite").exists():
         _rewrite_aseprite(dst / "sheet.png", out_sheet, dst / "sheet.aseprite")
     make_thumb(dst / "sheet.png", dst / "thumb.png")
-    new_ch = Character(name, ch.kind, ch.size, ch.role, time.time(), dst)
+    _recolour_keys(dst / "keys" / "keys.json", colours, new)
+    new_ch = Character(name, ch.kind, ch.size, ch.role, time.time(), dst, ch.prompt)
     new_ch.save()
     meta_path = dst / "asset.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -185,6 +186,24 @@ def reskin(src, name: str, *, hue: float | None = None, palette_map: dict | None
         palette_map=palette_map, saturation=saturation, lightness=lightness)
     meta_path.write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return new_ch
+
+
+def _recolour_keys(keys_json: Path, colours: np.ndarray, new: np.ndarray) -> None:
+    """A drawn character (drawnrig.py) re-bends its drawings for new clips later: its keys.json
+    gets the colour swaps ("recolour": [[drawn hex, new hex], ...], composed with an earlier
+    re-skin's) so those frames come out in the re-skin's colours too."""
+    if not keys_json.exists():
+        return
+    try:
+        meta = json.loads(keys_json.read_text(encoding="utf-8"))
+    except ValueError:
+        return
+    swap = {colour_hex(c): colour_hex(n) for c, n in zip(colours, new)}
+    final = dict(swap)
+    for old, mid in meta.get("recolour") or []:
+        final[old] = swap.get(mid, mid)
+    meta["recolour"] = [[o, n] for o, n in final.items() if o != n]
+    keys_json.write_text(json.dumps(meta, indent=1), encoding="utf-8")
 
 
 def make_team_variants(src, colours=("blue", "red", "green"), *, source_colour=None,

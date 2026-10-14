@@ -137,8 +137,10 @@ def test_default_character_worker_with_fakes(tmp_path, monkeypatch):
         calls["model"] = (prompt, subject, seed)
         return model3d.ModelResult(out, out.with_suffix(".front.png"), None, seed)
 
-    def fake_add(name, model, kind="person", size=None, role="", picture=None, folder=None):
+    def fake_add(name, model, kind="person", size=None, role="", picture=None, folder=None,
+                 prompt=""):
         calls["add"] = (name, kind, size)
+        calls["prompt"] = prompt
         return library.Character(name, kind, size or "normal", role, 1.0, tmp_path / "c" / name)
     monkeypatch.setattr(model3d, "prompt_to_model", fake_model)
     monkeypatch.setattr(library, "add_character", fake_add)
@@ -146,5 +148,6 @@ def test_default_character_worker_with_fakes(tmp_path, monkeypatch):
     q.add("character", "Wolf", "a grey wolf", {"body": "animal", "size": "large"}, variations=2)
     J.run_queue(tmp_path, pause_s=0)
     assert calls["model"][:2] == ("a grey wolf", "animal") and calls["add"] == ("Wolf v2", "animal", "large")
+    assert calls["prompt"] == "a grey wolf"             # the words reach the drawn sprites
     job = J.Queue(tmp_path).jobs[0]
     assert job.status == "done" and job.results[1]["name"] == "Wolf v2"

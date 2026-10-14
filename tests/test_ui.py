@@ -110,14 +110,15 @@ def test_model_studio_plays_a_rigged_model(app, tmp_path):
 def test_main_window_has_every_tool(app):
     win = MainWindow()
     titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-    assert titles == ["Characters", "Items && props", "World", "Portraits, cards && effects", "Library",
-                      "Try in a game", "Sprite", "More tools"]
-    assert win.current_tool() is win.studio                       # opens on Characters
+    assert titles == ["Make", "Characters", "Items && props", "World", "Portraits, cards && effects",
+                      "Library", "Try in a game", "Sprite", "More tools"]
+    assert win.current_tool() is win.make_tab                     # opens on Make (Describe it)
+    assert "Describe it" in win.statusBar().currentMessage()
     win.show_tool(win.map_editor)
     assert win.current_tool() is win.map_editor and "template" in win.statusBar().currentMessage()
     assert [win.sprite_tabs.tabText(i) for i in range(2)] == ["From a photo", "From words"]
     assert [win.world_tabs.tabText(i) for i in range(win.world_tabs.count())] == [
-        "Maps", "Terrain tiles", "Tile variations"]
+        "Maps", "Terrain tiles", "Tile variations", "Weather && sky"]
     win.show_tool(win.tilegen_tab)
     assert win.current_tool() is win.tilegen_tab and "GPU" in win.statusBar().currentMessage()
     assert [win.faces_tabs.tabText(i) for i in range(win.faces_tabs.count())] == [
@@ -428,3 +429,103 @@ def test_library_characters_tab_and_game_tab(app, tmp_path, monkeypatch):
     units = json.loads((game.out / "map" / "map.json").read_text())["units"]
     geela = next(u for u in units if u["name"] == "geela")
     assert (geela["hp"], geela["attack"]) == library.CLASSES["physician"][:2]
+
+
+def make_page_fakes(tmp_path, calls):
+    """Fake pipelines for the Make page: real saved assets, no GPU."""
+    from PIL import Image
+    from test_hd2d import fake_sheet
+    from pixel_pipeline import assets, library, makeany as M, tilegen
+    sheet = fake_sheet(tmp_path / "hero.png", dirs=("E", "SE", "S", "SW", "W", "NW", "N", "NE"))
+
+    def character(plan, project, say, client=None):
+        calls.append(("character", plan.params["body"]))
+        return M.Made(plan, library.import_sheet(plan.name, sheet, kind=plan.params["body"]))
+
+    def item(plan, project, say, client=None):
+        calls.append(("item", plan.params["category"]))
+        a = assets.new_asset("item", plan.name, project, prompt=plan.prompt, icon_choice=1)
+        icons = []
+        for i, c in enumerate(((200, 60, 40), (60, 200, 40), (40, 60, 200)), 1):
+            p = a.folder / f"icon_v{i}.png"
+            Image.new("RGBA", (16, 16), (*c, 255)).save(p)
+            icons.append(p)
+        return M.Made(plan, a, icons, 1)
+
+    def tileset(plan, project, say, client=None):
+        calls.append(("tileset", plan.params["terrain"]))
+        sw = [tilegen.builtin_swatch(plan.params["terrain"], 16, s, project.style) for s in (0, 1)]
+        return M.Made(plan, None, [s.texture for s in sw], 1, {"swatches": sw})
+    return {"character": character, "item": item, "tileset": tileset}
+
+
+def test_make_page_plans_makes_picks_and_opens(app, tmp_path, monkeypatch):
+    pytest.importorskip("trimesh")
+    from pixel_pipeline import objects
+    calls, picked, opened = [], [], []
+    win = MainWindow()
+    tab = win.make_tab
+    tab.sync = True
+    tab.makers = make_page_fakes(tmp_path, calls)
+    # the plan shows first, with what else it could be
+    plan = tab.plan_text("a wolf")
+    assert plan.kind == "character" and plan.params["body"] == "animal"
+    assert tab.summary.text().startswith("I'll make: Character (animal) “Wolf”")
+    assert tab.alternatives() and len(tab.alt_buttons) == len(tab.alternatives())
+    assert tab.make_btn.isEnabled() and not calls                  # nothing ran yet
+    tab.use_kind("item")
+    assert tab.kind.currentData() == "item" and "Item" in tab.summary.text()
+    tab.use_kind("character")
+    tab.inputs["size"].setCurrentIndex(tab.inputs["size"].findData("large"))
+    assert tab.current_plan().params["size"] == "large"
+    tab.name.setText("Grey Wolf")
+    tab.name.textEdited.emit("Grey Wolf")
+    assert "“Grey Wolf”" in tab.summary.text()
+    tab.make()
+    assert calls == [("character", "animal")]
+    assert win.current_tool() is win.studio and win.studio.name.text() == "Grey Wolf"
+    # variations: pick one, then its page opens
+    monkeypatch.setattr(objects, "choose_icon", lambda a, i, p=None: picked.append(i))
+    monkeypatch.setattr(win.items_tab, "open_asset", lambda a: opened.append(a.name))
+    win.show_tool(tab)
+    tab.plan_text("sword icon")
+    tab.make()
+    assert tab.picks.isVisibleTo(tab) and tab.variations.count() == 3 and tab.keep_btn.isEnabled()
+    assert win.current_tool() is tab                               # waits for the pick
+    tab.keep_chosen(2)
+    assert picked == [2] and opened == ["Sword"] and win.current_tool() is win.items_tab
+    # tilesets are saved once picked (CPU: built from the texture)
+    win.show_tool(tab)
+    tab.plan_text("cobblestone road tiles")
+    tab.make()
+    assert tab.made.asset is None and tab.variations.count() == 2
+    tab.keep_chosen(2)
+    assert tab.made.asset.kind == "tileset" and win.current_tool() is win.tilegen_tab
+    # no-GPU pipelines run for real: map, effect, UI kit
+    for words, page in (("a forest map with a river", win.map_editor),
+                        ("ice nova spell", win.effects_tab), ("wooden UI panel", win.uikit_tab)):
+        win.show_tool(tab)
+        tab.plan_text(words)
+        tab.make()
+        assert win.current_tool() is page, words
+    assert win.map_editor.asset.name == "Forest map"
+    assert win.effects_tab.current_kind() == "frost_nova"
+    assert win.uikit_tab.asset.extra["theme"] == "wood"
+    from pixel_pipeline.assets import list_assets
+    assert {a.kind for a in list_assets()} >= {"character", "item", "tileset", "map", "effect", "ui"}
+
+
+def test_make_page_batch_queue_and_summary(app, tmp_path):
+    from pixel_pipeline.ui.make_tab import MakeTab
+    calls = []
+    tab = MakeTab()
+    tab.sync = True
+    tab.makers = make_page_fakes(tmp_path, calls)
+    tab.rest.setValue(0)
+    tab.batch.setPlainText("a wolf\nrusty iron sword\n\nwooden UI panel\n")
+    assert tab.batch_plan.text().startswith("3 to make")
+    tab.queue_batch()
+    assert [c[0] for c in calls] == ["character", "item"]
+    report = tab.report.toPlainText()
+    assert report.splitlines()[0] == "3 made" and "UI kit “Wood UI kit”" in report
+    assert not tab.stop_btn.isEnabled()

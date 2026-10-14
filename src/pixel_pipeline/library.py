@@ -181,14 +181,17 @@ def make_thumb(sheet_png: Path, out: Path, px: int = 96) -> Path:
 
 def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int = 8,
                   progress=None, clean=True, drawn: bool = False, prompt: str = "",
-                  reuse: bool = True) -> list[Path]:
+                  reuse: bool = True, redraw=(), name: str = "", cancel=None,
+                  gpu=None) -> list[Path]:
     """All animations x 16 directions at the library scale, with normal maps.
     drawn: the GPU draws the character from every direction and the skeleton bends the drawings
-    (drawnrig.py; key drawings kept in <folder>/keys, reused unless reuse=False)."""
+    (drawnrig.py; key drawings kept in <folder>/keys, reused unless reuse=False; redraw = these
+    directions again with a new seed; cancel() = stop, drawings so far kept for a resume)."""
     if drawn:
         from .drawnrig import drawn_sheets
         return drawn_sheets(rigged, prompt, out_png=out_png, kind=kind, size=size, frames=frames,
                             keys_folder=Path(out_png).parent / "keys", reuse=reuse,
+                            redraw=redraw, name=name, cancel=cancel, gpu=gpu,
                             progress=progress)[2]
     from .anim3d import animated_turnaround, write_animated
     from .settings import settings_for
@@ -212,14 +215,23 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int
 
 def add_character(name: str, model, *, kind: str = "person", size: str | None = None,
                   picture=None, role: str = "", folder: Path | None = None,
-                  progress=None, prompt: str = "", drawn: bool = False) -> Character:
+                  progress=None, prompt: str = "", drawn: bool | None = None, cancel=None,
+                  gpu=None) -> Character:
     """A coloured 3D model -> a library character: skeleton + animations (people: idle walk run
-    attack hurt death; animals: idle walk run sit happy lie_down death), sheets, thumbnail."""
+    attack hurt death; animals: idle walk run sit happy lie_down death), sheets, thumbnail.
+    drawn: None = drawn by the GPU when this PC has ComfyUI (drawnrig.available()), else the 3D
+    render; a cancelled drawing keeps its drawings: adding the same model under the same name
+    again carries on where it stopped."""
     say = progress or (lambda t: None)
     size = size or DEFAULT_SIZE.get(kind, "normal")
     base = Path(folder) if folder else root()
+    if drawn is None:
+        from .drawnrig import available
+        drawn = available()
     ch = Character(name, kind, size, role, time.time(), _free_folder(name, base), prompt)
     ch.folder.mkdir(parents=True, exist_ok=True)
+    if drawn:
+        _keep_keys_for(ch, model)
     shutil.copyfile(model, ch.model)
     if picture is not None and Path(picture).exists():
         shutil.copyfile(picture, ch.picture)
@@ -231,15 +243,50 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
         from .autorig import auto_rig
         auto_rig(ch.model, ch.rigged)
     add_project_clips(ch.rigged, kind, progress=say)      # house style: the type's clip set
-    render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, drawn=drawn, prompt=prompt)
+    if drawn:
+        from .generate import ComfyUIUnavailable
+        try:
+            render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, drawn=True,
+                          prompt=prompt, name=name, cancel=cancel, gpu=gpu)
+        except ComfyUIUnavailable as e:       # no GPU after all: the 3D render, said so
+            say(f"Couldn't draw it ({str(e).splitlines()[0]}); rendering the 3D model instead.")
+            shutil.rmtree(ch.folder / "keys", ignore_errors=True)
+            drawn = False
+    if not drawn:
+        render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, prompt=prompt)
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
     return ch
 
 
+def _keep_keys_for(ch: Character, model) -> None:
+    """Drawings left in the folder by a cancelled add are reused only for the same model."""
+    import hashlib
+    keys = ch.folder / "keys"
+    sha = hashlib.sha1(Path(model).read_bytes()).hexdigest()
+    mark = keys / "model.sha1"
+    if keys.exists() and (not mark.exists() or mark.read_text().strip() != sha):
+        shutil.rmtree(keys, ignore_errors=True)
+    keys.mkdir(parents=True, exist_ok=True)
+    mark.write_text(sha)
+
+
 def is_drawn(ch: Character) -> bool:
     """Were its sheets drawn by the GPU and bent by the skeleton (drawnrig.py)?"""
     return (ch.folder / "keys" / "keys.json").exists()
+
+
+def redraw(ch: Character, directions=None, progress=None, cancel=None, gpu=None) -> Character:
+    """Draw a drawn character again: `directions` (e.g. ["NE"]) with new seeds, the others kept;
+    None = every direction (e.g. in a new house style: restyle). The skeleton is not touched."""
+    if not ch.rigged.exists():
+        raise ValueError(f"{ch.name} has no rigged.glb (add it to the library again first)")
+    render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=progress, drawn=True,
+                  prompt=ch.prompt, name=ch.name, reuse=directions is not None,
+                  redraw=tuple(directions or ()), cancel=cancel, gpu=gpu)
+    make_thumb(ch.sheet, ch.thumb)
+    ch.save()
+    return ch
 
 
 def import_sheet(name: str, sheet_png, *, kind: str = "person", size: str | None = None,

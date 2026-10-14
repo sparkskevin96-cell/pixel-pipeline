@@ -634,6 +634,10 @@ class AssetsTab(ToolTab):
         self.export_btn.clicked.connect(self._export_clicked)
         self.export_coll_btn = QPushButton("Export collection…")
         self.export_coll_btn.clicked.connect(self._export_collection_clicked)
+        self.model_btn = QPushButton("Export 3D model…")      # game-ready mesh (gamemodel.py)
+        self.model_btn.setToolTip("Game-ready 3D model: cleaned low-poly LODs, textures, "
+                                  "skeleton + clips, for Godot and Unity")
+        self.model_btn.clicked.connect(self._model_clicked)
         self.reskin_btn = QPushButton("Re-skin…")
         self.reskin_btn.clicked.connect(self._reskin_clicked)
         self.open_btn = QPushButton("Open folder")
@@ -656,7 +660,9 @@ class AssetsTab(ToolTab):
         dl.addLayout(form)
         dl.addLayout(btns)
         dl.addWidget(self.export_coll_btn)
-        self.busy_widgets = [self.export_btn, self.export_coll_btn, self.reskin_btn, self.delete_btn]
+        dl.addWidget(self.model_btn)
+        self.busy_widgets = [self.export_btn, self.export_coll_btn, self.reskin_btn, self.delete_btn,
+                             self.model_btn]
 
         left = QWidget()
         ll = QVBoxLayout(left)
@@ -935,6 +941,8 @@ class AssetsTab(ToolTab):
         self.reskin_btn.setEnabled(has and asset.kind == "character"
                                    and (Path(asset.folder) / "sheet.png").exists())
         self.export_coll_btn.setEnabled(bool(A.all_collections(self.project)))
+        from .game_model_dialog import can_make
+        self.model_btn.setEnabled(can_make(asset))
         if not has:
             self.preview.show_rgba(None)
             self.preview.setText("Pick something")
@@ -1015,6 +1023,39 @@ class AssetsTab(ToolTab):
             project = self.project
             self.run(lambda say: exports.export_collection(name, preset, folder, project=project),
                      self._exported, f"Exporting {name}…")
+
+    def export_model_selected(self, engines=("godot", "unity"), folder=None, rebuild=True,
+                              **opts) -> list[Path]:
+        """Build the selected asset's game-ready 3D model and export it (tests call this)."""
+        from .game_model_dialog import build_and_export
+        a = self._need()
+        folder = folder or Path.home() / "Pixel Pipeline" / "Exports" / A.slug(a.name) / "3d"
+        files = build_and_export(a, opts, engines, folder, rebuild, self.say)
+        self._model_built(files)
+        return files
+
+    @Slot()
+    def _model_clicked(self):
+        from .game_model_dialog import GameModelDialog, build_and_export, can_make
+        a = self.selected
+        if not can_make(a):
+            return
+        dlg = GameModelDialog(a, self, str(Path.home() / "Pixel Pipeline" / "Exports" / A.slug(a.name) / "3d"))
+        ok = dlg.exec() == QDialog.Accepted
+        opts, engines, folder, rebuild = dlg.values()
+        dlg.setParent(None)
+        if ok and (folder or not engines):
+            self.run(lambda say: build_and_export(a, opts, engines, folder, rebuild, say),
+                     self._model_built, f"Making a game-ready 3D model of {a.name}…")
+
+    def _model_built(self, files):
+        from .game_model_dialog import turntable_frames
+        if self.selected is not None:
+            frames = turntable_frames(self.selected)
+            if frames:
+                self.preview.show_rgba(frames[1 % len(frames)])
+        if files:
+            self.say(f"3D model ready: {len(files)} files ({Path(files[-1]).parent})")
 
     def _exported(self, files):
         if files:

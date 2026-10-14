@@ -77,13 +77,18 @@ KEY_NEGATIVE = ("multiple characters, multiple views, sprite sheet, cropped, out
                 "3d render, photo, blurry, smooth gradient")
 # reference pairing: the drawn reference on the left, the new view painted on the right
 PAIR_PROMPT = ("character turnaround sheet, {n} views of the same character side by side, identical "
-               "design, same armour, same colours, same proportions, pixel art sprite of {prompt}, "
+               "design, {same}, same colours, same proportions, pixel art sprite of {prompt}, "
                "full body, standing, {views}, seen from slightly above, plain white background, "
                "game asset, clean outline, crisp readable pixel shapes")
 PAIR_NEGATIVE = ("different characters, different outfit, different colours, mismatched design, "
                  "cropped, out of frame, cut off, busy background, scenery, cast shadow, ground, "
                  "frame, border, text, watermark, 3d render, photo, blurry, smooth gradient")
-PANEL_WORDS = {"S": "front view", "E": "side view facing right", "W": "side view facing left"}
+PANEL_WORDS = {"S": "front view", "E": "side view facing right", "W": "side view facing left",
+               "N": "back view"}
+SAME_WORDS = {"person": "same outfit and armour", "animal": "same fur and markings"}
+# what the image model likes to add whatever the model holds: kept out unless the model has it
+SHIELD_WORDS = ("shield", "buckler")
+ANIMAL_ABSENT = ("saddle", "rider", "harness", "collar", "clothes")
 # things a character holds or wears that the image model happily adds when the words name them;
 # the init picture already shows the ones the 3D model has
 HELD = ("shield", "buckler", "sword", "greatsword", "bow", "crossbow", "quiver", "staff", "wand",
@@ -313,6 +318,7 @@ class RestView:
     depth: np.ndarray      # (H, W) px
     point_pix: np.ndarray  # (P,) pixel of every body point (-1 = off the frame)
     point_front: np.ndarray  # (P,) the point is on the front surface
+    colour: np.ndarray = field(default=None, repr=False)   # (H, W, 3) the model's own colours
 
 
 def rest_view(body: Body, cam: Camera, rest: Pose, pts=None, nrm=None, smooth: int = 1) -> RestView:
@@ -346,7 +352,8 @@ def rest_view(body: Body, cam: Camera, rest: Pose, pts=None, nrm=None, smooth: i
     weights = avg(body.weights).reshape(H, W, -1)
     dmap = np.bincount(li, depth[tight], W * H) / c
     view = RestView(mask.reshape(H, W), pos, normal.reshape(H, W, 3), weights,
-                    dmap.reshape(H, W), lin, front)
+                    dmap.reshape(H, W), lin, front,
+                    avg(body.colours.astype(np.float64)).reshape(H, W, 3))
     for _ in range(2):
         view.weights = _bone_islands(view)
     for _ in range(smooth):
@@ -425,16 +432,120 @@ class Drawn:
     hidden_idx: np.ndarray = field(default=None, repr=False)  # their palette indices
 
 
+def bone_names(body: Body) -> list[str]:
+    """The joint (or node) name of every bone slot."""
+    out = [""] * body.bones
+    for s, at in body.skin_at.items():
+        for i, j in enumerate(body.rig.skins[s][0]):
+            out[at + i] = body.rig.names[j]
+    for nd, at in body.node_at.items():
+        out[at] = body.rig.names[nd]
+    return out
+
+
+def colour_segments(rgb: np.ndarray, mask: np.ndarray, step: float = 14.0) -> np.ndarray:
+    """Labels of the drawing's colour regions: 4-connected pixels whose Lab colours differ by
+    less than `step` (a pixel-art sword blade is one region, its outline cuts it from the leg
+    behind it). -1 = empty."""
+    from .color import rgb_to_lab
+    H, W = mask.shape
+    lab = rgb_to_lab(rgb.astype(np.float32))
+    lbl = np.where(mask, np.arange(H * W).reshape(H, W), -1)
+    right = mask[:, 1:] & mask[:, :-1] & (np.linalg.norm(lab[:, 1:] - lab[:, :-1], axis=-1) < step)
+    down = mask[1:] & mask[:-1] & (np.linalg.norm(lab[1:] - lab[:-1], axis=-1) < step)
+    big = H * W + 1
+    for _ in range(H * W):
+        cur = np.where(lbl >= 0, lbl, big)
+        new = cur.copy()
+        new[:, 1:] = np.where(right, np.minimum(new[:, 1:], cur[:, :-1]), new[:, 1:])
+        new[:, :-1] = np.where(right, np.minimum(new[:, :-1], cur[:, 1:]), new[:, :-1])
+        new[1:] = np.where(down, np.minimum(new[1:], cur[:-1]), new[1:])
+        new[:-1] = np.where(down, np.minimum(new[:-1], cur[1:]), new[:-1])
+        new = np.where(mask, new, -1)
+        if np.array_equal(new, lbl):
+            break
+        lbl = new
+    return lbl
+
+
+def source_pixels(view: RestView, rgb: np.ndarray | None, mask: np.ndarray, held=(),
+                  arm=(), reach: int = 3, held_reach: int = 4, colour_gap: float = 20.0):
+    """Which model pixel each drawn pixel takes its 3D point and skin weights from: (ny, nx).
+    Plain: its own pixel (the nearest model pixel for pixels drawn outside the model).
+    With the drawing's colours (rgb):
+      - colour: a pixel whose colour is far from the model's under it takes the best-matching
+        model pixel within `reach` px (SDXL moved an edge a pixel or two: the cape stays cape);
+      - held things: the drawing's colour regions (colour_segments) lying mostly on the model's
+        hand-bone pixels (`held` bone slots: a sword, a staff) take hand pixels for the rest of
+        the region within `held_reach` px of the hand part, or all of it when the region is thin
+        (a blade drawn a few px off the model's, over the legs, still swings with the hand).
+        Pixels on the same arm (`arm` slots) keep their own."""
+    from scipy.ndimage import distance_transform_edt, maximum as nd_max
+    H, W = mask.shape
+    _, (ny, nx) = distance_transform_edt(~view.mask, return_indices=True)
+    if rgb is None or view.colour is None:
+        return ny, nx
+    from .color import rgb_to_lab
+    yy, xx = np.mgrid[0:H, 0:W]
+    lab_d = rgb_to_lab(rgb.astype(np.float32))
+    lab_m = rgb_to_lab(np.nan_to_num(view.colour).clip(0, 255).astype(np.float32))
+    own_de = np.linalg.norm(lab_d - lab_m[ny, nx], axis=-1)
+    own_cost = own_de / 10 + 0.3 * np.hypot(ny - yy, nx - xx)
+    best, by, bx = own_cost.copy(), ny.copy(), nx.copy()
+    for dy in range(-reach, reach + 1):
+        for dx in range(-reach, reach + 1):
+            if dy * dy + dx * dx > reach * reach or not (dy or dx):
+                continue
+            sy, sx = np.clip(yy + dy, 0, H - 1), np.clip(xx + dx, 0, W - 1)
+            cost = np.linalg.norm(lab_d - lab_m[sy, sx], axis=-1) / 10 + 0.3 * math.hypot(dy, dx)
+            better = view.mask[sy, sx] & (cost < best)
+            best = np.where(better, cost, best)
+            by, bx = np.where(better, sy, by), np.where(better, sx, bx)
+    switch = mask & (own_de > colour_gap) & (best < own_cost - 1.0)
+    bone = np.where(view.mask, view.weights.argmax(-1), -1)
+    if switch.any():                    # a switch only where neighbours agree (no lone pixel
+        new = np.where(switch, bone[by, bx], bone[ny, nx])   # on another bone: it would tear)
+        same = np.zeros((H, W), np.int32)
+        for dst, src in _shifts(H, W):
+            same[dst] += mask[src] & (new[src] == new[dst])
+        switch &= same >= 2
+    ny, nx = np.where(switch, by, ny), np.where(switch, bx, nx)
+    if len(held):
+        bone = np.where(view.mask, view.weights.argmax(-1), -1)
+        hand = view.mask & np.isin(bone, list(held))
+        if hand.any():
+            far, (hy, hx) = distance_transform_edt(~hand, return_indices=True)
+            seg = colour_segments(rgb, mask)
+            src_bone = bone[ny, nx]
+            on_hand = mask & np.isin(src_bone, list(held))
+            keep = on_hand | np.isin(src_bone, list(arm))
+            ids, inv = np.unique(seg[mask], return_inverse=True)
+            share = np.bincount(inv, on_hand[mask]) / np.maximum(np.bincount(inv), 1)
+            size = np.bincount(inv)
+            edge = np.zeros((H, W), bool)
+            for dst, src in _shifts(H, W):
+                edge[dst] |= seg[src] != seg[dst]
+            inner = distance_transform_edt(~(edge | ~mask))
+            thick = np.asarray(nd_max(inner, seg, ids)) if len(ids) else np.zeros(0)
+            grab = (share >= 0.35) & (size >= 3)
+            seg_grab = np.zeros((H, W), bool)
+            seg_thin = np.zeros((H, W), bool)
+            seg_grab[mask] = grab[inv]
+            seg_thin[mask] = (thick <= 1.0)[inv]
+            move = seg_grab & ~keep & ((far <= held_reach) | seg_thin)
+            ny, nx = np.where(move, hy, ny), np.where(move, hx, nx)
+    return ny, nx
+
+
 def glue(body: Body, view: RestView, cam: Camera, rest: Pose, indices: np.ndarray,
-         palette: np.ndarray) -> Drawn:
-    """Each drawn pixel takes the 3D point, normal and weights of its rest-view pixel; pixels
-    the drawing added outside the model take the nearest model pixel's, moved in the screen
-    plane to their own place (so the rest pose lands every pixel exactly where it was drawn)."""
-    from scipy.ndimage import distance_transform_edt
+         palette: np.ndarray, rgb: np.ndarray | None = None, held=(), arm=()) -> Drawn:
+    """Each drawn pixel takes the 3D point, normal and weights of a model pixel (source_pixels:
+    its own; with the drawing's rgb, colour- and held-part-matched), moved in the screen plane to
+    its own place (so the rest pose lands every pixel exactly where it was drawn)."""
     ys, xs = np.nonzero(indices >= 0)
     if not view.mask.any():
         raise ValueError("The model is not in the frame")
-    _, (ny, nx) = distance_transform_edt(~view.mask, return_indices=True)
+    ny, nx = source_pixels(view, rgb, indices >= 0, held, arm)
     ny, nx = ny[ys, xs], nx[ys, xs]
     P = view.pos[ny, nx]
     sx, sy, _ = cam.project(P - rest.shift)
@@ -484,9 +595,11 @@ def _first_per(lin: np.ndarray, key: np.ndarray) -> np.ndarray:
     return order[first]
 
 
-def bend(drawn: Drawn, body: Body, pose: Pose, *, fill: bool = True):
-    """The key drawing in one pose -> (indices (H, W), camera-space normals (H, W, 3))."""
-    cam = drawn.cam
+def bend(drawn: Drawn, body: Body, pose: Pose, *, fill: bool = True, cam: Camera | None = None):
+    """The key drawing in one pose -> (indices (H, W), camera-space normals (H, W, 3)).
+    cam: see it with another direction's camera (a body turned toward that camera, e.g. lying
+    down, shows this drawing's face to it; its pixel squares are the same size)."""
+    cam = cam or drawn.cam
     W, H = cam.width, cam.height
     b = Body.blend(drawn.weights, pose.mats)
     R = b[:, :3, :3]
@@ -568,11 +681,14 @@ def init_picture(rig: Rig, cam: Camera, region: tuple[float, float, float], pose
                  px: int = 384,
                  points: int = 2_000_000, light: float = 0.25, seed: int = 0,
                  out: int = 1024, blocky: bool = False, cloud=None,
-                 view: "RestView | None" = None, outline: bool = False) -> Image.Image:
+                 view: "RestView | None" = None, outline: bool = False,
+                 crisp: float = 0.0) -> Image.Image:
     """The rest pose big and nearly flat, as the SDXL init: the frame square `region` (x0, y0,
     size in frame px) at out x out, white background. blocky: already on the frame's pixel grid
     (each frame pixel an out/size block, hard edges), so SDXL draws pixels on that grid and the
-    drawing comes back to the frame without resampling (crisper than a smooth init)."""
+    drawing comes back to the frame without resampling (crisper than a smooth init).
+    crisp: local contrast on the frame grid (unsharp mask amount): the model's far side is
+    painted by a blurred projection, so back views start soft without it."""
     from .turnaround import _splat
     pts, nrm, cols = cloud if cloud is not None else surface_cloud(rig, pose, points, seed)
     big = cam.region(*region, px)
@@ -591,6 +707,11 @@ def init_picture(rig: Rig, cam: Camera, region: tuple[float, float, float], pose
                          interpolation=cv2.INTER_AREA)
         cov = cv2.resize(a[..., 0], (size, size), interpolation=cv2.INTER_AREA)
         rgb = pre / np.maximum(cov, 1e-6)[..., None]
+        if crisp > 0:
+            on = (cov >= 0.5)[..., None]
+            blur = cv2.GaussianBlur(np.where(on, rgb, 0), (0, 0), 1.0)
+            wsum = cv2.GaussianBlur(on.astype(np.float32)[..., 0], (0, 0), 1.0)[..., None]
+            rgb = rgb + crisp * (rgb - blur / np.maximum(wsum, 1e-6))
         small = np.dstack([np.clip(rgb, 0, 255), np.where(cov >= 0.5, 255, 0)]).astype(np.uint8)
         if outline:
             small = _outlined(small, view, region)
@@ -679,6 +800,19 @@ def drawing_to_frame(drawing: Image.Image, region, frame: tuple[int, int], setti
     return Prepared(rgb, mask)
 
 
+def thin_cover(drawn: np.ndarray, model: np.ndarray) -> float:
+    """Share of the model's thin parts (a staff, a blade, a tail tip: what a 3x3 opening takes
+    off its silhouette) that the drawing covers within a pixel; 1 when it has none. IoU barely
+    notices a staff left out, this does."""
+    import cv2
+    m = model.astype(np.uint8)
+    thin = (m > 0) & (cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) == 0)
+    if thin.sum() < 6:
+        return 1.0
+    near = cv2.dilate(drawn.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    return float((thin & near).sum()) / float(thin.sum())
+
+
 def iou(a: np.ndarray, b: np.ndarray) -> float:
     return float((a & b).sum()) / max(1, int((a | b).sum()))
 
@@ -762,9 +896,41 @@ class KeySet:
 
 
 REFERENCE = "S"                    # drawn first; every other direction copies its design
-# (init: o = outlined / p = plain, denoise) tried per view; on the knight the outlined init won
-# every direction over a plain one (sharper), 0.72 most diagonals, 0.6 the reference and backs
+# (init: o = outlined / k = outlined + local contrast, denoise[, seed offset]) tried per view;
+# on the knight the outlined init won every direction over a plain one (sharper). Back views
+# (the model's far side is a blurred projection of the picture) get a third, crisper try.
 CANDIDATES = (("o", 0.6), ("o", 0.72))
+BACK_CANDIDATES = (("k", 0.6, 1), ("o", 0.6), ("o", 0.72))
+# a try this good is kept without drawing the others (IoU, colour distance, sharpness vs the
+# reference: back views are softer by nature): ~half the GPU time of trying every candidate
+GOOD = {("person", "front"): (0.88, 0.36, 0.85), ("person", "back"): (0.88, 0.30, 0.60),
+        # animals: small frames (a wolf is ~30 px tall) cost IoU at every edge
+        ("animal", "front"): (0.80, 0.42, 0.80), ("animal", "back"): (0.78, 0.42, 0.60)}
+# the view the others copy: people from the front; animals from the side (a wolf's front view
+# at sprite size is a blob; its profile carries the design)
+REFERENCES = {"person": "S", "animal": "E"}
+SHARP_WEIGHT = 0.8                 # score = IoU + w * sharpness vs reference - colour - off-model
+
+
+class Cancelled(Exception):
+    """The user stopped drawing; drawings made so far stay in the keys folder (resume)."""
+
+
+def available() -> bool:
+    """Can this PC draw characters (a local ComfyUI is installed or answering)? PIXEL_DRAWN=0/1
+    forces it (tests: 0)."""
+    import os
+    env = os.environ.get("PIXEL_DRAWN")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false", "no", "off", "")
+    try:
+        from .generate import ComfyClient, find_comfyui
+        if find_comfyui() is not None:
+            return True
+        ComfyClient().ping()
+        return True
+    except Exception:  # noqa: BLE001 - not installed, not running
+        return False
 
 
 def _panel(sprite_rgba: np.ndarray, mask: np.ndarray, y0: int, size: int, k: int) -> Image.Image:
@@ -789,22 +955,144 @@ def _side_reference(angle: float) -> str:
     return "E" if (angle >= 270.0 or angle < 90.0) else "W"
 
 
+def _is_back(angle: float) -> bool:
+    return 180.0 < angle < 360.0
+
+
+def mirror_frame(arr: np.ndarray, ox: float) -> np.ndarray:
+    """A frame-sized array mirrored about the camera's vertical axis (screen x = ox): what the
+    twin direction (angle -> 180 - angle) sees of a left/right-symmetric model."""
+    W = arr.shape[1]
+    return np.roll(np.fliplr(arr), int(round(2 * ox - W)), 1)
+
+
+def twin_index(cams: list[Camera], k: int) -> int | None:
+    """The direction that sees the model mirrored (E <-> W, SE <-> SW, NE <-> NW...)."""
+    n = len(cams)
+    a = (180.0 - cams[k].angle) % 360.0
+    j = int(round(a / (360.0 / n))) % n
+    return j if j != k else None
+
+
+def symmetric_pair(views: list[RestView], cams: list[Camera], k: int, j: int,
+                   min_iou: float = 0.93, max_colour: float = 0.12) -> bool:
+    """Does direction k look like direction j mirrored (silhouette and the model's colours)?
+    A sword in one hand or a cape over one shoulder fails it, so only symmetric models mirror."""
+    a, b = views[k], views[j]
+    flip = mirror_frame(b.mask, cams[k].ox)
+    if iou(flip, a.mask) < min_iou:
+        return False
+    col = mirror_frame(np.nan_to_num(b.colour), cams[k].ox).clip(0, 255).astype(np.uint8)
+    return colour_distance(np.nan_to_num(a.colour).clip(0, 255).astype(np.uint8), a.mask,
+                           col, flip) <= max_colour
+
+
+def neutral_tint(rgb: np.ndarray, mask: np.ndarray, view: RestView, *, chroma: float = 8.0,
+                 reach: float = 20.0, least: float = 0.08, keep: float = 0.2):
+    """Take out the colour cast the image model puts on neutral things (steel drawn lavender by
+    "hue-shifted shading"): the median a/b of the drawing where the MODEL is grey, minus the
+    model's own, is removed from the drawing's near-grey pixels (fading out by chroma 'reach'),
+    so shading's relative hue shifts and saturated parts (a red cape) stay as drawn. `keep` of
+    the cast stays (the house style's cool shadows); the weights are smoothed over neighbours so
+    one shaded surface shifts as one (per-pixel weights split ramps into speckle).
+    Returns (rgb, (da, db) removed)."""
+    from .color import lab_to_rgb, rgb_to_lab
+    if view.colour is None:
+        return rgb, (0.0, 0.0)
+    m = mask & view.mask
+    if m.sum() < 20:
+        return rgb, (0.0, 0.0)
+    lm = rgb_to_lab(np.nan_to_num(view.colour[m]).astype(np.float32))
+    neu = np.hypot(lm[:, 1], lm[:, 2]) < chroma
+    if neu.sum() < max(20, least * m.sum()):
+        return rgb, (0.0, 0.0)
+    ld = rgb_to_lab(rgb[m].astype(np.float32))
+    # a near-grey model is grey: half its own faint tint (red bleeding off a cape) is the target
+    tint = (1 - keep) * (np.median(ld[neu, 1:], 0) - 0.5 * np.median(lm[neu, 1:], 0))
+    if float(np.hypot(*tint)) < 2.0:
+        return rgb, (0.0, 0.0)
+    import cv2
+    lab = rgb_to_lab(rgb.astype(np.float32))
+    ab = lab[..., 1:] - tint
+    w = np.where(mask, np.clip((reach - np.hypot(ab[..., 0], ab[..., 1])) / (reach / 2), 0, 1), 0)
+    on = (w > 0).astype(np.float32)                    # saturated pixels stay exactly as drawn
+    wsum = cv2.GaussianBlur(on, (0, 0), 1.0)
+    w = np.where(w > 0, cv2.GaussianBlur(w.astype(np.float32), (0, 0), 1.0)
+                 / np.maximum(wsum, 1e-6), 0)
+    lab[..., 1:] -= tint[None, None] * w[..., None]
+    out = rgb.copy()
+    out[mask] = lab_to_rgb(lab[mask])
+    return out, (float(tint[0]), float(tint[1]))
+
+
+def _gen_name(d: str, cand) -> str:
+    tag, den = cand[0], cand[1]
+    off = cand[2] if len(cand) > 2 else 0
+    return f"drawn_{d}_{tag}{int(round(den * 100))}" + (f"_s{off}" if off else "") + ".png"
+
+
+def draw_order(names: list[str], cams: list[Camera], reference: str = REFERENCE) -> list[int]:
+    """Reference first, then the sides, the back, the front diagonals, the back diagonals: each
+    view is drawn after the views it copies."""
+    ref = reference if reference in names else names[0]
+
+    def key(k):
+        d, a = names[k], cams[k].angle
+        if d == ref:
+            return (0, k)
+        if d in ("E", "W"):
+            return (1, k)
+        if d == "N":
+            return (2, k)
+        return (4 if _is_back(a) else 3, k)
+    return sorted(range(len(names)), key=key)
+
+
+def view_refs(d: str, angle: float, done, reference: str = REFERENCE) -> list[str]:
+    """The drawn views a direction is painted beside: front views beside the reference (S);
+    back views beside the back (N; N itself beside S) and the nearest side view."""
+    if d == reference:
+        return []
+    if not _is_back(angle):
+        return [reference]
+    refs = ["N" if d != "N" and "N" in done else reference]
+    side = _side_reference(angle)
+    if side in refs:                          # the reference is that side: the other one
+        side = "W" if side == "E" else "E"
+    if side in done and side != d and side not in refs:
+        refs.append(side)
+    return refs
+
+
 def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestView], rest: Pose,
                      prompt: str, settings, *, seed: int = 1234, style=None, client=None,
                      folder: Path | None = None, reuse: bool = True, candidates=CANDIDATES,
-                     reference: str = REFERENCE, drop_held: bool = True, absent=(),
+                     back_candidates=BACK_CANDIDATES, reference: str | None = None,
+                     drop_held: bool = True, absent=(), kind: str = "person",
+                     seeds: dict | None = None, mirror: bool | None = None, never_mirror=(),
+                     tint: bool = True, palette=None, cancel=None, gpu=None,
                      progress=None) -> KeySet:
     """Key drawings that agree with each other: the reference direction (S) is drawn first over
     the model (img2img on the frame grid); every other direction is painted on a canvas
-    [reference | this direction's model render] (back views: [front | side | render]) where
-    only the right panel is repainted (inpaint), so the left panels act as the design sheet.
-    Each direction tries `candidates` (init style, denoise) and keeps the best by silhouette
-    IoU, sharpness, colour distance to the reference and pixels drawn off the model.
-    absent: things the model doesn't have (e.g. "shield"): kept out by the negative prompt (the
-    image model adds a shield to any knight; nothing here can see that the model has none)."""
+    [reference(s) | this direction's model render] where only the right panel is repainted
+    (inpaint), so the left panels act as the design sheet (front views beside S, the back beside
+    S + a side, back diagonals beside the back + a side).
+    Each direction tries `candidates` (back views `back_candidates`: (init, denoise[, seed
+    offset])) and keeps the best by silhouette IoU, sharpness, colour distance to its first
+    reference and pixels drawn off the model. Neutral colours are corrected toward the model's
+    (neutral_tint). mirror: None = a direction whose twin (E <-> W) is drawn already is mirrored
+    from it when the model looks the same mirrored (symmetric_pair); True/False = always/never.
+    absent: things the model doesn't have (e.g. "shield"): kept out by the negative prompt.
+    seeds: per direction seed (a redrawn direction gets a new one). cancel(): True = stop
+    (raises Cancelled; finished drawings stay for a resume). gpu(what): a context manager held
+    around each drawing (e.g. a lock shared with other GPU users). palette: keep this one (a
+    redrawn direction is snapped to the palette the others were made with, so they stay as
+    they were)."""
+    from contextlib import nullcontext
+
     from .assets import project_style, with_style
     from .generate import generate_images
-    from .pipeline import finish, resolve_palette
+    from .pipeline import Prepared, finish, resolve_palette
     from .pixelclean import clean_sprite
     from .settings import Settings
     say = _say(progress)
@@ -812,36 +1100,52 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
     names = direction_names(n)
     W, H = cams[0].width, cams[0].height
     st = style if style is not None else project_style()
-    words = model_words(prompt) if drop_held else prompt
+    # held things the model lacks leave the words (a "sword and shield" knight without one);
+    # the ones it has stay: a thin staff only in the init picture got dropped by SDXL
+    words = model_words(prompt, tuple(absent) or HELD) if drop_held else prompt
+    seeds = dict(seeds or {})
     folder = Path(folder) if folder else None
     if folder:
         folder.mkdir(parents=True, exist_ok=True)
+    gpu = gpu or (lambda what: nullcontext())
     s_plain = Settings(**{**settings.to_dict(), "outline": False})
     outline_style = settings.outline_style if settings.outline else "none"
     preps: dict = {}
     keyrgba: dict = {}
     report: dict = {}
     cloud = None
+    reference = reference or REFERENCES.get(kind, REFERENCE)
     ref = reference if reference in names else names[0]
+    order = draw_order(names, cams, ref)
+    same = SAME_WORDS.get(kind, SAME_WORDS["person"])
 
-    def order_key(k):
-        d, a = names[k], cams[k].angle
-        if d == ref:
-            return (0, 0)
-        if d in ("E", "W"):
-            return (1, k)
-        return (3 if 180.0 < a < 360.0 else 2, k)
+    def cands(k):
+        return back_candidates if _is_back(cams[k].angle) and back_candidates else candidates
 
-    for k in sorted(range(n), key=order_key):
+    # how many drawings are left (for the ETA): every candidate file not made yet
+    left = sum(1 for k in order for c in cands(k)
+               if not (folder and reuse and (folder / _gen_name(names[k], c)).exists()))
+    made, took = 0, []                 # seconds per drawing (median: the first loads models)
+    for k in order:
         d = names[k]
         a = cams[k].angle
-        back = 180.0 < a < 360.0
-        refs = []
-        if d != ref:
-            refs = [ref]
-            side = _side_reference(a)
-            if back and side in keyrgba and side != d:
-                refs.append(side)
+        j = twin_index(cams, k)
+        if (j is not None and names[j] in preps and mirror is not False
+                and d not in never_mirror and (mirror or symmetric_pair(views, cams, k, j))):
+            src = preps[names[j]]
+            prep = Prepared(mirror_frame(src.rgb, cams[k].ox).copy(),
+                            mirror_frame(src.mask, cams[k].ox).copy())
+            preps[d] = prep
+            report[d] = dict(candidate=f"mirror of {names[j]}", iou=iou(prep.mask, views[k].mask),
+                             sharp=sharpness(prep.rgb, prep.mask), colour_distance=0.0,
+                             off_model=0.0, score=0.0, refs=[names[j]], mirrored=True,
+                             seed=report[names[j]].get("seed", seed))
+            keyrgba[d] = clean_sprite(finish(prep, s_plain, None), outline_style).rgba
+            left -= sum(1 for c in cands(k)
+                        if not (folder and reuse and (folder / _gen_name(d, c)).exists()))
+            say(f"{d}: mirrored from {names[j]} (the model is the same both ways)")
+            continue
+        refs = view_refs(d, a, keyrgba, ref)
         panels = len(refs) + 1
         target = 1024 if panels == 1 else (768 if panels == 2 else 640)
         region, kpx = grid_region(views[k], target)
@@ -851,25 +1155,36 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
             text, neg = with_style(KEY_PROMPT.format(prompt=words, view=view_words),
                                    f"{KEY_NEGATIVE}, {view_neg}", st, "character")
         else:
-            left = ", ".join(f"{'left' if i == 0 else 'middle'}: {PANEL_WORDS.get(r, r)}"
-                             for i, r in enumerate(refs))
+            left_words = ", ".join(f"{'left' if i == 0 else 'middle'}: {PANEL_WORDS.get(r, r)}"
+                                   for i, r in enumerate(refs))
             text, neg = with_style(
-                PAIR_PROMPT.format(n="two" if panels == 2 else "three", prompt=words,
-                                   views=f"{left}, right: {view_words}"),
-                PAIR_NEGATIVE, st, "character")
+                PAIR_PROMPT.format(n="two" if panels == 2 else "three", prompt=words, same=same,
+                                   views=f"{left_words}, right: {view_words}"),
+                f"{PAIR_NEGATIVE}, right: {view_neg}", st, "character")
         if absent:
             neg = f"{neg}, {', '.join(absent)}"
+        s_d = int(seeds.get(d, seed))
+        # colours compared with the view it copies most; the back with the side (S would reward
+        # a back view drawn as a second front)
+        cref = refs[-1] if d == "N" and len(refs) > 1 else (refs[0] if refs else None)
+        good = GOOD[(kind if kind in ("animal",) else "person",
+                     "back" if _is_back(a) else "front")]
         best = None
-        for tag, den in candidates:
-            name = f"drawn_{d}_{tag}{int(round(den * 100))}.png"
-            path = folder / name if folder else None
+        for cand in cands(k):
+            tag, den = cand[0], cand[1]
+            s_c = s_d + (cand[2] if len(cand) > 2 else 0)
+            path = folder / _gen_name(d, cand) if folder else None
             if path is not None and reuse and path.exists():
                 drawing = Image.open(path).convert("RGB")
             else:
+                if cancel is not None and cancel():
+                    raise Cancelled(f"Stopped before drawing {d}; {len(preps)} directions done "
+                                    "(they are kept: drawing again carries on from here)")
                 if cloud is None:
                     cloud = surface_cloud(rig, rest)
                 init = init_picture(rig, cams[k], region, rest, out=P, blocky=True, cloud=cloud,
-                                    view=views[k], outline=tag == "o")
+                                    view=views[k], outline=tag in ("o", "k"),
+                                    crisp=0.8 if tag == "k" else 0.0)
                 canvas = Image.new("RGB", (P * panels, P), "white")
                 for i, r in enumerate(refs):
                     canvas.paste(_panel(keyrgba[r], keyrgba[r][..., 3] > 0, region[1], region[2],
@@ -883,41 +1198,67 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
                     mask[:, (panels - 1) * P:] = 1
                 if client is None:
                     pace(say=say)
-                say(f"Drawing it facing {d} ({'over ' + ' + '.join(refs) if refs else 'reference'}, "
-                    f"denoise {den})...")
-                (drawing, _), = generate_images(text, neg, client=client, seed=seed, count=1,
-                                                init_image=canvas, denoise=den, mask=mask,
-                                                width=P * panels, height=P)
+                eta = ""
+                if made:
+                    eta = f", about {max(1, round(float(np.median(took)) * left / 60))} min left"
+                say(f"Drawing it facing {d} ({'beside ' + ' + '.join(refs) if refs else 'reference'}"
+                    f", try {tag}{den}; {made + 1} of {made + left}{eta})…")
+                t1 = time.time()
+                with gpu(f"hybrid: {d} {tag}{den}"):
+                    (drawing, _), = generate_images(text, neg, client=client, seed=s_c, count=1,
+                                                    init_image=canvas, denoise=den, mask=mask,
+                                                    width=P * panels, height=P)
+                took.append(time.time() - t1)
+                made += 1
+                left -= 1
                 drawing = drawing.crop(((panels - 1) * P, 0, panels * P, P))
                 if path is not None:
                     drawing.save(path)
             prep = drawing_to_frame(drawing, region, (W, H), settings, kpx)
             prep, off = trim_outside(prep, views[k].mask)
+            cast = (0.0, 0.0)
+            if tint:
+                prep.rgb, cast = neutral_tint(prep.rgb, prep.mask, views[k])
             sc_iou = iou(prep.mask, views[k].mask)
+            thin = thin_cover(prep.mask, views[k].mask)
             sharp = sharpness(prep.rgb, prep.mask)
-            dist = (colour_distance(prep.rgb, prep.mask, preps[ref].rgb, preps[ref].mask)
-                    if ref in preps else 0.0)
+            dist = (colour_distance(prep.rgb, prep.mask, preps[cref].rgb, preps[cref].mask)
+                    if cref in preps else 0.0)
             ref_sharp = sharpness(preps[ref].rgb, preps[ref].mask) if ref in preps else sharp
-            score = sc_iou + 0.5 * min(sharp / max(ref_sharp, 1e-6), 1.2) - dist - 2 * off
+            score = (sc_iou + SHARP_WEIGHT * min(sharp / max(ref_sharp, 1e-6), 1.2) - dist
+                     - 2 * off - (1.0 - thin))
             say(f"{d} {tag}{den}: IoU {sc_iou:.2f}, sharp {sharp:.1f}, colour distance "
-                f"{dist:.2f}, off-model {off:.1%} -> {score:.2f}")
+                f"{dist:.2f}, off-model {off:.1%}, thin parts {thin:.0%} -> {score:.2f}")
             if best is None or score > best[0]:
-                best = (score, prep, dict(candidate=f"{tag}{den}", iou=sc_iou, sharp=sharp,
-                                          colour_distance=dist, off_model=off, score=score,
-                                          refs=refs))
+                best = (score, prep, dict(candidate=f"{tag}{den}" + (f"+{cand[2]}" if len(cand) > 2
+                                                                     else ""),
+                                          iou=sc_iou, sharp=sharp, colour_distance=dist,
+                                          thin=thin,
+                                          off_model=off, score=score, refs=refs, seed=s_d,
+                                          tint=[round(cast[0], 2), round(cast[1], 2)]))
+            if (sc_iou >= good[0] and dist <= good[1] and sharp >= good[2] * ref_sharp
+                    and off < 0.02 and thin >= 0.7 and cand is not cands(k)[-1]):
+                say(f"{d}: {tag}{den} is good, keeping it")
+                left -= sum(1 for c in cands(k)[cands(k).index(cand) + 1:]
+                            if not (folder and reuse and (folder / _gen_name(d, c)).exists()))
+                break
         preps[d] = best[1]
         report[d] = best[2]
         keyrgba[d] = clean_sprite(finish(preps[d], s_plain, None), outline_style).rgba
-    order = list(names)
-    pixels = np.concatenate([preps[d].rgb[preps[d].mask] for d in order if preps[d].mask.any()])
-    palette = resolve_palette(s_plain, pixels)
-    sprites = [clean_sprite(finish(preps[d], s_plain, palette), outline_style) for d in order]
-    refsp = sprites[order.index(ref)]
-    for d, sp in zip(order, sprites):             # final numbers, on the shared palette
+    order_n = list(names)
+    if palette is None:
+        pixels = np.concatenate([preps[d].rgb[preps[d].mask] for d in order_n
+                                 if preps[d].mask.any()])
+        palette = resolve_palette(s_plain, pixels)
+    palette = np.asarray(palette, np.uint8)
+    sprites = [clean_sprite(finish(preps[d], s_plain, palette), outline_style) for d in order_n]
+    refsp = sprites[order_n.index(ref)]
+    for d, sp in zip(order_n, sprites):             # final numbers, on the shared palette
         report[d]["colour_distance_final"] = colour_distance(
             sp.rgba[..., :3], sp.indices >= 0, refsp.rgba[..., :3], refsp.indices >= 0)
-    return KeySet(order, sprites, [report[d]["iou"] for d in order], [seed] * n, [False] * n,
-                  report)
+    return KeySet(order_n, sprites, [report[d]["iou"] for d in order_n],
+                  [int(report[d].get("seed", seed)) for d in order_n],
+                  [bool(report[d].get("mirrored")) for d in order_n], report)
 
 
 def draw_keys(rig: Rig, body: Body, cams: list[Camera], views: list[RestView], rest: Pose,
@@ -1021,24 +1362,34 @@ def draw_keys(rig: Rig, body: Body, cams: list[Camera], views: list[RestView], r
 def _point_colours(body: Body, views: list[RestView], keys: KeySet, key_pose: Pose
                    ) -> list[np.ndarray]:
     """Per direction: a palette index for every body point, from the drawing of the nearest
-    direction that sees it (else from the nearest point that has one)."""
+    direction that sees it (else from the nearest point that has one). Other directions' edge
+    pixels (the outline) come last: a surface seen only edge-on there (a belly, the soles) would
+    come out outline-dark when it turns into view (lying down)."""
     from scipy.spatial import cKDTree
     n = len(views)
-    seen = []
+    seen, inner = [], []
     for v, sp in zip(views, keys.sprites):
+        on = sp.indices >= 0
+        pad = np.pad(on, 1)
+        edge = on & ~(pad[:-2, 1:-1] & pad[2:, 1:-1] & pad[1:-1, :-2] & pad[1:-1, 2:])
         flat = sp.indices.reshape(-1)
         idx = np.full(len(body.bind), -1, np.int32)
         ok = v.point_front & (v.point_pix >= 0)
         idx[ok] = flat[v.point_pix[ok]]
         seen.append(idx)
+        inside = idx.copy()
+        inside[ok & edge.reshape(-1)[np.maximum(v.point_pix, 0)]] = -1
+        inner.append(inside)
     rest_pts, _ = body.pose(key_pose.worlds)
     out = []
+    steps = sorted(range(1, n), key=lambda s_: (min(s_, n - s_), s_))
     for k in range(n):
         idx = seen[k].copy()
-        for step in sorted(range(1, n), key=lambda s_: (min(s_, n - s_), s_)):
-            j = (k + step) % n
-            need = idx < 0
-            idx[need] = seen[j][need]
+        for pool in (inner, seen):
+            for step in steps:
+                j = (k + step) % n
+                need = idx < 0
+                idx[need] = pool[j][need]
         missing = idx < 0
         if missing.any() and (~missing).any():
             tree = cKDTree(rest_pts[~missing])
@@ -1048,17 +1399,110 @@ def _point_colours(body: Body, views: list[RestView], keys: KeySet, key_pose: Po
     return out
 
 
+def has_shield(body: Body, pose: Pose, least: float = 0.09) -> bool:
+    """Does the model hold a shield? The forearm + hand part seen from the front and the side
+    (front surface, 128 px per body height): a shield is a broad plate there (widest inscribed
+    circle >= `least` of the height; a bare or gauntleted arm, a sword or a staff are under ~0.07,
+    the library paladin's shield 0.12)."""
+    from scipy.ndimage import distance_transform_edt
+    names = bone_names(body)
+    arm = [i for i, n in enumerate(names) if n.startswith(("forearm", "hand"))]
+    if not arm:
+        return False
+    pts, _ = body.pose(pose.worlds)
+    tall = float(np.ptp(pts[:, 1])) or 1.0
+    sel = np.isin(body.weights.argmax(1), arm)
+    size = 128
+    best = 0.0
+    for ang in (90.0, 0.0, 180.0):
+        cam = Camera(ang, 0.0, size / tall, size / 2, 0.0, size, size + 16)
+        sx, sy, d = cam.project(pts - pose.shift)
+        sy = sy + 8 + float(pts[:, 1].max()) * cam.scale
+        ix, iy = np.floor(sx).astype(np.int64), np.floor(sy).astype(np.int64)
+        ok = (ix >= 0) & (ix < size) & (iy >= 0) & (iy < size + 16)
+        lin = iy * size + ix
+        zmin = np.full(size * (size + 16), np.inf)
+        np.minimum.at(zmin, lin[ok], d[ok])
+        front = ok & (d <= zmin[np.where(ok, lin, 0)] + 0.02 * cam.scale) & sel
+        m = np.zeros(size * (size + 16), bool)
+        m[lin[front]] = True
+        best = max(best, float(distance_transform_edt(m.reshape(size + 16, size)).max()) / size)
+    return best >= least
+
+
+def auto_absent(prompt: str, kind: str, body: Body, pose: Pose) -> tuple[str, ...]:
+    """Things the image model would add that this model doesn't have, for the negative prompt.
+    People: a shield unless the model holds one (whatever the words say: the picture the model
+    was built from may have none). Animals: saddles, riders, collars... unless the words ask."""
+    words = prompt.lower()
+    if kind == "animal":
+        return tuple(w for w in ANIMAL_ABSENT if w not in words)
+    return () if has_shield(body, pose) else SHIELD_WORDS
+
+
+def facing_choice(key: Pose, pose: Pose, cams: list[Camera], k: int, node: int):
+    """For a pose whose body has turned (lying down, spinning): the direction j whose drawing
+    now faces camera k best -> (j, cosine). Drawing j shows the side of the body that faced
+    camera j at the key pose; after the torso's turn R that side faces R @ toward_j."""
+    def rot(w):
+        m = w[node][:3, :3]
+        return m / np.maximum(np.linalg.norm(m, axis=0, keepdims=True), 1e-12)
+    R = rot(pose.worlds) @ rot(key.worlds).T
+    toward = cams[k].axes()[2]
+    scores = [float(toward @ (R @ c.axes()[2])) for c in cams]
+    j = int(np.argmax(scores))
+    return j, scores[j]
+
+
+def _held_slots(body: Body):
+    """(held, arm) bone slots: the end of each arm (forearm + hand: auto-rigged weapon arms
+    often run the hand out along the blade, so the blade is mostly forearm) and the upper arms."""
+    names = bone_names(body)
+    held = [i for i, n in enumerate(names) if n.startswith(("hand", "forearm"))]
+    arm = [i for i, n in enumerate(names) if n.startswith("upper_arm")]
+    return held, arm
+
+
+def recolour_palette(palette: np.ndarray, pairs) -> np.ndarray:
+    """A re-skin's colour swaps ([[old hex, new hex], ...]) applied to the drawings' palette
+    (each palette colour within 4 Lab units of an old colour becomes its new one)."""
+    if not pairs:
+        return palette
+    from .color import rgb_to_lab
+    old = np.array([[int(o[i:i + 2], 16) for i in (0, 2, 4)] for o, _ in pairs], np.float32)
+    new = np.array([[int(nw[i:i + 2], 16) for i in (0, 2, 4)] for _, nw in pairs], np.uint8)
+    lp, lo = rgb_to_lab(palette.astype(np.float32)), rgb_to_lab(old)
+    d = np.linalg.norm(lp[:, None] - lo[None], axis=-1)
+    near = d.argmin(1)
+    out = palette.copy()
+    hit = d[np.arange(len(palette)), near] < 4.0
+    out[hit] = new[near[hit]]
+    return out
+
+
+def _check(cancel, what: str):
+    if cancel is not None and cancel():
+        raise Cancelled(what)
+
+
 def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frames: int = 8,
                     animations: list[str] | None = None, elevation: float = 30.0,
                     seed: int = 1234, denoise: float = 0.6, style=None, client=None,
                     folder=None, reuse: bool = True, points: int = 400_000, clean: bool = True,
                     normals: bool = True, mirror: bool | None = None, key_pose: str = "idle",
                     blocky: bool = True, retries: int = 1, min_iou: float = 0.72,
-                    paired: bool = True, candidates=CANDIDATES, max_turn: float = 45.0,
-                    absent=(), progress=None) -> tuple[AnimatedSet, dict]:
+                    paired: bool = True, candidates=CANDIDATES, back_candidates=BACK_CANDIDATES,
+                    max_turn: float = 45.0, min_face: float = 0.55, absent=None,
+                    kind: str = "person", seeds: dict | None = None, never_mirror=(),
+                    recolour=None, palette=None, cancel=None, gpu=None, progress=None
+                    ) -> tuple[AnimatedSet, dict]:
     """A rigged character -> AnimatedSet whose every frame is a key drawing bent by the
     skeleton. settings: converter settings at the frame size (width x height, colours,
-    outline). Returns (set, info: keys, ious, seeds, seconds)."""
+    outline). absent: None = auto_absent (from the model and the words). Poses whose torso
+    turned more than max_turn degrees out of a drawing (lying down, spins) bend the drawing that
+    faces the camera then (facing_choice); under min_face (cosine) the model's own surface is
+    used, coloured from the drawings (model_frame). recolour: a re-skin's colour swaps.
+    Returns (set, info: keys, ious, seeds, seconds)."""
     from .normals import decode, encode, face_camera, from_drawing
     from .pixelclean import clean_sprite
     say = _say(progress)
@@ -1076,50 +1520,92 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
         rest = poses[names_c.index(key_pose)][0]   # are near it, so the drawing bends least
     cams = None
     saved = Path(folder) / "keys.json" if folder else None
-    if reuse and saved is not None and saved.exists():   # keep the scale the keys were drawn at
+    old = {}
+    if saved is not None and saved.exists():
         try:
-            cam = json.loads(saved.read_text(encoding="utf-8")).get("camera") or {}
+            old = json.loads(saved.read_text(encoding="utf-8"))
         except ValueError:
-            cam = {}
+            old = {}
+    if reuse:                                  # keep the scale the keys were drawn at
+        cam = old.get("camera") or {}
         if (cam.get("width"), cam.get("height"), cam.get("directions"), cam.get("elevation"),
                 cam.get("key_pose")) == (W, H, len(names), elevation, key_pose):
             cams = [Camera(k * 360.0 / len(names), elevation, cam["scale"], cam["ox"], cam["oy"],
                            W, H) for k in range(len(names))]
     if cams is None:
         cams = framing(body, [p for row in poses for p in row] + [rest], names, elevation, W, H)
+    camera = {"scale": cams[0].scale, "ox": cams[0].ox, "oy": cams[0].oy, "width": W,
+              "height": H, "directions": len(names), "elevation": elevation, "key_pose": key_pose}
+    if saved is not None and not saved.exists():   # a cancelled run resumes at the same scale
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        saved.write_text(json.dumps({"camera": camera, "partial": True}), encoding="utf-8")
+    if recolour is None:
+        recolour = old.get("recolour")
     pts, nrm = body.pose(rest.worlds)
     views = [rest_view(body, c, rest, pts, nrm) for c in cams]
+    if absent is None:
+        absent = auto_absent(prompt, kind, body, rest)
+        if absent:
+            say(f"Keeping out what the model doesn't have: {', '.join(absent)}")
     t_keys = time.time()
     if paired:
         keys = draw_keys_paired(rig, body, cams, views, rest, prompt, settings, seed=seed,
                                 style=style, client=client, folder=folder, reuse=reuse,
-                                candidates=candidates, absent=absent, progress=say)
+                                candidates=candidates, back_candidates=back_candidates,
+                                absent=absent, kind=kind, seeds=seeds, mirror=mirror,
+                                never_mirror=never_mirror, palette=palette, cancel=cancel,
+                                gpu=gpu, progress=say)
     else:
         keys = draw_keys(rig, body, cams, views, rest, prompt, settings, seed=seed,
                          denoise=denoise, style=style, client=client, folder=folder, reuse=reuse,
                          mirror=mirror, blocky=blocky, retries=retries, min_iou=min_iou,
                          progress=say)
     t_bend = time.time()
+    drawn_palette = [f"{r:02x}{g:02x}{b:02x}" for r, g, b in keys.sprites[0].palette.tolist()]
+    palette = recolour_palette(keys.sprites[0].palette, recolour)
+    for sp in keys.sprites:
+        sp.palette = palette
+        on = sp.indices >= 0
+        sp.rgba[on, :3] = palette[sp.indices[on]]
     if folder:
         for d, sp in zip(keys.names, keys.sprites):
             Image.fromarray(sp.rgba).save(Path(folder) / f"key_{d}.png")
     colours = _point_colours(body, views, keys, rest)
-    palette = keys.sprites[0].palette
     outline = settings.outline_style if settings.outline else "none"
     say("Bending the drawings for every frame…")
     sprites = [[[None] * frames for _ in names] for _ in clips]
     torso = _torso_node(rig)
-    fallback = 0
+    held, arm = _held_slots(body)
+    fallback, refaced = 0, 0
+    drawns = []
     for k, cam in enumerate(cams):
-        drawn = glue(body, views[k], cam, rest, keys.sprites[k].indices, palette)
+        sp = keys.sprites[k]
+        drawn = glue(body, views[k], cam, rest, sp.indices, palette, rgb=sp.rgba[..., :3],
+                     held=held, arm=arm)
         add_hidden(drawn, body, views[k], rest, colours[k], pts)
+        drawns.append(drawn)
+    total = len(cams) * sum(len(r) for r in poses)
+    done, t_b = 0, time.time()
+    for k, cam in enumerate(cams):
+        _check(cancel, "Stopped while bending the drawings (the key drawings are kept)")
+        if k and done:
+            eta = (time.time() - t_b) / done * (total - done)
+            say(f"Bending the drawings: facing {names[k]} ({k + 1} of {len(cams)}, "
+                f"about {max(1, round(eta))} s left)…")
         for a, row in enumerate(poses):
             for f, pose in enumerate(row):
+                done += 1
+                j = k
                 if torso is not None and turned_away(rest, pose, cam, torso) > max_turn:
-                    idx, ncam = model_frame(body, pose, cam, colours[k])   # lying down etc.
+                    j, face = facing_choice(rest, pose, cams, k, torso)
+                    if face < min_face:
+                        j = None
+                if j is None:
+                    idx, ncam = model_frame(body, pose, cam, colours[k])   # nothing faces it
                     fallback += 1
                 else:
-                    idx, ncam = bend(drawn, body, pose)
+                    idx, ncam = bend(drawns[j], body, pose, cam=cam)
+                    refaced += j != k
                 if clean:
                     idx = drop_fragments(idx)
                 sp = _sprite(idx, palette, ncam)
@@ -1151,10 +1637,10 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
                                       "bending": time.time() - t_bend},
             "ious": dict(zip(keys.names, keys.ious)), "seeds": dict(zip(keys.names, keys.seeds)),
             "mirrored": [n for n, m in zip(keys.names, keys.mirrored) if m],
-            "keys_report": keys.report, "model_frames": fallback,
-            "camera": {"scale": cams[0].scale, "ox": cams[0].ox, "oy": cams[0].oy, "width": W,
-                       "height": H, "directions": len(names), "elevation": elevation,
-                       "key_pose": key_pose}}
+            "keys_report": keys.report, "model_frames": fallback, "refaced_frames": refaced,
+            "absent": list(absent or ()), "camera": camera, "palette": drawn_palette}
+    if recolour:
+        info["recolour"] = recolour
     return AnimatedSet(actions, names, sprites), info
 
 
@@ -1265,33 +1751,10 @@ def _sprite(idx: np.ndarray, palette: np.ndarray, ncam: np.ndarray | None = None
     return Sprite(rgba, idx.astype(np.int32), palette, normal)
 
 
-def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None,
-                 directions: int | None = None, clips: list[str] | None = None, frames: int = 8,
-                 seed: int = 1234, denoise: float = 0.6, kind: str | None = None,
-                 blocky: bool = True, candidates=CANDIDATES, absent=(),
-                 size: str | None = None, client=None, keys_folder=None, reuse: bool = True,
-                 progress=None) -> tuple[AnimatedSet, dict, list[Path]]:
-    """A library Character (or a rigged .glb + prompt) -> drawn sheets at the library scale of
-    the CURRENT project (frame size, colours, outline, elevation, directions), written with
-    anim3d.write_animated (sheet.png/json/aseprite/tres/_facing.gd + _n + _glow) to out_png
-    (default: the character's sheet.png). keys_folder: where the key drawings are kept
-    (default: <character>/keys)."""
-    from .library import Character, frame_size, style as lib_style
+def drawn_settings(kind: str, size: str, st):
+    """Converter settings for a library character's frames (the same ones render_sheets uses)."""
+    from .library import frame_size
     from .settings import settings_for
-    st = lib_style()
-    if isinstance(character_or_rigged, Character):
-        ch = character_or_rigged
-        rigged, prompt = ch.rigged, prompt or ch.prompt
-        kind, size = kind or ch.kind, size or ch.size
-        out_png = out_png or ch.sheet
-        keys_folder = keys_folder or ch.folder / "keys"
-    else:
-        rigged = Path(character_or_rigged)
-        kind, size = kind or "person", size or "normal"
-        out_png = out_png or rigged.with_name("sheet.png")
-        keys_folder = keys_folder or rigged.parent / "keys"
-    if not prompt:
-        raise ValueError("Drawn sheets need the character's words (prompt).")
     w, h = frame_size(kind, size, st)
     colours = st.colours if kind == "person" else max(8, round(st.colours * 2 / 3))
     s = settings_for(kind if kind == "animal" else "person", width=w, height=h, colors=colours)
@@ -1301,12 +1764,75 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
         s.outline_style = st.outline
     if st.palette != "auto":
         s.palette = st.palette
+    return s
+
+
+def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None,
+                 directions: int | None = None, clips: list[str] | None = None, frames: int = 8,
+                 seed: int = 1234, denoise: float = 0.6, kind: str | None = None,
+                 blocky: bool = True, candidates=CANDIDATES, back_candidates=BACK_CANDIDATES,
+                 absent=None, size: str | None = None, client=None, keys_folder=None,
+                 reuse: bool = True, redraw=(), name: str = "", cancel=None, gpu=None,
+                 progress=None) -> tuple[AnimatedSet, dict, list[Path]]:
+    """A library Character (or a rigged .glb + prompt) -> drawn sheets at the library scale of
+    the CURRENT project (frame size, colours, outline, elevation, directions), written with
+    anim3d.write_animated (sheet.png/json/aseprite/tres/_facing.gd + _n + _glow) to out_png
+    (default: the character's sheet.png). keys_folder: where the key drawings are kept
+    (default: <character>/keys); drawings already there are reused (resume after a cancel).
+    redraw: directions to draw again with a new seed (one bad direction); reuse=False draws
+    every direction again (a new house style). No words: the character's name / kind."""
+    from .library import Character, style as lib_style
+    st = lib_style()
+    if isinstance(character_or_rigged, Character):
+        ch = character_or_rigged
+        rigged, prompt = ch.rigged, prompt or ch.prompt
+        kind, size = kind or ch.kind, size or ch.size
+        name = name or ch.name
+        out_png = out_png or ch.sheet
+        keys_folder = keys_folder or ch.folder / "keys"
+    else:
+        rigged = Path(character_or_rigged)
+        kind, size = kind or "person", size or ("medium" if kind == "animal" else "normal")
+        out_png = out_png or rigged.with_name("sheet.png")
+        keys_folder = keys_folder or rigged.parent / "keys"
+    keys_folder = Path(keys_folder)
+    saved = keys_folder / "keys.json"
+    old = {}
+    if saved.exists():
+        try:
+            old = json.loads(saved.read_text(encoding="utf-8"))
+        except ValueError:
+            old = {}
+    if not prompt:                        # the words it was drawn from, else its name
+        prompt = old.get("prompt") or (f"a {name.lower()}" if name else
+                                       ("an animal" if kind == "animal" else "a character"))
+    seeds = {d: int(v) for d, v in (old.get("seeds") or {}).items()} if reuse else {}
+    bin_ = keys_folder / "old"
+    for d in (redraw if reuse else ("",)):   # old drawings put aside (a candidate not tried
+        if reuse:                            # this time must not be picked up later)
+            seeds[d] = int(seeds.get(d, seed)) + 7919    # a new seed
+        if keys_folder.exists():
+            bin_.mkdir(exist_ok=True)
+            for f in keys_folder.glob(f"drawn_{d}_*.png" if d else "drawn_*.png"):
+                f.replace(bin_ / f.name)
+    s = drawn_settings(kind, size, st)
     anim, info = drawn_animation(rigged, prompt, s, directions=directions or st.directions,
                                  frames=frames, animations=clips, elevation=st.elevation,
                                  seed=seed, denoise=denoise, style=st, client=client,
                                  folder=keys_folder, reuse=reuse, blocky=blocky,
-                                 candidates=candidates, absent=absent, progress=progress)
+                                 candidates=candidates, back_candidates=back_candidates,
+                                 absent=absent, kind=kind, seeds=seeds, never_mirror=tuple(redraw),
+                                 recolour=old.get("recolour"), cancel=cancel, gpu=gpu,
+                                 palette=_hex_palette(old.get("palette")) if redraw else None,
+                                 progress=progress)
     written = write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
     meta = {k: v for k, v in info.items() if k != "keys"}
-    Path(keys_folder, "keys.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
+    meta["prompt"] = prompt
+    saved.write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return anim, info, written
+
+
+def _hex_palette(hexes):
+    if not hexes:
+        return None
+    return np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in hexes], np.uint8)

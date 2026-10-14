@@ -31,6 +31,8 @@ PRESETS = {
     "gamemaker": "GameMaker (one _stripN PNG per animation + sprite_add loader)",
     "aseprite": "Aseprite (.aseprite with tags)",
     "generic": "Generic (PNG + JSON + single frames)",
+    "godot-3d-model": "Godot 3D model (game-ready .glb LODs, textures, skin + clips)",
+    "unity-3d-model": "Unity 3D model (.ppmodel + importer: LODGroup, skin, clips; .obj for props)",
 }
 
 
@@ -979,8 +981,20 @@ def _generic(src: Source, out: Path, single_frames: bool = True, **_) -> list[Pa
     return written
 
 
+# kind -> "module:function"(src, preset, out, default_writer, **opts): adds (or replaces) files
+KIND_EXPORTS = {"weather": "atmos_export:export_kind", "water": "atmos_export:export_kind",
+                "background": "atmos_export:export_kind"}
+
 _WRITERS = {"godot-2d": _godot_2d, "godot-hd2d": _godot_hd2d, "unity": _unity,
-            "gamemaker": _gamemaker, "aseprite": _aseprite, "generic": _generic}
+            "gamemaker": _gamemaker, "aseprite": _aseprite, "generic": _generic,
+            "godot-3d-model": lambda src, out, **o: _model3d("godot", src, out, **o),
+            "unity-3d-model": lambda src, out, **o: _model3d("unity", src, out, **o)}
+
+
+def _model3d(engine: str, src: Source, out: Path, **opts) -> list[Path]:
+    """Game-ready 3D model (gamemodel.py; built into <asset>/model_game if missing)."""
+    from .gamemodel_export import export_godot, export_unity
+    return (export_godot if engine == "godot" else export_unity)(src, out, **opts)
 
 
 # --------------------------------------------------------------------------- public API
@@ -995,9 +1009,18 @@ def export_asset(asset, preset: str, out_dir, **opts) -> list[Path]:
     True)."""
     if preset not in _WRITERS:
         raise ValueError(f"Unknown export preset '{preset}' (use {', '.join(PRESETS)})")
-    src = source(asset)
+    # 3D model presets read the asset's model files, not a sprite sheet
+    src = asset if preset.endswith("-3d-model") else source(asset)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    if preset.endswith("-3d-model"):
+        return _WRITERS[preset](src, out, **opts)
+    hook = KIND_EXPORTS.get(src.kind)
+    if hook:                                   # kinds with files of their own (scenes, layers...)
+        import importlib
+        mod, fn = hook.split(":")
+        return getattr(importlib.import_module(f".{mod}", __package__), fn)(
+            src, preset, out, lambda: _WRITERS[preset](src, out, **opts), **opts)
     return _WRITERS[preset](src, out, **opts)
 
 

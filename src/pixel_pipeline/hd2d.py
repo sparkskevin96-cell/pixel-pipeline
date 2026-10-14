@@ -287,6 +287,64 @@ void fragment() {
 }
 """
 
+WATER_SHADER_PIXEL = """shader_type spatial;
+// Pixel-art water (make_hd2d(water="pixel"), water.py's look in 3D): ripples in whole water
+// pixels stepping at 8 fps, colour bands, crest lines, glints that bloom, foam where the water
+// meets the shore (from the depth buffer), and a rippling reflection of what stands above it
+// (sprites, torches: taken from the screen, so bright things still bloom in the water).
+render_mode cull_disabled;
+
+uniform sampler2D ripples : filter_linear, repeat_enable;
+uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
+uniform vec3 deep : source_color = vec3(0.04, 0.10, 0.30);
+uniform vec3 shallow : source_color = vec3(0.10, 0.28, 0.62);
+uniform float sparkle = 2.5;
+uniform float pixel = 0.03125;
+uniform float bands = 5.0;
+uniform float reflect = 0.4;
+uniform float reflect_offset = 0.045;
+uniform float foam_width = 0.16;
+
+void vertex() {
+	VERTEX.y += sin(TIME * 1.3 + VERTEX.x * 0.9) * 0.015 + cos(TIME * 1.1 + VERTEX.z * 0.7) * 0.015;
+}
+
+void fragment() {
+	vec2 w = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xz;
+	vec2 q = floor(w / pixel) * pixel + pixel * 0.5;
+	float t = floor(TIME * 8.0) / 8.0;
+	float a = texture(ripples, q * 0.07 + vec2(t * 0.012, t * 0.008)).r;
+	float b = texture(ripples, q * 0.11 - vec2(t * 0.01, -t * 0.016)).r;
+	float r = a * b;
+	float lv = floor(smoothstep(0.08, 0.5, r) * bands) / bands;
+	vec3 col = mix(deep, shallow, lv * 0.6);
+	float c = texture(ripples, vec2(q.x * 0.35, q.y * 1.4) + vec2(t * 0.03, 0.0)).r;
+	float crest = step(0.74, c) * step(0.3, r);
+	col = mix(col, shallow * 1.35 + vec3(0.04), crest * 0.45);
+	float d = texture(depth_tex, SCREEN_UV).r;
+	vec4 v = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, d, 1.0);
+	float thick = -v.z / v.w + VERTEX.z;
+	float foam = 1.0 - smoothstep(0.0, foam_width, thick);
+	float fq = step(0.55, foam) + step(0.2, foam) * step(0.5, fract((q.x + q.y) * 6.0 + t * 0.5));
+	vec2 ruv = SCREEN_UV + vec2((a - 0.5) * 0.012, -reflect_offset + (b - 0.5) * 0.01);
+	vec3 refl = textureLod(screen_tex, clamp(ruv, vec2(0.001), vec2(0.999)), 0.0).rgb;
+	float fres = reflect * (0.6 + 0.4 * pow(1.0 - abs(dot(NORMAL, VIEW)), 2.0));
+	col = mix(col, refl, fres * 0.7);
+	col = mix(col, mix(shallow, vec3(0.85, 0.92, 1.0), 0.6), clamp(fq, 0.0, 1.0) * 0.55);
+	ALBEDO = col;
+	float bright = max(max(refl.r, refl.g), refl.b);
+	EMISSION = refl * smoothstep(0.75, 1.2, bright) * reflect * 1.5;
+	float g = texture(ripples, q * 0.9 + vec2(t * 0.05, -t * 0.04)).r;
+	EMISSION += vec3(0.85, 0.92, 1.0) * step(0.8, g) * smoothstep(0.35, 0.55, r) * sparkle;
+	ROUGHNESS = 0.06;
+	METALLIC = 0.0;
+	SPECULAR = 0.8;
+	ALPHA = 0.9;
+}
+"""
+WATER_LOOKS = ("classic", "pixel")
+
 FLAME_SHADER = """shader_type spatial;
 // A pixel-art flame on a camera-facing quad: a coarse pixel grid, three hard colour bands,
 // HDR bright so only the fire blooms.
@@ -404,6 +462,7 @@ var blobs := []          # contact shadow materials
 var water_mat: ShaderMaterial
 var effects := {}        # name -> effect sheet (res://effects/<name>/)
 var live_effects := []   # playing effects: {node, mat, e, t, loop, light, energy}
+var weather: Node = null  # res://weather/board_weather.gd (make_hd2d(weather=...))
 const LIGHT_ORDER := ["dawn", "noon", "sunset", "night"]
 const SPELL := {"mage": Color(0.72, 0.42, 1.0), "cleric": Color(1.0, 0.84, 0.45), "physician": Color(0.5, 1.0, 0.62)}
 
@@ -424,6 +483,7 @@ func _ready() -> void:
 	add_child(overlay)
 	_build_cursor()
 	_build_effects()
+	_build_weather()
 	_hud()
 	apply_lighting(light_name)
 
@@ -546,6 +606,8 @@ func apply_lighting(name: String) -> void:
 		water_mat.set_shader_parameter("deep", _c(L.get("water_deep"), Color(0.04, 0.10, 0.30)))
 		water_mat.set_shader_parameter("shallow", _c(L.get("water_shallow"), Color(0.10, 0.28, 0.62)))
 		water_mat.set_shader_parameter("sparkle", float(L.get("sparkle", 2.5)))
+	if weather != null:
+		weather.apply(L)
 	if hud != null:
 		_update_hud()
 
@@ -968,6 +1030,14 @@ func _load_effect(name: String) -> Variant:
 		"light": _c(info.get("light"), Color(1.0, 0.8, 0.5)), "ground": bool(info.get("ground", false))}
 	effects[name] = e
 	return e
+
+func _build_weather() -> void:
+	# weather assets over the board (weather_hd2d.py writes res://weather/ when asked)
+	if not FileAccess.file_exists("res://weather/board_weather.gd"):
+		return
+	weather = load("res://weather/board_weather.gd").new()
+	add_child(weather)
+	weather.setup(self)
 
 func _build_effects() -> void:
 	if DirAccess.dir_exists_absolute("res://effects"):
@@ -1789,7 +1859,7 @@ def board_look(tiles, tile_px: int):
 def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str = "HD-2D Tactics",
               iso: bool = True, tile_px: int = 32, ppu: float = 42.0, lighting: str = "sunset",
               bands: float = 4.0, effects: dict | None = None, place_effects=(),
-              tiles=None) -> list[Path]:
+              tiles=None, weather=None, water: str = "classic") -> list[Path]:
     """Write the Godot project: menu, real 3D and fake 3D scenes (and the iso 2D look when
     iso_scene is available). units: {name: sheet.png from turnaround --animate}. lighting: the
     time of day it starts at (LIGHTING: dawn, noon, sunset, night; L cycles them), bands: toon
@@ -1798,7 +1868,12 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
     None = the current project's saved tilesets at tile_px when it has any (tilegen.MapLook:
     tops from each terrain's own set with a variant per cell, walls in the cliff set's rock,
     stone tiers in the wall set's, planks from the fence set), a Project / MapLook = those,
-    False = the procedural neo 16-bit look."""
+    False = the procedural neo 16-bit look. weather: rain | storm | snow | fog | god_rays | leaves |
+    ... (weather.py kinds, a saved weather asset, or a list): the effect over the board + matching
+    light (weather_hd2d.install; needs `godot --import`). water: classic | pixel (WATER_SHADER_PIXEL:
+    banded pixel ripples, shore foam, reflections)."""
+    if water not in WATER_LOOKS:
+        raise ValueError(f"Unknown water look '{water}' (use {', '.join(WATER_LOOKS)})")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     d = diorama or harbour()
@@ -1823,7 +1898,8 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
         "project.godot": PROJECT.format(name=name),
         "menu.tscn": MENU_TSCN, "menu.gd": MENU_GD,
         "real3d.tscn": REAL_TSCN, "fake3d.tscn": FAKE_TSCN, "board.gd": BOARD_GD,
-        "shaders/sprite.gdshader": SPRITE_SHADER, "shaders/water.gdshader": WATER_SHADER,
+        "shaders/sprite.gdshader": SPRITE_SHADER,
+        "shaders/water.gdshader": WATER_SHADER_PIXEL if water == "pixel" else WATER_SHADER,
         "shaders/flame.gdshader": FLAME_SHADER, "shaders/ember.gdshader": EMBER_SHADER,
         "shaders/blob.gdshader": SHADOW_BLOB_SHADER, "light_flicker.gd": LIGHT_GD,
     }
@@ -1831,6 +1907,9 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
         p = out / rel
         p.write_text(text, encoding="utf-8")
         written.append(p)
+    if weather:
+        from .weather_hd2d import install
+        written += install(out, weather, tod=lighting, ppu=ppu)
     if iso:
         try:
             from .iso_scene import write_iso_scene

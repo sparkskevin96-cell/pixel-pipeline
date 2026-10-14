@@ -23,8 +23,9 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-KINDS = ("character", "item", "prop", "map", "portrait", "effect", "card", "tileset", "ui")
-FOLDERS = {k: k + "s" for k in KINDS} | {"ui": "ui"}       # UI kits (uikit.py): <project>/ui
+KINDS = ("character", "item", "prop", "map", "portrait", "effect", "card", "tileset", "ui",
+         "weather", "water", "background")                  # weather.py, water.py, backgrounds.py
+FOLDERS = {k: k + "s" for k in KINDS} | {"ui": "ui", "weather": "weather", "water": "water"}
 
 
 def home() -> Path:
@@ -694,6 +695,8 @@ def restyle_plan(project: Project | None = None, old: Style | None = None,
 def _restyle_how(a: Asset) -> str:
     f = Path(a.folder)
     if a.kind == "character":
+        if (f / "keys" / "keys.json").exists() and (f / "rigged.glb").exists():
+            return "draw it again in the new style (GPU, ~10 min) and bend it for every animation"
         return ("re-render every animation from its rigged model (CPU, a few minutes)"
                 if (f / "model.glb").exists() else "")
     if a.kind == "item":
@@ -715,7 +718,8 @@ def _restyle_how(a: Asset) -> str:
 def restyle(project: Project | None = None, kinds=("character", "item", "prop"),
             progress=None) -> list[str]:
     """Re-render the project's assets in its CURRENT style with no GPU: characters from their
-    model (library.rebuild; only for the current project's Character Library), items (icons
+    model (library.rebuild; only for the current project's Character Library; drawn characters
+    are drawn again in the new style on the GPU: library.redraw), items (icons
     from the saved pictures + world sprite), props (3D: render_prop; drawn: the chosen drawing
     re-converted). Returns what was done / skipped, one line each."""
     say = progress or (lambda t: None)
@@ -731,7 +735,10 @@ def restyle(project: Project | None = None, kinds=("character", "item", "prop"),
                 if ch is None or not ch.model.exists():
                     continue
                 say(f"Restyling {a.name}…")
-                library.rebuild(ch, ch.model, progress=say)
+                if library.is_drawn(ch) and ch.rigged.exists():
+                    library.redraw(ch, None, progress=say)    # drawn: new drawings, same rig
+                else:
+                    library.rebuild(ch, ch.model, progress=say)
             elif a.kind == "item":
                 from . import objects
                 say(f"Restyling {a.name}…")

@@ -220,8 +220,18 @@ class ModelStudio(QMainWindow):
         self.drawn = QCheckBox("Drawn sprites")
         self.drawn.setToolTip("Add to library: the GPU draws the character as pixel art from every "
                               "direction over the model, and the skeleton bends those drawings "
-                              "for each frame (crisper than rendering the 3D model; ~4 min GPU "
-                              "for 16 directions). People only.")
+                              "for each frame (crisper than rendering the 3D model; ~6-10 min "
+                              "GPU for 16 directions, Stop keeps what's drawn). Off: the 3D "
+                              "model is rendered (no GPU). Right-click a drawn character in "
+                              "the library to redraw one direction.")
+        from ..drawnrig import available
+        self.drawn.setChecked(available())
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setToolTip("Stop drawing after the current picture (the drawings so far are "
+                                 "kept: Add to library again carries on)")
+        self.stop_btn.clicked.connect(self.stop)
+        self.stop_btn.setVisible(False)
+        self._cancel = None               # threading.Event of the running job
         self.redo_btn = QPushButton("Update sprites")
         self.redo_btn.clicked.connect(self.update_sprites)
         self.save_btn = QPushButton("Save all…")
@@ -254,7 +264,7 @@ class ModelStudio(QMainWindow):
         self.add_anim_btn.setEnabled(False)
         keep = QHBoxLayout()
         for w in (QLabel("Name"), self.name, QLabel("Size"), self.size_, self.add_btn,
-                  self.more_anim, self.add_anim_btn):
+                  self.stop_btn, self.more_anim, self.add_anim_btn):
             keep.addWidget(w, 1 if w is self.name else 0)
         keep.addStretch(1)
         keep.addWidget(self.more_btn)
@@ -288,6 +298,8 @@ class ModelStudio(QMainWindow):
         self.library.setMovement(QListWidget.Static)
         self.library.setMinimumWidth(220)
         self.library.itemClicked.connect(lambda item: self.open_character(item.data(Qt.UserRole)))
+        self.library.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.library.customContextMenuRequested.connect(self._library_menu)
         self.lib_title = QLabel("Your characters")
         self.lib_title.setStyleSheet("font-weight:600;")
         new_btn = QPushButton("New character")
@@ -446,13 +458,14 @@ class ModelStudio(QMainWindow):
         size = self.size_.currentText()
         model = self.result.model
         swing = self.swing.isChecked()
-        drawn = self.drawn.isChecked() and kind == "person"
+        drawn = self.drawn.isChecked() and kind in ("person", "animal")
+        cancel = self._new_cancel() if drawn else None
         picture = self.result.picture if self.result.picture and \
             Path(self.result.picture).suffix.lower() == ".png" else None
 
         def job(say):
             ch = add_character(name, model, kind=kind, size=size, picture=picture, progress=say,
-                               prompt=prompt, drawn=drawn)
+                               prompt=prompt, drawn=drawn, cancel=cancel)
             if swing:
                 from ..library import add_character_springs
                 try:
@@ -466,6 +479,53 @@ class ModelStudio(QMainWindow):
             self.library_changed.emit()
             self.open_character(ch)
         self._run(job, done)
+
+    # ---- drawn characters: stop, redraw ----------------------------------------
+    def _new_cancel(self):
+        import threading
+        self._cancel = threading.Event()
+        return self._cancel.is_set
+
+    def stop(self):
+        """Stop the drawing after the picture in progress (what's drawn is kept)."""
+        if self._cancel is not None:
+            self._cancel.set()
+            self.statusBar().showMessage("Stopping after this picture… (the drawings so far are "
+                                         "kept: do it again to carry on)")
+
+    def _library_menu(self, pos):
+        from PySide6.QtWidgets import QInputDialog, QMenu
+        from ..library import is_drawn
+        item = self.library.itemAt(pos)
+        if item is None:
+            return
+        ch = item.data(Qt.UserRole)
+        if not is_drawn(ch):
+            return
+        menu = QMenu(self)
+        one = menu.addAction("Redraw one direction…")
+        every = menu.addAction("Draw it again (every direction)")
+        act = menu.exec(self.library.mapToGlobal(pos))
+        if act is one:
+            names = direction_names(_drawn_directions(ch))
+            d, ok = QInputDialog.getItem(self, "Redraw a direction", f"{ch.name}: which direction "
+                                         "looks wrong? (S = facing you, E = facing right)",
+                                         names, 0, False)
+            if ok and d:
+                self.redraw_direction(ch, [d])
+        elif act is every:
+            self.redraw_direction(ch, None)
+
+    def redraw_direction(self, ch, directions=None):
+        """Draw a drawn library character's direction(s) again with new seeds (None = all) and
+        bend the new drawings for every animation; the other directions stay as they are."""
+        from ..library import redraw
+        cancel = self._new_cancel()
+        self.character = ch
+
+        def job(say):
+            return redraw(ch, directions, progress=say, cancel=cancel)
+        self._run(job, self.open_character)
 
     # ---- jobs -----------------------------------------------------------------
     def _run(self, job, on_done):
@@ -493,6 +553,10 @@ class ModelStudio(QMainWindow):
         thread.start()
 
     def _busy(self, busy: bool):
+        if hasattr(self, "stop_btn"):
+            self.stop_btn.setVisible(busy and self._cancel is not None)
+            if not busy:
+                self._cancel = None
         self.make_btn.setEnabled(not busy)
         self.redo_btn.setEnabled(not busy and self.result is not None)
         self.save_btn.setEnabled(not busy and self.sprites is not None)
@@ -516,7 +580,8 @@ class ModelStudio(QMainWindow):
     def _failed(self, message: str):
         self.statusBar().showMessage("Stopped: " + message.splitlines()[0])
         self.last_error = message
-        if not self.sync:                     # tests (sync) can't click a message box away
+        if not self.sync and not message.startswith("Stopped"):   # Stop isn't an error;
+            # tests (sync) can't click a message box away
             QMessageBox.warning(self, "Couldn't make the model", message)
 
     def _model_job(self, prompt=None, picture=None, shape=None, reuse=None):
@@ -804,6 +869,15 @@ class ModelStudio(QMainWindow):
             return []
         self.statusBar().showMessage("Saved " + ", ".join(p.name for p in written))
         return written
+
+
+def _drawn_directions(ch) -> int:
+    import json
+    try:
+        cam = json.loads((ch.folder / "keys" / "keys.json").read_text(encoding="utf-8"))["camera"]
+        return int(cam["directions"])
+    except (OSError, ValueError, KeyError):
+        return 16
 
 
 def animation_names(model: Path) -> list[str]:

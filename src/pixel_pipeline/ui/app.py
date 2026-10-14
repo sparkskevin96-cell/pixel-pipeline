@@ -103,7 +103,7 @@ class MainWindow(QMainWindow):
         self.version_label.setStyleSheet("padding:0 6px;font-weight:600;")
         self.statusBar().addPermanentWidget(self.version_label)
         self.tabs.currentChanged.connect(lambda *_: self._hint())
-        self.tabs.setCurrentWidget(self.studio)
+        self.tabs.setCurrentWidget(self.make_tab)
         self._hint()
 
     # ---- layout ---------------------------------------------------------------
@@ -230,6 +230,8 @@ class MainWindow(QMainWindow):
         self.map_tab = MapTab(say)
         from .tilegen_tab import TilegenTab
         self.tilegen_tab = TilegenTab(say)
+        from .weather_tab import WeatherTab
+        self.weather_tab = WeatherTab(say)
         self.demo_tab = DemoTab(say)
         self.studio = ModelStudio()
         self.studio.setWindowFlags(Qt.Widget)
@@ -261,8 +263,13 @@ class MainWindow(QMainWindow):
             sig.connect(lambda *_: self.assets_tab.refresh())
         self.map_editor.map_saved.connect(lambda *_: self.game_tab.refresh())
         self.tilegen_tab.changed.connect(self.map_editor.refresh_tiles)
+        self.weather_tab.changed.connect(lambda *_: self.assets_tab.refresh())
         self.assets_tab.library_changed.connect(self._library_changed)
         self.assets_tab.project_changed.connect(lambda *_: self._library_changed())
+        from .make_tab import MakeTab                 # "Describe it": words -> any pipeline
+        self.make_tab = MakeTab(say, open_result=self.open_made)
+        self.make_tab.changed.connect(lambda *_: self.assets_tab.refresh())
+        self.make_tab.changed.connect(self._library_changed)
 
         def sub(pages):
             t = QTabWidget()
@@ -290,6 +297,8 @@ class MainWindow(QMainWindow):
             (self.map_tab, "Terrain tiles", "Terrain tilesets with transitions + Godot TileSet"),
             (self.tilegen_tab, "Tile variations", "Paths, shores, cliffs and fences drawn by your GPU "
                                                   "in the house style, as tilesets"),
+            (self.weather_tab, "Weather && sky", "Rain, snow, fog, light shafts, leaves, embers…; animated "
+                                                 "water tiles; parallax backgrounds at any time of day"),
         ])
         self.faces_tabs = sub([
             (self.portraits_tab, "Portraits", "Painted and pixel portraits of a character, with "
@@ -307,6 +316,8 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         for widget, title, tip in (
+            (self.make_tab, "Make", "Describe anything (a wolf, a sword, road tiles, an ice spell, a "
+                                    "map…): it picks the right tool, shows the plan, makes it"),
             (self.studio, "Characters", "Make characters from words, photos or 3D models; they "
                                         "animate and go into your library"),
             (self.objects_tabs, "Items && props", "Items with inventory icons; props and buildings"),
@@ -327,6 +338,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
 
     HINTS = {
+        "make": "Describe it and press Enter: the plan shows first (change anything), then Make it. "
+                "Many at once: one per line on the right.",
         "sprite": "Drop a photo onto the window (from a folder or straight from your browser), or "
                   "File → Open (Ctrl+O). The basics are on the left; More settings has the rest.",
         "prompt": "Describe a sprite and press Make. Your GPU draws it; Open in the Sprite tab to "
@@ -342,6 +355,8 @@ class MainWindow(QMainWindow):
         "effects": "Pick an effect, a theme and a size; it plays live; Make saves it.",
         "cards": "Pick a character, item or prop (or type words), fill the card, Make art (your "
                  "GPU) and pick one; Save card; Export for Godot or Unity.",
+        "weather": "Pick weather, water or a background and a time of day; it plays live; Make && "
+                   "save, then Export for Godot or Unity.",
         "uikit": "Pick a theme and scale; the preview shows every piece in the house style; Save "
                  "kit; Export for Godot (Theme) or Unity (9-slice sprites).",
         "library": "Everything in this project. Search, filter, tag; Export… for any engine; "
@@ -377,13 +392,70 @@ class MainWindow(QMainWindow):
                 return
         self.tabs.setCurrentWidget(widget)
 
+    def open_made(self, made):
+        """Something the Make page made (makeany.Made) -> its own page, opened for tweaking."""
+        kind, a = made.plan.kind, made.asset
+        try:
+            if kind == "character":
+                self.studio.refresh_library(select=a)
+                self.studio.open_character(a)
+                page = self.studio
+            elif kind in ("item", "prop") and self.items_tab is not None:
+                page = self.items_tab if kind == "item" else self.props_tab
+                page.refresh_library(select=a)
+                page.open_asset(a)
+            elif kind == "tileset":
+                page = self.tilegen_tab
+                swatches = made.extra.get("swatches") or []
+                if swatches:
+                    page.terrain.setCurrentText(swatches[0].terrain)
+                    page.words.setText(made.plan.params.get("words", ""))
+                    page._made(swatches)
+                    page.picks.setCurrentRow(max(0, made.chosen - 1))
+                self.map_editor.refresh_tiles()
+            elif kind == "effect":
+                page = self.effects_tab
+                page.select_kind(made.plan.params.get("effect"))
+                page.refresh()
+            elif kind == "portrait":
+                page = self.portraits_tab
+                page.refresh()
+                page.show_asset(a)
+            elif kind == "card":
+                page = self.cards_tab
+                page.refresh()
+                page.open_card(a)
+            elif kind == "ui":
+                page = self.uikit_tab
+                page.refresh()
+                page.open_kit(a)
+            elif kind == "map":
+                page = self.map_editor
+                page.refresh_library()
+                page.open_asset(a)
+            else:
+                raise KeyError(kind)
+        except Exception as e:  # noqa: BLE001 - it's saved: show it in the Library instead
+            self.assets_tab.refresh()
+            try:
+                self.assets_tab.select(a)
+            except KeyError:
+                pass
+            self.show_tool(self.assets_tab)
+            self.statusBar().showMessage(f"{made.name} is in your Library ({e})")
+            return self.assets_tab
+        self.show_tool(page)
+        self.statusBar().showMessage(f"{made.name}: made — tweak it here. Files: {made.folder}")
+        return page
+
     def _hint(self):
         w = self.current_tool()
         if w is self.studio:
             text = self.studio.HINT
         else:
-            key = {self.sprite_split: "sprite", self.prompt_tab: "prompt", self.map_tab: "map",
-                   self.tilegen_tab: "tilegen",
+            key = {self.make_tab: "make",
+                   self.sprite_split: "sprite", self.prompt_tab: "prompt", self.map_tab: "map",
+                   self.tilegen_tab: "tilegen", self.weather_tab: "weather",
                    self.game_tab: "game", self.directions_tab: "directions",
                    self.map_editor: "maps", self.portraits_tab: "portraits",
                    self.effects_tab: "effects", self.assets_tab: "library", self.cards_tab: "cards",

@@ -21,7 +21,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-KINDS = ("character", "item", "prop")
+KINDS = ("character", "item", "prop", "make")   # make = makeany.Plan in options["plan"]
 STATUSES = ("pending", "running", "done", "failed", "cancelled")
 
 
@@ -178,7 +178,7 @@ def _character_worker(name: str, prompt: str, options: dict, project):
         picture = getattr(res, "picture", None)
         return library.add_character(name, model, kind=kind, size=size, role=role,
                                      picture=picture if picture and Path(picture).exists() else None,
-                                     folder=folder)
+                                     folder=folder, prompt=prompt or name)
 
 
 def _object_worker(kind: str):
@@ -196,11 +196,18 @@ def _object_worker(kind: str):
     return work
 
 
+def _make_worker(name: str, prompt: str, options: dict, project):
+    """A "Make anything" plan (makeany.py): any kind of asset from words."""
+    from .makeany import queue_worker
+    return queue_worker(name, prompt, options, _as_project(project))
+
+
 def default_workers() -> dict:
     """The real makers: character = model3d.prompt_to_model + library.add_character (GPU);
-    item / prop = objects.make_item / make_prop (a clear error if objects.py isn't there)."""
+    item / prop = objects.make_item / make_prop (a clear error if objects.py isn't there);
+    make = makeany.queue_worker (whatever the plan says)."""
     return {"character": _character_worker, "item": _object_worker("item"),
-            "prop": _object_worker("prop")}
+            "prop": _object_worker("prop"), "make": _make_worker}
 
 
 def _result_info(result, name: str) -> dict:
@@ -233,12 +240,13 @@ def _rest(seconds: float, stop_flag, sleep) -> bool:
 
 
 def run_queue(project, worker_fns: dict | None = None, pause_s: float = 20.0, stop_flag=None,
-              *, on_update=None, queue: Queue | None = None, sleep=time.sleep) -> list[Job]:
+              *, on_update=None, queue: Queue | None = None, sleep=time.sleep,
+              job_ids=None) -> list[Job]:
     """Work through the pending jobs one generation at a time, resting pause_s seconds between
     generations (each variation is one generation). Stops early when stop_flag (a
     threading.Event or a callable) is set: the current generation finishes, the job goes back to
     pending with what it made so far. on_update(job) after every change. Returns the jobs worked
-    on."""
+    on. job_ids: only these jobs (the rest of the queue waits)."""
     q = queue or Queue(project)
     workers = default_workers() if worker_fns is None else worker_fns
     note = on_update or (lambda job: None)
@@ -246,7 +254,8 @@ def run_queue(project, worker_fns: dict | None = None, pause_s: float = 20.0, st
     first = True
     while not _stopped(stop_flag):
         with q.lock:
-            job = q.next_pending()
+            job = next((j for j in q.jobs if j.status == "pending"
+                        and (job_ids is None or j.id in job_ids)), None)
             if job is None:
                 break
             job.status, job.error, job.started = "running", "", time.time()

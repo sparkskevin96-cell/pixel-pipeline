@@ -46,7 +46,8 @@ QT_UNUSED = [
 ]
 EXCLUDES = [f"PySide6.{m}" for m in QT_UNUSED] + [
     # never needed at runtime (dev tools, or rembg's stack that cutout.py replaced)
-    "tkinter", "matplotlib", "scipy", "skimage", "rembg", "pymatting", "numba", "llvmlite",
+    # scipy + skimage stay: game-ready 3D models (gamemesh.py marching cubes, KD-trees, sparse)
+    "tkinter", "matplotlib", "rembg", "pymatting", "numba", "llvmlite",
     "torch", "sympy", "pandas", "IPython", "pytest", "PyInstaller",
     "mcp", "pydantic", "pydantic_core", "starlette", "uvicorn", "httpx",
 ]
