@@ -196,15 +196,21 @@ def _ps(text) -> str:
     return "'" + str(text).replace("'", "''") + "'"
 
 
-def update_script(new: Path, app: Path, pid: int, relaunch: list[str], log: Path) -> str:
+def update_script(new: Path, app: Path, pid: int, relaunch: list[str], log: Path, *,
+                  wait: int | None = 120, restart: bool = True) -> str:
     """PowerShell: wait for the app (pid) to close, copy `new` over `app`, start relaunch + a flag.
     _internal (the libraries) is mirrored so no stale old library is left behind; the rest of
-    the folder is only added to, never cleared."""
+    the folder is only added to, never cleared. wait: seconds to wait for the app (None =
+    until it closes: "installs when you close the app"); restart: open it again after."""
     args = {flag: subprocess.list2cmdline([*relaunch[1:], flag]) for flag in FLAGS}
+    wait_line = (f"Wait-Process -Id {int(pid)} -ErrorAction SilentlyContinue" if wait is None else
+                 f"Wait-Process -Id {int(pid)} -Timeout {int(wait)} -ErrorAction SilentlyContinue")
+    start_line = (f"Start-Process -FilePath {_ps(relaunch[0])} -WorkingDirectory $app "
+                  "-ArgumentList $flag") if restart else "# installed; opens new next time"
     return f"""# Pixel Pipeline update (written by the app; safe to delete)
 $ErrorActionPreference = 'Continue'
 $new = {_ps(new)}; $app = {_ps(app)}; $log = {_ps(log)}
-Wait-Process -Id {int(pid)} -Timeout 120 -ErrorAction SilentlyContinue
+{wait_line}
 # /IS /IT: copy files even when size and time match (robocopy would skip them as "same")
 Start-Sleep -Milliseconds 300
 $ok = $false
@@ -216,12 +222,12 @@ for ($try = 0; $try -lt 3 -and -not $ok; $try++) {{
   $ok = ($a -lt 8) -and ($LASTEXITCODE -lt 8)
 }}
 $flag = if ($ok) {{ {_ps(args[FLAGS[0]])} }} else {{ {_ps(args[FLAGS[1]])} }}
-Start-Process -FilePath {_ps(relaunch[0])} -WorkingDirectory $app -ArgumentList $flag
+{start_line}
 """
 
 
 def start_update(new: Path, app: Path | None = None, relaunch: list[str] | None = None,
-                 pid: int | None = None) -> Path:
+                 pid: int | None = None, *, wait: int | None = 120, restart: bool = True) -> Path:
     """Start the script that swaps the app once this process ends. The caller then quits."""
     from .crash import LOG_DIR
     app = Path(app or app_dir())
@@ -229,7 +235,8 @@ def start_update(new: Path, app: Path | None = None, relaunch: list[str] | None 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     script = Path(new).parent / "update.ps1"
     script.write_text(update_script(Path(new), app, pid or os.getpid(), relaunch,
-                                    LOG_DIR / "update.log"), encoding="utf-8-sig")
+                                    LOG_DIR / "update.log", wait=wait, restart=restart),
+                      encoding="utf-8-sig")
     subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                       "-WindowStyle", "Hidden", "-File", str(script)],
                      creationflags=NO_WINDOW | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),

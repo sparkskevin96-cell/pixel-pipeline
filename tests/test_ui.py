@@ -241,12 +241,16 @@ def test_updates_menu_prompts_and_tokens(app, tmp_path, monkeypatch):
     win.updates.loud = False
     win.updates._on_checked(("the repo is private", True))
     assert "private" in win.statusBar().currentMessage()
-    # A newer build asks first ("Later" here: the stub clicks nothing).
+    # The start-up (quiet) check updates by itself; Check for updates… asks first ("Later" here:
+    # the stub clicks nothing).
     monkeypatch.setattr(updater, "current_build", lambda: Build(3, "aaa", "2026-10-01"))
     fetched = []
-    monkeypatch.setattr(win.updates, "fetch", fetched.append)
+    monkeypatch.setattr(win.updates, "fetch", lambda r, auto=False: fetched.append((r.build.number, auto)))
     win.updates._on_checked(Release(Build(4, "bbb", "2026-10-10"), "http://x/zip", 1))
-    assert shown[-1] == "A new Pixel Pipeline is ready." and fetched == []
+    assert fetched == [(4, True)] and "Downloading" in win.statusBar().currentMessage()
+    win.updates.loud = True
+    win.updates._on_checked(Release(Build(4, "bbb", "2026-10-10"), "http://x/zip", 1))
+    assert shown[-1] == "A new Pixel Pipeline is ready." and fetched == [(4, True)]
     win.updates.loud = True
     win.updates._on_checked(Release(Build(3), "http://x/zip", 1))
     assert "newest" in shown[-1]

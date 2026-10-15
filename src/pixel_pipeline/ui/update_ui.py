@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication, QDialog, QDialogButtonBox, QLabel, QLineEdit, QMessageBox, QProgressDialog,
@@ -112,6 +112,11 @@ class Updates(QObject):
         super().__init__(win)
         self.win = win
         self.loud = self.busy = self.cancelled = False
+        self.auto = False              # the start-up update: no questions (Kevin, 2026-10-15)
+        self.touched = False           # the user clicked or typed since the app opened
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         self.dialog: QProgressDialog | None = None
         self._checked.connect(self._on_checked)
         self._progress.connect(self._on_progress)
@@ -125,6 +130,11 @@ class Updates(QObject):
             action = QAction(text, self.win)
             action.triggered.connect(slot)
             menu.addAction(action)
+
+    def eventFilter(self, obj, event):
+        if not self.touched and event.type() in (QEvent.MouseButtonPress, QEvent.KeyPress):
+            self.touched = True
+        return False
 
     def say(self, text: str, ms: int = 15000):
         self.win.statusBar().showMessage(text, ms)
@@ -190,6 +200,10 @@ class Updates(QObject):
             if self.loud:
                 QMessageBox.information(self.win, TITLE, f"You have the newest: {current.label}.")
             return
+        if not self.loud:              # the start-up check updates by itself
+            self.say(f"Downloading {result.build.label}…", 0)
+            self.fetch(result, auto=True)
+            return
         box = QMessageBox(QMessageBox.Question, TITLE, "A new Pixel Pipeline is ready.", parent=self.win)
         box.setInformativeText(f"New: {result.build.label}\nYours: {current.label}\n\n"
                                "Update now? The app closes and opens again by itself in about a "
@@ -201,14 +215,22 @@ class Updates(QObject):
             self.fetch(result)
 
     # ---- updating -----------------------------------------------------------------------
-    def fetch(self, release):
+    def fetch(self, release, auto: bool = False):
         self.cancelled = False
+        self.auto, self.release = auto, release
+        if auto:                       # quietly, in the status bar
+            self.dialog = None
+            self._start_download(release)
+            return
         self.dialog = QProgressDialog("Downloading the update…", "Cancel", 0, 100, self.win)
         self.dialog.setWindowTitle(TITLE)
         self.dialog.setWindowModality(Qt.WindowModal)
         self.dialog.setMinimumDuration(0)
         self.dialog.canceled.connect(lambda: setattr(self, "cancelled", True))
         self.dialog.setValue(0)
+        self._start_download(release)
+
+    def _start_download(self, release):
         token = updater.github_token()
 
         def progress(done, total):
@@ -228,6 +250,8 @@ class Updates(QObject):
 
     def _on_progress(self, done: int, total: int):
         if self.dialog is None:
+            if self.auto and total:
+                self.say(f"Downloading {self.release.build.label}… {done >> 20} of {total >> 20} MB", 0)
             return
         if total:
             self.dialog.setValue(min(99, int(100 * done / total)))
@@ -242,7 +266,19 @@ class Updates(QObject):
         if result is None:
             return
         if isinstance(result, str):
+            if self.auto:
+                self.say(f"The update didn't download ({result}); it tries again next start.", 30000)
+                return
             QMessageBox.warning(self.win, TITLE, f"The update didn't download: {result}")
+            return
+        if self.auto and self.touched:
+            # mid-work: never close the app under the user; it installs when they close it
+            try:
+                updater.start_update(result, wait=None, restart=False)
+            except OSError as e:
+                self.say(f"Couldn't prepare the update ({e}); it tries again next start.", 30000)
+                return
+            self.say(f"{self.release.build.label} is ready: it installs when you close the app.", 0)
             return
         try:
             updater.start_update(result)

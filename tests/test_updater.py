@@ -171,7 +171,11 @@ def test_update_script_text(tmp_path):
 
 @windows
 def test_update_swaps_files_after_the_app_closes(tmp_path, monkeypatch):
+    from pixel_pipeline.ui import crash
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    # crash.LOG_DIR is fixed at import: without this the robocopy log went into the real
+    # %LOCALAPPDATA%\PixelPipeline\logs\update.log
+    monkeypatch.setattr(crash, "LOG_DIR", tmp_path / "logs")
     app = _fake_app(tmp_path / "App", 1)
     (app / "_internal" / "stale.dll").write_text("old")
     (app / "my notes.txt").write_text("keep")
@@ -193,6 +197,7 @@ def test_update_swaps_files_after_the_app_closes(tmp_path, monkeypatch):
     assert (app / "PixelPipeline.exe").read_bytes() == b"MZnew"
     assert not (app / "_internal" / "stale.dll").exists()                     # libraries mirrored
     assert (app / "my notes.txt").read_text() == "keep"                       # the rest left alone
+    assert (tmp_path / "logs" / "update.log").exists()                        # not the real log
 
 
 @windows
@@ -203,3 +208,14 @@ def test_shortcuts(tmp_path):
         d.mkdir()
     links = updater.make_shortcuts(exe, folders)
     assert [p.name for p in links] == ["Pixel Pipeline.lnk"] * 2 and all(p.exists() for p in links)
+
+
+def test_update_script_can_wait_for_close_without_restart(tmp_path):
+    from pixel_pipeline.ui.updater import update_script
+    s = update_script(tmp_path / "new", tmp_path / "app", 123, [str(tmp_path / "app" / "a.exe")],
+                      tmp_path / "u.log", wait=None, restart=False)
+    assert "Wait-Process -Id 123 -ErrorAction" in s and "-Timeout" not in s
+    assert "Start-Process" not in s
+    s = update_script(tmp_path / "new", tmp_path / "app", 123, [str(tmp_path / "app" / "a.exe")],
+                      tmp_path / "u.log")
+    assert "-Timeout 120" in s and "Start-Process" in s
