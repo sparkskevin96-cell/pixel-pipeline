@@ -32,6 +32,7 @@ import numpy as np
 from PIL import Image
 
 from .assets import Asset, Project, Style, current_project, new_asset, project_style, with_style
+from .subjectcheck import SHEET_NEGATIVE, shape_for, single_options
 
 CATEGORIES = ("weapon", "armour", "potion", "food", "key", "misc")
 # an item's longest side in the world, in pixels for the default 64 px person (Style.scale)
@@ -42,29 +43,31 @@ VARIATIONS = 3
 
 CATEGORY_HINTS = {
     "weapon": "single weapon standing upright, pointing straight up, vertical",
-    "armour": "single piece of armour, front view",
+    "armour": "just that one piece of armour, front view",
     "potion": "single glass potion bottle, front view",
     "food": "single food item",
     "key": "single key, upright",
     "misc": "single object",
 }
-ICON_PROMPT = ("pixel art game item icon of {prompt}, {hint}, centered, whole object in frame, "
-               "plain white background, flat colors, bold dark outline, simple readable shapes, "
-               "inventory icon, game asset")
+# subject first; no "inventory icon" / "game asset" (they mean a page of icons to SDXL). The
+# layout comes from subjectcheck's start blob + check (QA 2026-10-15: 61% sheets before).
+ICON_PROMPT = ("{prompt}, pixel art item icon of one single {thing}, {hint}, centered, whole "
+               "object in frame, isolated on a plain white background, flat colors, bold dark "
+               "outline, simple readable shapes")
 ICON_NEGATIVE = ("3d render, realistic, photo, blurry, smooth gradient, noise, jpeg artifacts, "
                  "text, watermark, signature, logo, multiple objects, sprite sheet, hand, person, "
                  "character, table, floor, scenery, cast shadow, frame, border, user interface, "
-                 "cropped, cut off, out of frame")
+                 "cropped, cut off, out of frame, " + SHEET_NEGATIVE)
 SMALL_ICON_HINT = "very simple, low detail, chunky pixels, bold silhouette"
 # the clean picture a prop's 3D model is built from (no pixel LoRA). SDXL likes product
 # sheets (five barrels, a lid, a stand), which image-to-3D fuses into one lump: insist on one.
 PROP_PROMPT = ("a single {prompt} standing on its own, one object only, isolated, whole object in "
                "frame, three-quarter front view, centered, plain white background, soft even "
-               "lighting, no shadows, clean shapes, game prop concept art")
+               "lighting, no shadows, clean shapes, game prop illustration")
 PROP_NEGATIVE = ("multiple objects, two, pair, group, set, collection, variations, several views, "
                  "product sheet, character sheet, stack, pile, cropped, cut off, out of frame, "
                  "partial, crowd, text, watermark, busy background, scenery, landscape, floor, "
-                 "dramatic lighting, harsh shadows, motion blur, blurry, pixel art, sprite sheet")
+                 "dramatic lighting, harsh shadows, motion blur, blurry, pixel art, " + SHEET_NEGATIVE)
 NO_DIAGONAL = ("potion", "armour")   # long thin items lie diagonally in the icon, except these
 # world sprites of items: flat (drawn from the icon picture) or 3D (from model.glb)
 WORLD_STYLES = ("auto", "flat", "3d")
@@ -160,7 +163,9 @@ def icon_prompt(prompt: str, category: str = "misc", icon_px: int = 32,
                   flags=re.IGNORECASE).strip().rstrip(".,; ")
     if not text:
         raise ValueError("Empty prompt: describe the item, e.g. 'an iron sword'.")
-    positive = ICON_PROMPT.format(prompt=text, hint=CATEGORY_HINTS.get(category, "single object"))
+    thing = re.sub(r"^(an?|the|one)\s+", "", text, flags=re.IGNORECASE)
+    positive = ICON_PROMPT.format(prompt=text, thing=thing,
+                                  hint=CATEGORY_HINTS.get(category, "single object"))
     if icon_px <= 24:
         positive += ", " + SMALL_ICON_HINT
     return with_style(positive, ICON_NEGATIVE, style or project_style(), "icon")   # house style
@@ -761,13 +766,15 @@ def _build_model(folder: Path, prompt, picture, client, seed, say, st: Style | N
     from .model3d import cut_out, prompt_to_model
     views = None
     if picture is None:
-        from .generate import generate_images
+        from .subjectcheck import generate_single
         text = re.sub(r"^\s*(an?|the|one)\s+", "", prompt.strip(), flags=re.IGNORECASE)
         say(f"Making a picture of “{prompt}” on your GPU…")
         positive, negative = with_style(PROP_PROMPT.format(prompt=text.rstrip(".")),
                                         PROP_NEGATIVE, st or project_style(), "model-object")
-        (picture, seed), = generate_images(positive, negative, client=client, seed=seed,
-                                           aspect=1.0, lora="none")
+        best, = generate_single(positive, negative, client=client, seed=seed, aspect=1.0,
+                                lora="none", say=say, init=shape_for(text),
+                                **single_options("model-object"))
+        picture, seed = best.image, best.seed
         views = "front+back"                    # from words: the GPU draws the back too
     say("Cutting out the subject…")
     rgba = main_subject(cut_out(picture))
@@ -894,8 +901,8 @@ def make_item(name: str, prompt: str | None = None, picture=None, model=None, *,
     icon picture (no 3D, no GPU), "3d" renders a 3D model (made on the GPU from the words or
     the photo unless `model` is given), "auto" picks by category (weapons and keys flat,
     potions, food and armour 3D; a given model is used)."""
-    from .generate import generate_images
     from .pipeline import load_image
+    from .subjectcheck import generate_single
     if not (prompt or picture is not None or model is not None):
         raise ValueError("Give a prompt, a picture or a 3D model.")
     if category not in CATEGORIES:
@@ -921,11 +928,15 @@ def make_item(name: str, prompt: str | None = None, picture=None, model=None, *,
         elif prompt:
             positive, negative = icon_prompt(prompt, category, st.icon, st)
             say(f"Drawing {variations} icons of “{prompt}” on your GPU…")
-            raw = generate_images(positive, negative, client=client, seed=seed,
-                                  count=max(1, variations), aspect=1.0)
-            for i, (img, s) in enumerate(raw, 1):
-                img.convert("RGB").save(f / f"picture_v{i}.png")
-                seeds.append(int(s))
+            raw = generate_single(positive, negative, client=client, seed=seed,
+                                  count=max(1, variations), aspect=1.0,
+                                  say=say, init=shape_for(f"{name} {prompt}"),
+                                  init_words=f"{name} {prompt}",
+                                  **single_options("icon"))                   # best first
+            for i, pick in enumerate(raw, 1):
+                pick.image.convert("RGB").save(f / f"picture_v{i}.png")
+                seeds.append(pick.seed)
+            asset.extra["checks"] = [pick.verdict.summary() for pick in raw]
         else:
             say("Drawing the icon from the model…")
             Image.fromarray(_model_picture(f / "model.glb", st), "RGBA").save(f / "picture_v1.png")
@@ -1056,14 +1067,15 @@ def rerender(asset: Asset, project: Project | None = None, progress=None, **sett
 # background, then the converter snaps it to the exact size and palette. A melty image-to-3D
 # mesh posterised into colour bands (the first stone cottage) is what this replaces.
 
-DRAWN_PROMPT = ("pixel art {view} of {prompt}, a single {what} game asset, clean simple shapes, "
-                "crisp straight edges, readable silhouette, flat shading with clear light and "
-                "shadow sides, limited palette, centered, whole {what} in frame, plain white "
-                "background, no ground, no scenery")
+DRAWN_PROMPT = ("{prompt}, pixel art {view}, one single {what} on its own, isolated on a plain "
+                "white background, centered, whole {what} in frame, clean simple shapes, crisp "
+                "straight edges, readable silhouette, flat shading with clear light and shadow "
+                "sides, limited palette, no ground, no scenery")
 DRAWN_NEGATIVE = ("photo, realistic, 3d render, blurry, smooth gradient, noise, jpeg artifacts, "
                   "scenery, landscape, sky, grass field, trees in background, text, watermark, "
                   "multiple buildings, several views, cropped, out of frame, melted, distorted, "
-                  "front view, flat facade, elevation drawing, straight-on, symmetrical front")
+                  "front view, flat facade, elevation drawing, straight-on, symmetrical front, "
+                  + SHEET_NEGATIVE)
 SIDE_WORDS = {"S": "front", "E": "right side", "N": "back", "W": "left side"}
 
 
@@ -1076,6 +1088,14 @@ def view_words(st: Style) -> str:
         return ("isometric three-quarter view from slightly above, seen from a corner, two sides "
                 "visible, angled 45 degrees")
     return "top-down three-quarter view from above, seen from a corner, roof and two sides visible"
+
+
+def drawn_prompt(prompt: str, st: Style, what: str | None = None) -> tuple[str, str]:
+    """(positive, negative) for a drawn prop / building at the project's camera, house style
+    appended (kind "prop")."""
+    what = what or _what(prompt)
+    return with_style(DRAWN_PROMPT.format(view=view_words(st), prompt=prompt, what=what),
+                      DRAWN_NEGATIVE, st, "prop")
 
 
 def _what(text: str) -> str:
@@ -1147,6 +1167,7 @@ def draw_prop(name: str, prompt: str, *, height_people: float | None = None, dir
     prop's 3D model seen from that side (model.glb, built from the first drawing if missing),
     so the sides agree while each is drawn clean (img2img with the pixel-art LoRA)."""
     from .generate import generate_images
+    from .subjectcheck import generate_single
     say = _say(progress)
     proj = _project(project)
     st = proj.style
@@ -1157,13 +1178,16 @@ def draw_prop(name: str, prompt: str, *, height_people: float | None = None, dir
                           height_people=hp, directions=directions, look="drawn")
     f = asset.folder
     what = _what(f"{name} {prompt}")
-    text, drawn_negative = with_style(DRAWN_PROMPT.format(view=view_words(st), prompt=prompt,
-                                                          what=what), DRAWN_NEGATIVE, st, "prop")
+    text, drawn_negative = drawn_prompt(prompt, st, what)
     target = hp * st.person_height
     if directions == 1 or not (f / "model.glb").exists() and directions > 1:
         say(f"Drawing {name} on your GPU ({variations} versions)…")
-        pics = generate_images(text, drawn_negative, client=client, seed=seed, count=variations,
-                               aspect=1.0)
+        picks = generate_single(text, drawn_negative, client=client, seed=seed, count=variations,
+                                aspect=1.0, say=say, init=shape_for(f"{name} {prompt}"),
+                                init_words=f"{name} {prompt}",
+                                **single_options("prop"))                     # best first
+        pics = [(p.image, p.seed) for p in picks]
+        asset.extra["checks"] = [p.verdict.summary() for p in picks]
         sprites = []
         for i, (img, used) in enumerate(pics, 1):
             img.save(f / f"drawn_v{i}.png")

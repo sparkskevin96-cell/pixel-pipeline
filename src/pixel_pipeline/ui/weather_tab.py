@@ -4,6 +4,8 @@ plays live (weather over a background of the same time of day, water as a little
 background scrolling); Make saves it to the project; Export… writes it for Godot or Unity."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap
@@ -291,6 +293,29 @@ class WeatherTab(ToolTab):
                     it.setIcon(QIcon(QPixmap(str(a.thumb))))
                 it.setData(Qt.UserRole, a)
                 self.saved.addItem(it)
+
+    def open_asset(self, a):
+        """Show a saved weather / water / background (the Make page made it): its kind and look
+        picked in the lists, its time of day set, selected in the saved list (Export uses it)."""
+        self.refresh()
+        key = {"weather": "weather", "water": "theme", "background": "scene"}.get(a.kind)
+        tod = a.extra.get("tod")
+        if tod:
+            i = self.tod.findData(tod)
+            if i >= 0:
+                self.tod.setCurrentIndex(i)
+        if a.kind == "weather":
+            self.neutral.setChecked(not tod)
+        try:
+            self.select(a.kind, a.extra.get(key))
+        except ValueError:                  # a background drawn from words: no list entry
+            self.what.setCurrentIndex([v for _, v in WHAT].index(a.kind))
+        for i in range(self.saved.count()):
+            if Path(self.saved.item(i).data(Qt.UserRole).folder) == Path(a.folder):
+                self.saved.setCurrentRow(i)
+                break
+        self.last = a
+        self.info.setText(f"{a.name}: {a.folder}")
 
     def _saved_changed(self, item, _prev=None):
         if item is not None:

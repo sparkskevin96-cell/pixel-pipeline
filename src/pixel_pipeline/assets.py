@@ -139,6 +139,17 @@ _PIXEL_TERMS = re.compile(
     r"mega ?drive|pico-?8|master system|low[- ]?res)\b", re.IGNORECASE)
 
 
+# one-subject pictures (an item, a prop, the picture a 3D model is built from): plural "sprites"
+# and "... effects" style words invite sheets and loose sparkles around the subject
+SINGLE_KINDS = ("icon", "prop", "model", "model-object")
+_PLURAL_SPRITES = re.compile(r"\bsprites\b", re.IGNORECASE)
+_EFFECTS = re.compile(r"\beffects?\b", re.IGNORECASE)
+
+
+def _single_terms(text: str) -> str:
+    return ", ".join(_PLURAL_SPRITES.sub("sprite", p) for p in _parts(text) if not _EFFECTS.search(p))
+
+
 def _parts(text: str) -> list[str]:
     return [t.strip() for t in str(text or "").split(",") if t.strip()]
 
@@ -147,7 +158,16 @@ def _clean_terms(text: str) -> str:
     """The style words without pixel-art terms ("16-bit SNES JRPG" -> "JRPG")."""
     out = []
     for part in _parts(text):
-        t = re.sub(r"\s{2,}", " ", _PIXEL_TERMS.sub("", part)).strip(" -")
+        found = list(_PIXEL_TERMS.finditer(part))
+        if found:
+            # only leading pixel words come off ("16-bit SNES JRPG" -> "JRPG"); a part with
+            # them inside or at the end loses its meaning ("modern 16-bit pixel art" ->
+            # "modern", "SNES-era sprite craft" -> "era craft") and is dropped whole
+            head = _PIXEL_TERMS.sub("", part[:found[-1].end()])
+            if head.strip(" -"):
+                continue
+            part = part[found[-1].end():]
+        t = re.sub(r"\s{2,}", " ", part).strip(" -")
         if t:
             out.append(t)
     return ", ".join(out)
@@ -181,6 +201,8 @@ def style_words(style: Style | None, kind: str = "sprite") -> tuple[str, str]:
     clean = kind in CLEAN_KINDS
     pos, neg = [], []
     base = _clean_terms(st.style_prompt) if clean else ", ".join(_parts(st.style_prompt))
+    if kind in SINGLE_KINDS:
+        base = _single_terms(base)
     if base:
         pos.append(base)
     if st.style_negative:

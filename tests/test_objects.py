@@ -57,7 +57,7 @@ def test_guess_prop_and_prompts():
     assert O.guess_prop("a wooden barrel") == (0.6, 1)
     assert O.guess_prop("a mysterious thing") == (1.0, 1)
     pos, neg = O.icon_prompt("pixel art of an iron sword", "weapon", 16)
-    assert pos.startswith("pixel art game item icon of an iron sword") and "upright" in pos
+    assert pos.startswith("an iron sword, pixel art item icon of one single iron sword") and "upright" in pos
     assert "chunky pixels" in pos and "multiple objects" in neg
     with pytest.raises(ValueError):
         O.icon_prompt("  ")
@@ -76,10 +76,12 @@ def test_item_from_words_icons_follow_the_style(comfy, monkeypatch):
                        client=client, seed=11, progress=steps.append, style="3d")
     f = item.folder
     assert f.parent == proj.kind_folder("item")
-    # 3 icon pictures (pixel LoRA, icon prompt), then the 3D shape from the chosen one
-    icon_wfs, (shape_wf,) = fake.prompts[:3], fake.prompts[3:]
+    # 3 icon pictures (pixel LoRA, icon prompt; + a redraw: the fake's seed-13 picture is a flat
+    # grey blob = the start blob kept, subjectcheck), then the 3D shape from the chosen one
+    icon_wfs, shape_wf = fake.prompts[:-1], fake.prompts[-1]
+    assert len(icon_wfs) == 4 and item.extra["checks"][0]["ok"]
     assert all(any(n["class_type"] == "LoraLoader" for n in wf.values()) for wf in icon_wfs)
-    assert "game item icon of an iron sword" in next(
+    assert "item icon of one single iron sword" in next(
         n for n in icon_wfs[0].values() if n["_meta"]["title"] == "Prompt")["inputs"]["text"]
     assert any(n["class_type"] == "SaveGLB" for n in shape_wf.values())
     assert item.extra["model_from"] == 1
@@ -101,7 +103,7 @@ def test_item_from_words_icons_follow_the_style(comfy, monkeypatch):
     meta = json.loads((f / "asset.json").read_text())
     assert meta["kind"] == "item"
     ex = meta["extra"]
-    assert ex["seeds"] == [11, 12, 13] and ex["category"] == "weapon" and ex["size"] == "medium"
+    assert ex["seeds"] == [11, 12, 14] and ex["category"] == "weapon" and ex["size"] == "medium"   # 13: flat grey blob, redrawn
     assert ex["prompt"] == "an iron sword" and ex["icon"] == 24 and ex["icon_choice"] == 1
     assert ex["world"] and ex["world_from"] == "model" and ex["directions"] == 8
 

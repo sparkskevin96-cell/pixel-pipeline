@@ -507,11 +507,17 @@ def test_make_page_plans_makes_picks_and_opens(app, tmp_path, monkeypatch):
     assert tab.made.asset.kind == "tileset" and win.current_tool() is win.tilegen_tab
     # no-GPU pipelines run for real: map, effect, UI kit
     for words, page in (("a forest map with a river", win.map_editor),
-                        ("ice nova spell", win.effects_tab), ("wooden UI panel", win.uikit_tab)):
+                        ("ice nova spell", win.effects_tab), ("wooden UI panel", win.uikit_tab),
+                        ("rain at night", win.weather_tab), ("animated lagoon water", win.weather_tab),
+                        ("sunset mountains background", win.weather_tab)):
         win.show_tool(tab)
         tab.plan_text(words)
         tab.make()
         assert win.current_tool() is page, words
+        if page is win.weather_tab:              # opened on what was made, ready to export
+            assert win.weather_tab.last.folder == tab.made.folder, words
+            assert win.weather_tab.kind() == tab.made.asset.kind, words
+    assert win.weather_tab.item() == "mountains" and win.weather_tab.tod_value() == "sunset"
     assert win.map_editor.asset.name == "Forest map"
     assert win.effects_tab.current_kind() == "frost_nova"
     assert win.uikit_tab.asset.extra["theme"] == "wood"

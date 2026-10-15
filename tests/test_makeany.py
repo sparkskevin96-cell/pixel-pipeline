@@ -6,7 +6,7 @@ from pixel_pipeline import makeany as M
 # (words, kind, params that must match)
 TABLE = [
     # characters: people and animals
-    ("a wolf", "character", {"body": "animal", "drawn": False}),
+    ("a wolf", "character", {"body": "animal", "drawn": True}),       # animals are drawn too
     ("a knight in a red cape", "character", {"body": "person", "drawn": True, "role": "knight"}),
     ("fire mage", "character", {"body": "person", "role": "mage"}),
     ("goblin", "character", {"body": "person"}),
@@ -105,6 +105,34 @@ TABLE = [
     ("harbour level", "map", {"template": "harbour"}),
     ("village map", "map", {"template": "village"}),
     ("a small arena", "map", {"template": "flat"}),
+    # weather / atmosphere
+    ("rain at night", "weather", {"weather": "rain", "tod": "night"}),
+    ("heavy rain", "weather", {"weather": "rain", "intensity": 1.6}),
+    ("snow", "weather", {"weather": "snow", "tod": ""}),
+    ("light snow at dawn", "weather", {"weather": "snow", "tod": "dawn", "intensity": 0.5}),
+    ("fog", "weather", {"weather": "fog"}),
+    ("misty morning", "weather", {"weather": "fog", "tod": "dawn"}),
+    ("fireflies", "weather", {"weather": "fireflies"}),
+    ("god rays", "weather", {"weather": "god_rays"}),
+    ("light shafts in a forest", "weather", {"weather": "god_rays"}),
+    ("falling leaves", "weather", {"weather": "leaves"}),
+    ("cherry blossoms", "weather", {"weather": "petals"}),
+    ("sandstorm", "weather", {"weather": "sandstorm"}),
+    ("rising embers", "weather", {"weather": "embers"}),
+    ("cloud shadows", "weather", {"weather": "cloud_shadows"}),
+    ("dust motes", "weather", {"weather": "dust"}),
+    # backgrounds / skies
+    ("sunset mountains background", "background", {"scene": "mountains", "tod": "sunset", "words": ""}),
+    ("parallax forest", "background", {"scene": "forest", "words": ""}),
+    ("night sky", "background", {"tod": "night", "words": ""}),
+    ("starry night sky", "background", {"tod": "night", "words": ""}),
+    ("desert background at noon", "background", {"scene": "desert", "tod": "noon"}),
+    ("misty bamboo valley background", "background", {"words": "misty bamboo valley"}),
+    # animated water
+    ("animated lagoon water", "water", {"theme": "lagoon"}),
+    ("ocean waves", "water", {"theme": "ocean"}),
+    ("flowing river", "water", {"theme": "river"}),
+    ("animated lava", "water", {"theme": "lava"}),
 ]
 
 
@@ -160,9 +188,17 @@ def test_names_prompts_and_summaries():
     wolf = M.route("a wolf")
     text = wolf.summary()
     assert text.startswith("I'll make: Character (animal) “Wolf”") and "16 directions" in text
-    assert "3D-rendered" in text and "min of GPU" in text
+    assert "drawn sprites" in text and "min of GPU" in text
     knight = M.route("a knight")
-    assert "drawn sprites" in knight.summary() and knight.gpu_minutes() > wolf.gpu_minutes()
+    assert "drawn sprites" in knight.summary() and knight.gpu_minutes() == wolf.gpu_minutes()
+    undrawn = M.Plan("character", "Wolf", "a wolf", {**wolf.params, "drawn": False})
+    assert "3D-rendered" in undrawn.summary() and undrawn.gpu_minutes() < wolf.gpu_minutes()
+    assert "no GPU" in M.route("rain at night").summary()
+    assert "no GPU" in M.route("animated lagoon water").summary()
+    assert "no GPU" in M.route("sunset mountains background").summary()
+    assert "GPU" in M.route("misty bamboo valley background").summary()
+    assert M.route("rain at night").name == "Rain (night)"
+    assert M.route("night sky").name == "Night sky background"
     assert "no GPU" in M.route("wooden UI panel").summary()
     assert "no GPU" in M.route("ice nova spell").summary()
     assert "not in your library" in M.route("goblin portrait").summary()
@@ -230,16 +266,24 @@ def test_run_plan_uses_the_kinds_maker(tmp_path):
 
 
 def test_real_procedural_pipelines_make_assets(tmp_path):
-    """UI kits, maps and effects need no GPU: run them for real."""
+    """UI kits, maps, effects, weather, water and procedural backgrounds need no GPU: run them
+    for real."""
     from pixel_pipeline.assets import create_project, list_assets
     proj = create_project("Procedural")
     for words, kind in (("wooden UI panel", "ui"), ("a forest map with a river", "map"),
-                        ("ice nova spell", "effect")):
+                        ("ice nova spell", "effect"), ("rain at night", "weather"),
+                        ("animated lagoon water", "water"),
+                        ("sunset mountains background", "background")):
         made = M.run_plan(M.route(words), proj)
         assert made.saved and made.folder.exists(), words
         assert [a.name for a in list_assets(kind, project=proj)] == [made.name]
     fx = list_assets("effect", project=proj)[0]
     assert fx.extra["effect"] == "frost_nova" and fx.extra["theme"] == "ice"
+    rain = list_assets("weather", project=proj)[0]
+    assert rain.extra["weather"] == "rain" and rain.extra["tod"] == "night"
+    assert list_assets("water", project=proj)[0].extra["theme"] == "lagoon"
+    bg = list_assets("background", project=proj)[0]
+    assert bg.extra["scene"] == "mountains" and bg.extra["tod"] == "sunset" and not bg.extra.get("prompt")
 
 
 def test_keep_picks_variations(tmp_path, monkeypatch):
@@ -339,4 +383,4 @@ def test_character_maker_passes_the_plan(monkeypatch, tmp_path):
     assert seen["model"] == ("a knight in a red cape", "person")
     assert seen["add"] == ("Knight", "person", "normal", True, "a knight in a red cape", "knight")
     M.run_plan(M.route("a big brown bear"), proj)
-    assert seen["add"][1:4] == ("animal", "large", False)
+    assert seen["add"][1:4] == ("animal", "large", True)      # drawn (3D render without ComfyUI)

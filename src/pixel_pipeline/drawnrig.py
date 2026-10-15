@@ -1821,18 +1821,27 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
         if absent:
             say(f"Keeping out what the model doesn't have: {', '.join(absent)}")
     t_keys = time.time()
-    if paired:
-        keys = draw_keys_paired(rig, body, cams, views, rest, prompt, settings, seed=seed,
-                                style=style, client=client, folder=folder, reuse=reuse,
-                                candidates=candidates, back_candidates=back_candidates,
-                                absent=absent, kind=kind, seeds=seeds, mirror=mirror,
-                                never_mirror=never_mirror, palette=palette, cancel=cancel,
-                                gpu=gpu, progress=say)
-    else:
-        keys = draw_keys(rig, body, cams, views, rest, prompt, settings, seed=seed,
-                         denoise=denoise, style=style, client=client, folder=folder, reuse=reuse,
-                         mirror=mirror, blocky=blocky, retries=retries, min_iou=min_iou,
-                         progress=say)
+    from .generate import ComfyUIGaveUp, gpu_retry
+    try:
+        # one failure count for the whole character: a GPU driver reset / ComfyUI crash waits
+        # for ComfyUI, then the missing drawing is made again (the finished ones are files)
+        with gpu_retry(say=say):
+            if paired:
+                keys = draw_keys_paired(rig, body, cams, views, rest, prompt, settings, seed=seed,
+                                        style=style, client=client, folder=folder, reuse=reuse,
+                                        candidates=candidates, back_candidates=back_candidates,
+                                        absent=absent, kind=kind, seeds=seeds, mirror=mirror,
+                                        never_mirror=never_mirror, palette=palette,
+                                        cancel=cancel, gpu=gpu, progress=say)
+            else:
+                keys = draw_keys(rig, body, cams, views, rest, prompt, settings, seed=seed,
+                                 denoise=denoise, style=style, client=client, folder=folder,
+                                 reuse=reuse, mirror=mirror, blocky=blocky, retries=retries,
+                                 min_iou=min_iou, progress=say)
+    except ComfyUIGaveUp as e:
+        kept = len(list(Path(folder).glob("drawn_*.png"))) if folder else 0
+        raise ComfyUIGaveUp(f"{e}\n{kept} finished drawing(s) are kept in {folder}: drawing it "
+                            "again carries on from the next missing direction.") from e
     t_bend = time.time()
     drawn_palette = [f"{r:02x}{g:02x}{b:02x}" for r, g, b in keys.sprites[0].palette.tolist()]
     palette = recolour_palette(keys.sprites[0].palette, recolour)

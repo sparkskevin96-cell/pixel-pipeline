@@ -13,7 +13,9 @@ smarter router (e.g. Claude with an Anthropic key from keys.json); nothing here 
 calls, and the rules are always the fallback.
 
 Kinds: character (person | animal), item, prop (props and buildings), tileset (terrain),
-effect (kind + theme), portrait (expressions), card, ui (UI kit), map (template).
+effect (kind + theme), portrait (expressions), card, ui (UI kit), map (template), weather
+(weather.py: rain, snow, fog, god rays, fireflies…), water (water.py: animated water + shores),
+background (backgrounds.py: parallax skies and scenery; from words on the GPU).
 Batch: `queue_plans(project, plans)` lines them up in the project's jobqueue as "make" jobs;
 jobqueue.run_queue paces them (the rest between jobs) and `queue_worker` runs each.
 """
@@ -26,10 +28,12 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-KINDS = ("character", "item", "prop", "tileset", "effect", "portrait", "card", "ui", "map")
+KINDS = ("character", "item", "prop", "tileset", "effect", "portrait", "card", "ui", "map",
+         "weather", "water", "background")
 LABELS = {"character": "Character", "item": "Item", "prop": "Prop / building",
           "tileset": "Tileset", "effect": "Effect", "portrait": "Portraits", "card": "Card",
-          "ui": "UI kit", "map": "Map"}
+          "ui": "UI kit", "map": "Map", "weather": "Weather", "water": "Animated water",
+          "background": "Background"}
 FALLBACK = ("prop", "item", "character")   # nothing recognised: offer these, in this order
 
 # --------------------------------------------------------------------------- lexicons
@@ -51,6 +55,10 @@ CUES = {
            "menus", "healthbar", "hotbar", "uikit", "frame", "9slice", "nineslice"),
     "map": ("map", "maps", "level", "levels", "battlefield", "battleground", "arena", "stage",
             "region", "overworld", "world"),
+    "weather": ("weather", "atmosphere", "atmospheric", "overlay", "precipitation"),
+    "water": (),                  # "animated" + a water word (scores): "animated lagoon water"
+    "background": ("background", "backgrounds", "backdrop", "backdrops", "parallax", "sky", "skies",
+                   "skybox", "skyline", "panorama", "vista", "scenery"),
 }
 
 # Things: phrase -> (kind, data). Multi-word phrases win over their words ("skeleton key" is a
@@ -184,7 +192,58 @@ _PHRASES = {
     "camp fire": ("prop", {"also": ("effect",)}), "pine tree": ("prop", {}),
     "space marine": ("character", {"body": "person"}), "sea serpent": ("character", {"body": "animal"}),
     "giant spider": ("character", {"body": "animal"}),
+    # weather / atmosphere (weather.KINDS)
+    "god rays": ("weather", {"weather": "god_rays"}), "god ray": ("weather", {"weather": "god_rays"}),
+    "light shafts": ("weather", {"weather": "god_rays"}), "light rays": ("weather", {"weather": "god_rays"}),
+    "sun rays": ("weather", {"weather": "god_rays"}), "sunbeams": ("weather", {"weather": "god_rays"}),
+    "falling leaves": ("weather", {"weather": "leaves"}), "autumn leaves": ("weather", {"weather": "leaves"}),
+    "drifting leaves": ("weather", {"weather": "leaves"}),
+    "cherry blossoms": ("weather", {"weather": "petals"}), "cherry blossom": ("weather", {"weather": "petals"}),
+    "falling petals": ("weather", {"weather": "petals"}),
+    "falling snow": ("weather", {"weather": "snow", "terrain": "snow"}),
+    "sand storm": ("weather", {"weather": "sandstorm"}), "dust storm": ("weather", {"weather": "sandstorm"}),
+    "dust motes": ("weather", {"weather": "dust"}), "floating dust": ("weather", {"weather": "dust"}),
+    "cloud shadows": ("weather", {"weather": "cloud_shadows"}),
+    "lightning storm": ("weather", {"weather": "lightning"}),
+    "rising embers": ("weather", {"weather": "embers"}),
+    # animated water (water.THEMES)
+    "ocean waves": ("water", {"theme": "ocean"}), "sea waves": ("water", {"theme": "ocean"}),
+    "lava flow": ("water", {"theme": "lava", "also": ("tileset",), "terrain": "water"}),
+    # backgrounds (backgrounds.SCENES)
+    "mountain range": ("background", {"scene": "mountains"}),
 }
+
+_WEATHER = {       # weather.KINDS keys: single words
+    "rain": "rain rainy raining rainfall drizzle downpour thunderstorm monsoon",
+    "snow": "snow snowfall snowing snowflake snowflakes blizzard",
+    "fog": "fog foggy mist misty haze hazy",
+    "fireflies": "fireflies firefly",
+    "petals": "petals sakura",
+    "embers": "embers",
+    "sandstorm": "sandstorm",
+}
+_WATER_THEMES = {  # water.THEMES keys
+    "lagoon": "lagoon lagoons tropical turquoise",
+    "ocean": "ocean sea seas waves wave surf",
+    "river": "river stream creek brook",
+    "swamp": "swamp marsh bog murky",
+    "lava": "lava magma molten",
+}
+_SCENES = {        # backgrounds.SCENES keys
+    "mountains": "mountain mountains peaks alps hills",
+    "forest": "forest forests woods woodland jungle trees",
+    "autumn": "autumn fall",
+    "coast": "coast coastal beach seaside sea ocean island islands shore",
+    "desert": "desert dunes dune canyon mesa mesas",
+    "snowfield": "snowfield snowy winter tundra arctic glacier",
+}
+_TOD = {"night": "night nighttime midnight moonlit moonlight nocturnal",
+        "dawn": "dawn sunrise morning daybreak",
+        "noon": "noon midday daytime day",
+        "sunset": "sunset dusk evening twilight"}
+_ANIMATE = {"animated", "animating", "moving", "flowing", "rippling", "looping", "animation"}
+_WATERISH = {"water", "lagoon", "ocean", "sea", "river", "lake", "pond", "waves", "lava", "swamp",
+             "stream"}
 
 _ELEMENTS = {      # word -> spell theme (fxcore.THEME_KEYS)
     "fire": "fire", "flame": "fire", "flaming": "fire", "fiery": "fire", "burning": "fire",
@@ -287,12 +346,26 @@ _THINGS["stone"] = ("tileset", {"terrain": "stone", "also": ("prop",)})
 _THINGS["lava"] = ("tileset", {"terrain": "water", "also": ("effect",)})
 _THINGS["heal"] = ("effect", {"effect": "holy_light"})
 _THINGS["frame"] = ("ui", {})
+for _w, _k in _words(_WEATHER).items():           # weather words (snow is also a terrain)
+    _old = _THINGS.get(_w)
+    _d = {"weather": _k}
+    if _old is not None:
+        _d.update({k: v for k, v in _old[1].items() if k != "also"})
+        _d["also"] = tuple(dict.fromkeys((*_old[1].get("also", ()), _old[0])))
+    _THINGS[_w] = ("weather", _d)
+_THINGS["lagoon"] = ("water", {"theme": "lagoon", "terrain": "water", "also": ("tileset",)})
+_THINGS["waves"] = ("water", {"theme": "ocean", "terrain": "water", "also": ("tileset",)})
+for _w in ("mountains", "mountain"):
+    _THINGS[_w] = ("background", {"scene": "mountains"})
 
 _ELEMENT_OF = _ELEMENTS
 _UI_THEME_OF = _words(_UI_THEMES)
 _TEMPLATE_OF = _words(_MAP_TEMPLATES)
 _EXPRESSION_OF = _words(_EXPRESSIONS)
 _SIZE_OF = _words(_SIZES)
+_WATER_THEME_OF = _words(_WATER_THEMES)
+_SCENE_OF = _words(_SCENES)
+_TOD_OF = _words(_TOD)
 _CUE_OF = {w: k for k, ws in CUES.items() for w in ws}
 
 
@@ -441,6 +514,8 @@ def _clean_words(text: str, drop_kind: str | None = None) -> list[str]:
             cues |= {"template"}
         if drop_kind == "effect":
             cues |= {"spell", "spells"}
+        if drop_kind == "background":        # "night sky" stays a sky in the name
+            cues -= {"sky", "skies", "skyline"}
         toks = [t for t in toks if t not in cues]
     while toks and toks[0] in _ARTICLES:
         toks.pop(0)
@@ -468,6 +543,8 @@ def make_name(text: str, kind: str, limit: int = 32) -> str:
         name += " UI kit"
     elif kind == "map":
         name += " map"
+    elif kind == "background" and not name.lower().endswith("background"):
+        name += " background"
     return name
 
 
@@ -532,7 +609,7 @@ def plan_for(kind: str, text: str, hits: list[Hit] | None = None, style=None) ->
     if kind == "character":
         body = _first(hits, "character", "body") or "person"
         p["body"] = body
-        p["drawn"] = body == "person"
+        p["drawn"] = True            # drawn by the GPU (people and animals); 3D render without it
         p["size"] = {"small": "small", "large": "large"}.get(size_word or "", "") or \
             ("normal" if body == "person" else "medium")
         p["directions"] = int(getattr(st, "directions", 16))
@@ -635,6 +712,38 @@ def plan_for(kind: str, text: str, hits: list[Hit] | None = None, style=None) ->
         elif size_word == "small":
             cols, rows = max(12, round(cols * 0.75)), max(10, round(rows * 0.75))
         p.update(template=template, cols=int(cols), rows=int(rows), seed=0)
+    elif kind in ("weather", "water", "background"):
+        tod = next((_TOD_OF[t] for t in toks if t in _TOD_OF), "")
+        if kind == "weather":
+            w = _first(hits, "weather", "weather") or "rain"
+            from .weather import KINDS as WK, weather_label
+            if w not in WK:
+                w = "rain"
+            p["weather"] = w
+            p["tod"] = tod
+            heavy = {"heavy", "downpour", "storm", "stormy", "thunderstorm", "blizzard", "monsoon",
+                     "torrential", "thick", "dense"}
+            light = {"light", "gentle", "drizzle", "soft", "thin", "faint", "few"}
+            p["intensity"] = 1.6 if heavy & set(toks) else (0.5 if light & set(toks) else 1.0)
+            label = weather_label(w).split(" (")[0].split(" / ")[0]
+            name = label + (f" ({tod})" if tod else "")
+        elif kind == "water":
+            theme = _first(hits, "water", "theme") or next(
+                (_WATER_THEME_OF[t] for t in toks if t in _WATER_THEME_OF), "ocean")
+            p["theme"] = theme
+            p["tod"] = tod
+            name = f"{theme.title()} water" + (f" ({tod})" if tod else "")
+        else:
+            scene = _first(hits, "background", "scene") or next(
+                (_SCENE_OF[t] for t in toks if t in _SCENE_OF), None)
+            p["scene"] = scene or "mountains"
+            p["tod"] = tod or "sunset"
+            # words the procedural scenes don't cover ("misty bamboo valley") -> SDXL draws it
+            known = (set(CUES["background"]) | set(_SCENE_OF) | set(_TOD_OF) | _ARTICLES
+                     | {"at", "time", "layers", "layer", "scene", "landscape", "view", "starry",
+                        "stars", "star", "moon", "clouds", "cloudy", "sun", "distant", "far"})
+            rest = [t for t in toks if t not in known]
+            p["words"] = "" if (scene and not rest) or not rest else _prompt(text, "background")
     return Plan(kind, name, prompt, p, text)
 
 
@@ -689,6 +798,9 @@ def scores(text: str, hits: list[Hit] | None = None) -> dict[str, float]:
     # "a forest map with a river": the river is part of the map
     if sc["map"] >= 10:
         sc["tileset"] = min(sc["tileset"], 5)
+    # "animated lagoon water", "flowing river": the animated water maker, not a still tileset
+    if _ANIMATE & set(toks) and _WATERISH & {s for t in toks for s in _singular(t)}:
+        sc["water"] += 10.5
     return sc
 
 
@@ -764,7 +876,12 @@ def parse_batch(text: str) -> list[str]:
 # Rough GPU minutes on Kevin's RTX 4070 8 GB, measured 2026-10-14 with ComfyUI warm and
 # fp16 accumulation (generate.SPEED_FLAGS): an SDXL picture ~14 s; prompt to model (front +
 # back + Hunyuan3D) ~2.5 min; drawn knight 16 directions ~23-27 drawings, ~8.5 min.
-GPU = {"sdxl": 0.25, "model3d": 2.5, "drawn16": 8.5, "rig": 2.0, "inpaint": 0.3}
+# Recalibrated from the QA run of 2026-10-15 (project "QA 2026-10-15"): tilesets and cards came
+# in ~2.4x under the old estimate (swatches queue back to back, colour retries are rare), items
+# 20-60% under (a chunky item's 3D model is the front picture + shape only, ~1.2 min; healing
+# potion 2.0 min in all), a 3-drawing prop ~1.3 min (wooden crate).
+GPU = {"sdxl": 0.25, "model3d": 2.5, "drawn16": 8.5, "rig": 2.0, "inpaint": 0.3,
+       "icon": 0.2, "item3d": 1.2, "tile": 0.22, "card_art": 0.16, "prop_drawing": 0.35}
 
 
 def gpu_minutes(plan: Plan, style=None) -> float:
@@ -772,22 +889,26 @@ def gpu_minutes(plan: Plan, style=None) -> float:
     k = plan.kind
     if k == "character":
         m = GPU["model3d"]
-        if p.get("drawn") and p.get("body") == "person":
+        if p.get("drawn"):           # animals ~ people (wolf 11.7 vs knight 12.5 min)
             m += GPU["drawn16"] * max(1, int(p.get("directions", 16))) / 16
         return m
     if k == "item":
-        m = GPU["sdxl"] * max(1, int(p.get("variations", 3))) + 0.3
+        m = GPU["icon"] * max(1, int(p.get("variations", 3))) + 0.2
         if p.get("world") and p.get("category") in ("potion", "food", "armour"):
-            m += GPU["model3d"]
+            m += GPU["item3d"]
         return m
     if k == "prop":
         if p.get("look", "drawn") == "drawn":
             if int(p.get("directions", 1)) <= 1:
-                return GPU["sdxl"] * max(1, int(p.get("variations", 3))) + 0.3
+                return GPU["prop_drawing"] * max(1, int(p.get("variations", 3))) + 0.25
             return GPU["sdxl"] + GPU["model3d"] + 4 * GPU["sdxl"]
         return GPU["model3d"] + GPU["sdxl"]
     if k == "tileset":
-        return (GPU["sdxl"] + 0.15) * max(1, int(p.get("count", 3))) * 1.3     # + colour retries
+        return GPU["tile"] * max(1, int(p.get("count", 3)))
+    if k == "background":
+        return GPU["sdxl"] + 0.1 if p.get("words") else 0.0
+    if k in ("weather", "water"):
+        return 0.0
     if k == "effect":
         return 0.6 if p.get("paint") else 0.0
     if k == "portrait":
@@ -797,7 +918,7 @@ def gpu_minutes(plan: Plan, style=None) -> float:
             m += GPU["sdxl"] + 0.2
         return m
     if k == "card":
-        return GPU["sdxl"] * 1.5 * max(1, int(p.get("variations", 3))) + 0.3
+        return GPU["card_art"] * max(1, int(p.get("variations", 3))) + 0.12
     return 0.0
 
 
@@ -822,7 +943,7 @@ def summary(plan: Plan, style=None) -> str:
     gpu = gpu_minutes(plan, style)
     how = ""
     if k == "character":
-        how = (f"{'drawn sprites' if p.get('drawn') and p.get('body') == 'person' else '3D-rendered sprites'}, "
+        how = (f"{'drawn sprites' if p.get('drawn') else '3D-rendered sprites'}, "
                f"{p.get('directions', 16)} directions, all the project's animations")
     elif k == "item":
         how = (f"{p.get('variations', 3)} icon variations to pick"
@@ -847,6 +968,14 @@ def summary(plan: Plan, style=None) -> str:
         how = f"{p.get('theme', 'wood')} theme: panels, buttons, bars, icons, font"
     elif k == "map":
         how = f"from the {p.get('template')} template, {p.get('cols')} x {p.get('rows')}"
+    elif k == "weather":
+        how = (f"{p.get('weather')}, {p.get('tod') or 'neutral colours'}, a looping overlay that tiles"
+               " + particles for Godot")
+    elif k == "water":
+        how = f"{p.get('theme')} water, looping frames + 47 shore tiles"
+    elif k == "background":
+        how = (f"parallax layers drawn from your words on the GPU, {p.get('tod')}" if p.get("words")
+               else f"{p.get('scene')} parallax layers, {p.get('tod')}")
     cost = f"{_minutes(gpu)} of GPU" if gpu > 0 else "no GPU, a few seconds"
     cpu = cpu_minutes(plan)
     if cpu > 0.75:
@@ -864,6 +993,9 @@ def fields_for(kind: str) -> list[tuple[str, str, object]]:
     from .maplib import TEMPLATES
     from .cards import ART_STYLES, FACTIONS, RARITIES
     from .portraits import STYLES
+    from .weather import TODS, WEATHER_KINDS
+    from .water import THEMES as WATER_THEMES
+    from .backgrounds import SCENES
     themes = tuple(dict.fromkeys((*SPELL_THEMES, *THEMES)))
     return {
         "character": [("body", "Body", ("person", "animal")), ("drawn", "Drawn sprites (people)", bool),
@@ -885,6 +1017,11 @@ def fields_for(kind: str) -> list[tuple[str, str, object]]:
         "ui": [("theme", "Theme", tuple(UI_THEMES)), ("scale", "Scale (0 = project)", "int:0:4")],
         "map": [("template", "Template", tuple(TEMPLATES)), ("cols", "Columns", "int:8:64"),
                 ("rows", "Rows", "int:8:64"), ("seed", "Seed", "int:0:9999")],
+        "weather": [("weather", "Weather", tuple(WEATHER_KINDS)), ("tod", "Time of day", ("", *TODS)),
+                    ("intensity", "Strength", "float:0.3:2")],
+        "water": [("theme", "Water", tuple(WATER_THEMES)), ("tod", "Time of day", ("", *TODS))],
+        "background": [("scene", "Scene", tuple(SCENES)), ("tod", "Time of day", tuple(TODS)),
+                       ("words", "From words (GPU; empty = drawn by code)", "text")],
     }[kind]
 
 
@@ -913,6 +1050,11 @@ class Made:
     @property
     def saved(self) -> bool:
         return self.asset is not None
+
+    @property
+    def notice(self) -> str:
+        """What the user must hear (e.g. the GPU failed: 3D-rendered sprites, drawings kept)."""
+        return self.extra.get("notice") or getattr(self.asset, "notice", "") or ""
 
 
 def _say(progress):
@@ -945,8 +1087,7 @@ def _make_character(plan: Plan, project, say, client=None) -> Made:
             size = None
         ch = library.add_character(plan.name, getattr(res, "model", None) or out, kind=body,
                                    size=size, picture=picture, role=p.get("role", ""),
-                                   progress=say, prompt=plan.prompt,
-                                   drawn=bool(p.get("drawn")) and body == "person")
+                                   progress=say, prompt=plan.prompt, drawn=bool(p.get("drawn")))
     return Made(plan, ch)
 
 
@@ -1079,9 +1220,38 @@ def _make_map(plan: Plan, project, say, client=None) -> Made:
     return Made(plan, asset)
 
 
+def _make_weather(plan: Plan, project, say, client=None) -> Made:
+    from .weather import make_weather
+    p = plan.params
+    say(f"Drawing the {p.get('weather')} overlay…")
+    asset = make_weather(p.get("weather", "rain"), plan.name, project=project, tod=p.get("tod") or None,
+                         intensity=float(p.get("intensity", 1.0)))
+    return Made(plan, asset)
+
+
+def _make_water(plan: Plan, project, say, client=None) -> Made:
+    from .water import make_water
+    p = plan.params
+    say(f"Animating {p.get('theme')} water…")
+    asset = make_water(plan.name, project=project, theme=p.get("theme", "ocean"), tod=p.get("tod") or None)
+    return Made(plan, asset)
+
+
+def _make_background(plan: Plan, project, say, client=None) -> Made:
+    from .backgrounds import make_background
+    p = plan.params
+    words = (p.get("words") or "").strip()
+    say(f"Drawing “{words}” on your GPU and splitting it into layers…" if words
+        else f"Drawing the {p.get('scene')} background…")
+    asset = make_background(p.get("scene", "mountains"), p.get("tod") or "sunset", plan.name,
+                            project=project, prompt=words or None, client=client)
+    return Made(plan, asset)
+
+
 MAKERS = {"character": _make_character, "item": _make_item, "prop": _make_prop,
           "tileset": _make_tileset, "effect": _make_effect, "portrait": _make_portrait,
-          "card": _make_card, "ui": _make_ui, "map": _make_map}
+          "card": _make_card, "ui": _make_ui, "map": _make_map, "weather": _make_weather,
+          "water": _make_water, "background": _make_background}
 
 
 def run_plan(plan: Plan, project=None, progress=None, *, client=None, makers: dict | None = None) -> Made:
@@ -1092,7 +1262,9 @@ def run_plan(plan: Plan, project=None, progress=None, *, client=None, makers: di
         raise ValueError(f"Nothing makes {plan.kind}s")
     proj = _project(project)
     t0 = time.monotonic()
-    made = fn(plan, proj, _say(progress), client)
+    from .generate import gpu_retry
+    with gpu_retry(say=_say(progress)):   # ComfyUI crash / driver reset: wait, carry on
+        made = fn(plan, proj, _say(progress), client)
     made.seconds = time.monotonic() - t0
     made.extra.setdefault("project", proj)
     return made
@@ -1139,7 +1311,9 @@ def queue_plans(project, plans: list[Plan], queue=None) -> list:
 
 def queue_worker(name: str, prompt: str, options: dict, project, makers: dict | None = None):
     """jobqueue worker for "make" jobs: run the plan, keep the first variation (nobody is
-    there to pick), return what was made (its .name / .folder go in the job's results)."""
+    there to pick; the generators put the best picture first: subjectcheck ranks them by
+    one subject / centred / sharp and redraws sheets and scenes), return what was made
+    (its .name / .folder go in the job's results)."""
     plan = Plan.from_dict(options["plan"]) if "plan" in options else route(prompt or name)
     plan.name = name or plan.name
     made = run_plan(plan, project, makers=makers)
@@ -1162,5 +1336,8 @@ def batch_summary(jobs) -> str:
         where = j.results[-1].get("folder", "") if j.results else ""
         where = "/".join(Path(where).parts[-2:]) if where else ""          # items/rusty-sword
         err = f": {j.error.splitlines()[0]}" if j.error else ""
+        notes = [r["notice"].splitlines()[0] for r in j.results if r.get("notice")]
+        if notes and not err:
+            err = f" ({notes[-1]})"
         lines.append(f"{mark} {LABELS.get(kind, kind)} “{j.name}”{err}" + (f" -> {where}" if where else ""))
     return "\n".join(lines)

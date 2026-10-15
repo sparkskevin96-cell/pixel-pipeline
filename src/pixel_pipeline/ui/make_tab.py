@@ -357,6 +357,13 @@ class MakeTab(ToolTab):
         self.made = made
         if made.saved:
             self.changed.emit()
+        if made.notice:                     # e.g. the GPU failed mid-drawing: never silent
+            from PySide6.QtWidgets import QMessageBox
+            box = QMessageBox(QMessageBox.Warning, "Not quite as planned", made.notice,
+                              QMessageBox.Ok, self)
+            box.setModal(False)
+            box.show()
+            self._notice_box = box
         took = f" in {made.seconds / 60:.1f} min" if made.seconds >= 60 else ""
         if len(made.variations) > 1:
             self._show_picks(made.variations, made.chosen)

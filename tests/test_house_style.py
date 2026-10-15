@@ -165,14 +165,14 @@ def test_style_words_flow_into_every_generator(comfy, house, tmp_path, monkeypat
     objects.make_item("Sword", "an iron sword", category="weapon", project=house, client=client,
                       seed=3, world=False, variations=1)
     pos, neg = texts(fake.prompts[start])
-    assert pos.startswith("pixel art game item icon of an iron sword") and "ZQXHOUSE" in pos
+    assert pos.startswith("an iron sword, pixel art item icon") and "ZQXHOUSE" in pos
     assert "chibi" not in pos and "ZQXNEVER" in neg
 
     # props drawn as pixel art
     start = len(fake.prompts)
     objects.make_prop("Crate", "a wooden crate", project=house, client=client, seed=4)
     pos, neg = texts(fake.prompts[start])
-    assert pos.startswith("pixel art") and "ZQXHOUSE" in pos and "ZQXNEVER" in neg
+    assert pos.startswith("a wooden crate, pixel art") and "ZQXHOUSE" in pos and "ZQXNEVER" in neg
 
     # props from words as 3D: the clean picture (no pixel-art words) + its back
     start = len(fake.prompts)

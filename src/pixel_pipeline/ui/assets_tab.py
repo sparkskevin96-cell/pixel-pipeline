@@ -1045,8 +1045,11 @@ class AssetsTab(ToolTab):
         opts, engines, folder, rebuild = dlg.values()
         dlg.setParent(None)
         if ok and (folder or not engines):
+            from .. import gamemodel
+            gpu = (" Its 3D shape is built from the drawing first: this needs the GPU (~1.5 min)."
+                   if gamemodel.needs_shape(a) else "")
             self.run(lambda say: build_and_export(a, opts, engines, folder, rebuild, say),
-                     self._model_built, f"Making a game-ready 3D model of {a.name}…")
+                     self._model_built, f"Making a game-ready 3D model of {a.name}…{gpu}")
 
     def _model_built(self, files):
         from .game_model_dialog import turntable_frames

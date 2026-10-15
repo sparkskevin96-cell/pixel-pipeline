@@ -29,11 +29,13 @@ ENGINE_CHOICES = (("Godot + Unity", ("godot", "unity")), ("Godot", ("godot",)),
 
 
 def can_make(asset) -> bool:
-    """A library character / item / prop with a 3D model."""
+    """A library character / item / prop with a 3D model, or a drawn prop / item whose 3D shape
+    can be built from its drawing (gamemodel.needs_shape: GPU)."""
     if asset is None or getattr(asset, "kind", "") not in ("character", "item", "prop"):
         return False
     folder = Path(asset.folder)
-    return (folder / "model.glb").exists() or (folder / "rigged.glb").exists()
+    return ((folder / "model.glb").exists() or (folder / "rigged.glb").exists()
+            or gamemodel.needs_shape(asset))
 
 
 def turntable_frames(asset) -> list[np.ndarray]:
@@ -48,6 +50,8 @@ def turntable_frames(asset) -> list[np.ndarray]:
 
 def info_text(asset) -> str:
     p = Path(asset.folder) / gamemodel.FOLDER / "info.json"
+    if gamemodel.needs_shape(asset):
+        return gamemodel.SHAPE_NOTE
     if not p.exists():
         return "Not built yet: Export builds it first (about 1-3 minutes, no GPU)."
     d = json.loads(p.read_text(encoding="utf-8"))

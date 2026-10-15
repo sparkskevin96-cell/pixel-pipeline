@@ -44,22 +44,24 @@ log = logging.getLogger(__name__)
 SHAPE_CHECKPOINTS = ("hunyuan_3d_v2.1.safetensors", "hunyuan3d-dit-v2-0.safetensors",
                      "hunyuan3d-dit-v2-mini.safetensors", "hunyuan3d-dit-v2-mv.safetensors")
 MODEL_PROMPTS = {
-    "person": "{prompt}, single character, full body from head to feet, standing in an A-pose, "
+    "person": "{prompt}, one single character standing alone, full body from head to feet, standing in an A-pose, "
               "facing the viewer, front view, arms held down and out away from the body, legs "
               "slightly apart, centered, plain white "
-              "background, soft even lighting, no shadows, clean shapes, game character concept art",
-    "animal": "{prompt}, single animal, whole body in frame, three-quarter front view, standing, "
+              "background, soft even lighting, no shadows, clean shapes, finished game character "
+              "illustration",
+    "animal": "{prompt}, one single animal standing alone, whole body in frame, three-quarter front view, standing, "
               "centered, plain white background, soft even lighting, no shadows, clean shapes, "
-              "game creature concept art",
+              "game creature illustration",
     "object": "{prompt}, single object, whole object in frame, three-quarter front view, "
               "centered, plain white background, soft even lighting, no shadows, clean shapes, "
-              "game prop concept art",
+              "game prop illustration",
 }
 MODEL_NEGATIVE = ("cropped, cut off, out of frame, partial, multiple subjects, crowd, text, "
                   "watermark, busy background, scenery, floor, dramatic lighting, harsh shadows, "
                   "motion blur, blurry, pixel art, sprite sheet, character sheet, model sheet, "
                   "reference sheet, turnaround, multiple views, two people, duplicate, "
-                  "separate objects, items laid out beside")
+                  "separate objects, items laid out beside, concept art sheet, sketches, "
+                  "several poses, grid, collection")
 
 
 @dataclass
@@ -122,17 +124,24 @@ def model_prompt(prompt: str, subject: str = "person", style=None) -> tuple[str,
                   MODEL_NEGATIVE, subject, style)
 
 
-def picture_for_model(prompt: str, subject: str = "person", *, client: ComfyClient | None = None,
-                      seed: int | None = None, style=None, **gen_opts) -> tuple[Image.Image, int]:
-    """A clean front picture to build the model from (SDXL, no pixel-art LoRA). style: the
-    house style (assets.Style; None = the current project's, False = none)."""
-    positive, negative = model_prompt(prompt, subject, style)
-    opts = {"lora": "none", **gen_opts}
-    (img, used), = generate_images(positive, negative, client=client, seed=seed, aspect=1.0, **opts)
-    return img, used
-
-
 PICTURE_TRIES = 3
+
+
+def picture_for_model(prompt: str, subject: str = "person", *, client: ComfyClient | None = None,
+                      seed: int | None = None, style=None, check=None, say=None,
+                      **gen_opts) -> tuple[Image.Image, int]:
+    """A clean front picture to build the model from (SDXL, no pixel-art LoRA). style: the
+    house style (assets.Style; None = the current project's, False = none). One subject:
+    a sheet / several figures / a scene is drawn again with a new seed (subjectcheck, up to
+    PICTURE_TRIES pictures; check(image) -> reason = an extra test), the best one is returned."""
+    from .subjectcheck import generate_single, shape_for, single_options
+    positive, negative = model_prompt(prompt, subject, style)
+    kind = "model" if subject in ("person", "animal") else "model-object"
+    opts = {"lora": "none", **single_options(kind), **gen_opts}
+    best, = generate_single(positive, negative, client=client, seed=seed, aspect=1.0, count=1,
+                            redraws=PICTURE_TRIES - 1, check=check, say=say,
+                            init=shape_for(prompt, subject), **opts)
+    return best.image, best.seed
 
 
 def subject_pieces(alpha: np.ndarray, share: float = 0.08) -> int:
@@ -233,12 +242,19 @@ def _shape_checkpoint(client: ComfyClient, wanted: str | None) -> str:
 
 def shape_from_picture(picture: Image.Image, *, client: ComfyClient | None = None,
                        seed: int | None = None, options: ShapeOptions | None = None) -> bytes:
-    """Front picture (subject on white) -> 3D model file bytes (.glb) from ComfyUI."""
+    """Front picture (subject on white) -> 3D model file bytes (.glb) from ComfyUI. ComfyUI
+    crashing mid-way (GPU driver reset): waits for it and makes the shape again (gpu_retry)."""
+    from .generate import current_retry
     o = options or ShapeOptions()
     client = client or ComfyClient()
+    seed = random.randrange(2**32) if seed is None else int(seed)
+    return current_retry().run(lambda: _shape_once(picture, client, seed, o), "the 3D shape",
+                               client)
+
+
+def _shape_once(picture, client: ComfyClient, seed: int, o: "ShapeOptions") -> bytes:
     client.ensure_running()
     name = client.upload_image(picture)
-    seed = random.randrange(2**32) if seed is None else int(seed)
     if o.template:
         wf = load_template(o.template)
         if "image" not in template_placeholders(wf):
@@ -896,18 +912,23 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
         if not prompt:
             raise ValueError("Give a prompt or a picture.")
         say("picture", f"Making a front picture of “{prompt}” on your GPU…")
-        for attempt in range(PICTURE_TRIES):
-            img, used_seed = picture_for_model(prompt, subject, client=client, seed=seed,
-                                               style=style, **gen_opts)
+        cuts: dict = {}
+
+        def pieces_check(image):
+            # SDXL drew a character sheet (two figures, a shield beside them): the 3D shape
+            # would fuse them into one blob, so it is drawn again
+            say("cutout", "Cutting out the subject…")
+            cuts[id(image)] = cut = cut_out(image, cutout_model)
+            n = subject_pieces(cut[..., 3])
+            return f"{n} separate things after the cut-out" if n > 1 else None
+
+        img, used_seed = picture_for_model(prompt, subject, client=client, seed=seed, style=style,
+                                           check=pieces_check,
+                                           say=lambda text: say("picture", text), **gen_opts)
+        rgba = cuts.get(id(img))
+        if rgba is None:
             say("cutout", "Cutting out the subject…")
             rgba = cut_out(img, cutout_model)
-            pieces = subject_pieces(rgba[..., 3])
-            if pieces <= 1 or attempt == PICTURE_TRIES - 1:
-                break
-            # SDXL drew a character sheet (two figures, a shield beside them): the 3D shape
-            # would fuse them into one blob, so draw it again
-            say("picture", f"The picture shows {pieces} separate things; drawing it again…")
-            seed = (used_seed or 0) + 1
         picture = img
     else:
         say("cutout", "Cutting out the subject…")

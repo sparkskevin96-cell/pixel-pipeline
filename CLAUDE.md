@@ -552,10 +552,73 @@ wants terse answers and fixes over polish.
   parallel workers never lowering priority (SetPriorityClass got the pseudo-handle as a 32-bit int; now typed
   WinDLL, test), quadruped rig on three-quarter-picture animals (`body_axis_yaw` turns a diagonal body
   straight first; the Make-tab wolf was skewed in every sprite), godot-hd2d export of a tileset (KeyError 0
-  -> clear ValueError), test_updater wrote the real update.log. Open: drawn props/items/portrait subjects
-  come out as sprite sheets / several objects ~60% of pictures (style LoRA also turns barrels into huts; extra
-  negatives don't help); router has no weather/background kinds ("rain at night" -> a drawn prop); a
+  -> clear ValueError), test_updater wrote the real update.log. Open (sheets: fixed, see "One subject per picture"); router has no weather/background kinds ("rain at night" -> a drawn prop); a
   ComfyUI/driver reset mid-draw drops the drawings and silently falls back to the 3D render.
+- **One subject per picture (2026-10-15, the QA's biggest quality bug)** (`subjectcheck.py`): for one-thing
+  requests SDXL drew sprite sheets / several things / room dioramas in ~half the pictures. A/Bs at fixed seeds
+  (7 cases x 3 seeds, scratchpad ss_ab/, sheets Pictures/PixelPipeline/single_subject_ab_prompts*.png): the
+  SEED decides the layout - prompt order, weights, "one/single/isolated", dropping "game asset"/"inventory icon"
+  /"concept art", short view words, CFG 4.5, Pixel Art XL 0.8, style LoRA 0.5/off, trigger position, sheet
+  negatives all stayed 6-12/21; img2img from ONE soft blob in the middle (`single_init`, shape by words
+  `shape_for`: weapon/bottle/building/tall/flat/person/animal, filled with the request's colour/material
+  `init_colour` - a grey blob made a red apple white and a wooden shield steel) gave 21/21. Denoise 0.93
+  pixel kinds (0.8 = grey ghosts), 0.97 painted 3D/portrait pictures (0.9 kept the blob as a grey silhouette;
+  noise in the blob washed them out): `SINGLE_OPTIONS`. `assess(picture)` (CPU ~90 ms, no model):
+  background = border colour + smooth-gradient flood seeded from it; pieces after a small close; pieces within
+  3% of the main piece are its own; extras / sheet (>=5 extra pieces or 3+ similar) / scene (border not plain
+  or fill > 70%) / cut off / tiny / flat grey silhouette (start-blob pictures only). `generate_single` = draw
+  count, redraw failures with new seeds (budget max(2, count)), return best first (score: one subject,
+  centred, sharp) -> picture_v1 / drawn_v1 / the batch's blind keep(1) is the best; asset.extra["checks"].
+  Used by make_item icons, draw_prop drawings, _build_model prop picture, model3d.picture_for_model (+ the
+  rembg subject_pieces check; portrait subjects + characters go through it). PIXEL_SINGLE=0 = old behaviour.
+  Prompts: subject first, "concept art" -> "illustration", objects.SHEET_NEGATIVE / drawn_prompt(); style
+  words for one-subject kinds drop "... effects" parts and plural "sprites" (assets.SINGLE_KINDS);
+  _clean_terms drops a part whose pixel words aren't a leading prefix ("modern 16-bit pixel art" was
+  "modern", "SNES-era sprite craft" was "era craft"). Measured on 28 prompts (8 items, 8 props, 4 buildings,
+  3 creatures, 5 people/portrait subjects), QA project + style LoRA, seed 9100 (scratchpad ss_measure.py,
+  Pictures/PixelPipeline/single_subject_ab.png): first pick one subject 14/28 detector / ~12/28 by eye ->
+  28/28 (69 pictures drawn for 60 variations + 8 model pictures; 1 redraw). Still wrong by eye: leather
+  boots -> a chest piece/hood, anvil -> a stone block, one odd street lamp; painted 3D pictures look flatter.
+  Style LoRA + neo16 look still show. Limit: the detector can't tell a hut from a barrel (semantics).
+- **Robustness fixes after the QA pass (2026-10-15)**: `generate.GpuRetry` / `with gpu_retry(say=)` (one failure
+  count per job; generate_images, model3d.shape_from_picture, drawn characters, run_plan use it): ComfyUI stops
+  answering or a picture fails with a CUDA/driver/OOM error (`gpu_fault`) -> `recover_comfyui` (our ComfyUI is
+  restarted, also when alive after a CUDA error; backoff 2..30 s up to PIXEL_GPU_RECOVER_S=240) -> the same
+  picture again (pictures of a count>1 call already made are kept). After PIXEL_GPU_RETRIES=3 failures:
+  `ComfyUIGaveUp` (a ComfyUIUnavailable) with the events + log tail; conftest sets retries 0. Drawn characters:
+  keys/ are KEPT on a give-up, 3D render as fallback with `Character.notice` (message box on the Characters
+  and Make pages), keys.json stays `partial` -> `library.is_drawn` False, `drawing_unfinished` True,
+  `finish_drawing(ch)` / right-click "Finish the drawn sprites" draws only the missing ones. Batches
+  (jobqueue.run_queue): a give-up puts the job back to pending and stops the run. Logs: `rotate_log` on every
+  start keeps comfyui.1.log (the crashed run) .. comfyui.5.log. Make router: kinds weather / water /
+  background (makeany._WEATHER/_WATER_THEMES/_SCENES/_TOD; "animated"/"flowing" + a water word -> water;
+  background words beyond scene/time of day -> SDXL background_from_prompt), opened on the Weather && sky page
+  (`WeatherTab.open_asset`); animals from Make are drawn (plan drawn=True; 3D without ComfyUI). Tiles:
+  road prompt = rounded irregular cobbles, bricks in the negative; `tilegen.pattern_stats/pattern_miss`
+  (4-fold edge-orientation coherence for bricks on road, x horizontal/vertical balance + row/column line
+  energy for grids in water/grass/dirt/sand/snow/road; QA brick road 0.45, QA lagoon 0.38/0.32 vs 0.04-0.18 for
+  good ones; real GPU cobbles from the new prompt 0.21-0.30 -> BRICK_MAX 0.36, GRID_MAX 0.31), checked as
+  drawn and again after seamless, redrawn with PATTERN_WORDS (Swatch.pattern_miss). GPU-verified 2026-10-15
+  (after the driver update): killed our ComfyUI mid-batch -> restarted, 3/3 pictures, 86 s, crash log kept
+  as comfyui.1.log; road now draws rounded cobbles; QA barrel -> 3D shape + game model in 120 s
+  (Pictures/PixelPipeline/robust_tiles.png). Lagoon swatches no longer grid but come out nearly flat blue.
+  Tiles v2 (same day): the whole 1024 swatch squeezed into a 32 px tile turned cobbles into grey noise, so
+  `tile_crop` takes the piece whose features (`feature_size` = 2x first zero of the radial autocorrelation)
+  land at FEATURE_PX in the tile (x sqrt(tile/32) for small tiles; the most terrain-coloured of 9 placements)
+  before seamless; the CONVERTED tile is judged (`tile_stats`: region size in 4 lightness bands, noise 1.9 /
+  squeezed cobbles 2.6 / readable 4.5+; L std; `tile_miss`), flat tiles get `lift_detail`, and water that stays
+  flat or full of land (colour rule now blue >= 0.7, warm <= 0.08) becomes `neo_water_tile` (water.py ripples +
+  glints in the swatch's own blue). `pattern_stats.rows` (2-fold edge coherence) catches brick courses / streaks
+  (ROWS_MAX); after seamless only grids/lines are checked (the half-offset blend fakes directions on small
+  crops). GPU run, QA house style (Pictures/PixelPipeline/robust_tiles_v2.png = raw | tile x3 | sample map):
+  road readable stones, lagoon = neo ripples (SDXL drew islands + a palm 3/3 tries), grass fine; still weak:
+  dirt tile repeats in diagonal streaks, sand faint streaks (flagged, kept), SDXL "snow" = drifts on dark
+  ground, cliff drawn as courses (not checked). The house style (style LoRA + "16-bit") seems to push swatches
+  toward bricks/courses.
+  Drawn picture-only props/items: `gamemodel.needs_shape` -> Export builds model.glb from the chosen drawing
+  (prompt_to_model picture=, views front; GPU ~1.5 min, said in the dialog). makeany.GPU recalibrated from the
+  QA timings (tile 0.22/texture, card art 0.16, icon 0.2 + item 3D 1.2, prop drawing 0.35). Tests:
+  tests/test_robust.py (fake ComfyUI that drops connections mid-run).
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

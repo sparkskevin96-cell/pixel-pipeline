@@ -214,7 +214,11 @@ def _result_info(result, name: str) -> dict:
     folder = getattr(result, "folder", None)
     if folder is None and isinstance(result, (str, Path)):
         folder = result
-    return {"name": getattr(result, "name", name), "folder": str(folder) if folder else ""}
+    info = {"name": getattr(result, "name", name), "folder": str(folder) if folder else ""}
+    notice = getattr(result, "notice", "")
+    if notice:                       # e.g. drawn sprites failed: the 3D render, drawings kept
+        info["notice"] = str(notice)
+    return info
 
 
 # --------------------------------------------------------------------------- running
@@ -286,6 +290,16 @@ def run_queue(project, worker_fns: dict | None = None, pause_s: float = 20.0, st
             try:
                 result = fn(vname, job.prompt, opts, project)
             except Exception as e:  # noqa: BLE001 - recorded on the job
+                from .generate import ComfyUIGaveUp
+                if isinstance(e, ComfyUIGaveUp):
+                    # the GPU is gone (driver reset / crash it didn't recover from): the rest of
+                    # the batch would fail the same way. This job waits as pending (what it made
+                    # is kept: running the queue again carries on), the run stops here.
+                    with q.lock:
+                        job.status, job.error = "pending", str(e)
+                        q.save()
+                    note(job)
+                    return worked
                 with q.lock:
                     job.status = "failed"
                     job.error = str(e) or type(e).__name__

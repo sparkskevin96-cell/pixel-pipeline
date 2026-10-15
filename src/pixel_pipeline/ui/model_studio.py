@@ -478,7 +478,21 @@ class ModelStudio(QMainWindow):
             self.refresh_library(select=ch)
             self.library_changed.emit()
             self.open_character(ch)
+            self.show_notice(ch)
         self._run(job, done)
+
+    def show_notice(self, ch):
+        """Something the user must know about an add (the GPU failed: 3D render instead, the
+        drawings kept): a message box that doesn't block, and the status bar."""
+        text = getattr(ch, "notice", "")
+        if not text:
+            return
+        from PySide6.QtWidgets import QMessageBox
+        self.statusBar().showMessage(text.splitlines()[0])
+        box = QMessageBox(QMessageBox.Warning, "Drawn sprites stopped", text, QMessageBox.Ok, self)
+        box.setModal(False)
+        box.show()
+        self._notice_box = box
 
     # ---- drawn characters: stop, redraw ----------------------------------------
     def _new_cancel(self):
@@ -500,6 +514,13 @@ class ModelStudio(QMainWindow):
         if item is None:
             return
         ch = item.data(Qt.UserRole)
+        from ..library import drawing_unfinished
+        if drawing_unfinished(ch):
+            menu = QMenu(self)
+            finish = menu.addAction("Finish the drawn sprites (carry on where the GPU stopped)")
+            if menu.exec(self.library.mapToGlobal(pos)) is finish:
+                self.finish_drawing(ch)
+            return
         if not is_drawn(ch):
             return
         menu = QMenu(self)
@@ -515,6 +536,17 @@ class ModelStudio(QMainWindow):
                 self.redraw_direction(ch, [d])
         elif act is every:
             self.redraw_direction(ch, None)
+
+    def finish_drawing(self, ch):
+        """Carry on drawing a character whose drawing stopped (GPU crash): the missing
+        directions only, then its sheets are bent from the drawings."""
+        from ..library import finish_drawing
+        cancel = self._new_cancel()
+        self.character = ch
+
+        def job(say):
+            return finish_drawing(ch, progress=say, cancel=cancel)
+        self._run(job, self.open_character)
 
     def redraw_direction(self, ch, directions=None):
         """Draw a drawn library character's direction(s) again with new seeds (None = all) and

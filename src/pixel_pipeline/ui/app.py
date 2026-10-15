@@ -433,6 +433,9 @@ class MainWindow(QMainWindow):
                 page = self.map_editor
                 page.refresh_library()
                 page.open_asset(a)
+            elif kind in ("weather", "water", "background"):
+                page = self.weather_tab
+                page.open_asset(a)
             else:
                 raise KeyError(kind)
         except Exception as e:  # noqa: BLE001 - it's saved: show it in the Library instead

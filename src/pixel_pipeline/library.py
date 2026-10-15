@@ -67,6 +67,9 @@ class Character:
     created: float = 0.0
     folder: Path = field(default=Path("."), compare=False, repr=False)
     prompt: str = ""                     # the words it was made from (portraits reuse them)
+    # not saved: what the user must hear about this add (e.g. "drawn sprites failed, 3D render
+    # instead; the drawings so far are kept")
+    notice: str = field(default="", compare=False, repr=False)
 
     @property
     def model(self) -> Path:
@@ -243,9 +246,16 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
         try:
             render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, drawn=True,
                           prompt=prompt, name=name, cancel=cancel, gpu=gpu)
-        except ComfyUIUnavailable as e:       # no GPU after all: the 3D render, said so
-            say(f"Couldn't draw it ({str(e).splitlines()[0]}); rendering the 3D model instead.")
-            shutil.rmtree(ch.folder / "keys", ignore_errors=True)
+        except ComfyUIUnavailable as e:       # no GPU after all (or it kept crashing): the 3D
+            kept = len(list((ch.folder / "keys").glob("drawn_*.png")))     # render, said so
+            ch.notice = (f"{name}: the GPU couldn't draw the sprites, so they are the 3D render "
+                         f"for now.\n{e}\n" + (
+                             f"The {kept} finished drawing(s) are kept: right-click {name} in "
+                             "the Character Library -> Finish the drawn sprites (carries on "
+                             "from the next missing direction)." if kept else
+                             f"Nothing was drawn yet: right-click {name} in the Character "
+                             "Library -> Finish the drawn sprites to try again."))
+            say(ch.notice.splitlines()[0] + (f" ({kept} finished drawing(s) kept)" if kept else ""))
             drawn = False
     if not drawn:
         render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, prompt=prompt)
@@ -298,9 +308,40 @@ def _keep_keys_for(ch: Character, model) -> None:
     mark.write_text(sha)
 
 
+def _keys_meta(ch: Character) -> dict | None:
+    p = ch.folder / "keys" / "keys.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def is_drawn(ch: Character) -> bool:
     """Were its sheets drawn by the GPU and bent by the skeleton (drawnrig.py)?"""
-    return (ch.folder / "keys" / "keys.json").exists()
+    meta = _keys_meta(ch)
+    return meta is not None and not meta.get("partial")
+
+
+def drawing_unfinished(ch: Character) -> bool:
+    """Drawn sprites were started but the GPU stopped (crash, driver reset): its sheets are the
+    3D render and finish_drawing() carries on with the drawings kept in keys/."""
+    meta = _keys_meta(ch)
+    return bool(meta and meta.get("partial")) and ch.rigged.exists()
+
+
+def finish_drawing(ch: Character, progress=None, cancel=None, gpu=None) -> Character:
+    """Carry on drawing a character whose drawing stopped (drawing_unfinished): only the missing
+    directions are drawn (the model fingerprint keys/model.sha1 guards the files), then every
+    animation is bent from the drawings, replacing the 3D-rendered sheets."""
+    if not ch.rigged.exists():
+        raise ValueError(f"{ch.name} has no rigged.glb (add it to the library again first)")
+    render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=progress, drawn=True,
+                  prompt=ch.prompt, name=ch.name, cancel=cancel, gpu=gpu)
+    make_thumb(ch.sheet, ch.thumb)
+    ch.save()
+    return ch
 
 
 def redraw(ch: Character, directions=None, progress=None, cancel=None, gpu=None) -> Character:

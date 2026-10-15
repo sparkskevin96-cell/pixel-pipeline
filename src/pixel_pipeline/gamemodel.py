@@ -654,9 +654,64 @@ def source_model(asset) -> tuple[Path, str]:
     raise ValueError(f"'{folder.name}' has no 3D model (model.glb) to make a game model from.")
 
 
-def game_model_for(asset, progress=None, **options) -> GameModel:
+# Drawn single-view props (barrel, crate) and flat-lying items (a sword from its icon) are only
+# pictures: no model.glb. Their 3D shape is built on demand from the drawing (Hunyuan3D shape +
+# painted from the picture, model3d.prompt_to_model with the picture), ~1.5 min of GPU.
+SHAPE_NOTE = ("It has no 3D model yet (it was drawn as a picture): Export builds one from the "
+              "drawing first. This needs the GPU (Hunyuan3D in ComfyUI, about 1.5 min), then "
+              "1-3 minutes on the CPU.")
+
+
+def drawn_picture(asset) -> Path | None:
+    """The drawing a picture-only prop / item's 3D shape is built from: the chosen drawing
+    (props drawn_v<chosen>.png, else drawn_S.png; items picture_v<icon_choice>.png). None = it
+    has a 3D model already, or nothing to build one from."""
+    folder = Path(asset.folder if hasattr(asset, "folder") else asset)
+    if (folder / "model.glb").exists() or (folder / "rigged.glb").exists():
+        return None
+    if (folder / "character.json").exists():
+        return None
+    extra = getattr(asset, "extra", {}) or {}
+    kind = getattr(asset, "kind", "")
+    names = []
+    if kind == "item":
+        names.append(f"picture_v{int(extra.get('icon_choice', 1) or 1)}.png")
+        names += ["picture_v1.png", "picture.png"]
+    else:
+        names.append(f"drawn_v{int(extra.get('chosen', 1) or 1)}.png")
+        names += ["drawn_v1.png", "drawn_S.png", "drawn_corner.png"]
+    return next((folder / n for n in names if (folder / n).exists()), None)
+
+
+def needs_shape(asset) -> bool:
+    """A picture-only prop / item: Export must build its 3D shape on the GPU first."""
+    return getattr(asset, "kind", "") in ("item", "prop") and drawn_picture(asset) is not None
+
+
+def shape_for_drawing(asset, progress=None, client=None) -> Path:
+    """Build <asset>/model.glb from its drawing (needs_shape): Hunyuan3D shape from the picture,
+    painted from it (the same as a drawn building's shape). Waits out a ComfyUI crash
+    (generate.gpu_retry). Returns the model path."""
+    from .generate import gpu_retry
+    from .model3d import prompt_to_model
+    pic = drawn_picture(asset)
+    if pic is None:
+        raise ValueError(f"'{getattr(asset, 'name', asset)}' has no drawing to build a 3D model from.")
+    folder = Path(asset.folder)
+    say = progress or (lambda t: None)
+    say("Building a 3D shape from the drawing on your GPU (about 1.5 min)…")
+    with gpu_retry(say=say):
+        prompt_to_model(None, folder / "model.glb", picture=pic, client=client, subject="object",
+                        views="front", progress=lambda step, text: say(text))
+    return folder / "model.glb"
+
+
+def game_model_for(asset, progress=None, client=None, **options) -> GameModel:
     """Build <asset>/model_game for a library character, item or prop (look defaults to the
-    project's: pixel for pixel-art houses)."""
+    project's: pixel for pixel-art houses). A picture-only drawn prop / item first gets its 3D
+    shape from the drawing (shape_for_drawing: GPU)."""
+    if needs_shape(asset):
+        shape_for_drawing(asset, progress, client)
     model, kind = source_model(asset)
     if "look" not in options:
         try:

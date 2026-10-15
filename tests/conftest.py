@@ -65,6 +65,8 @@ def _own_library(tmp_path_factory, monkeypatch):
     # swap functions out), and the real ~/.pixel-pipeline/cache is never touched
     monkeypatch.setenv("PIXEL_CACHE", str(tmp_path_factory.mktemp("cache")))
     monkeypatch.setenv("PIXEL_WORKERS", "1")     # in-process (tests/test_speed.py tries workers)
+    monkeypatch.setenv("PIXEL_GPU_RETRIES", "0")  # a dead fake ComfyUI fails at once (test_robust
+    #                                               turns retries on with a dying fake)
 
 
 _EXIT = [0]

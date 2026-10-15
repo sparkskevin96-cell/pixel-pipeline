@@ -245,7 +245,8 @@ def start_comfyui(folder: Path, extra_args: tuple = ()):
     import atexit
     import subprocess
     COMFYUI_LOG.parent.mkdir(parents=True, exist_ok=True)
-    log_file = open(COMFYUI_LOG, "wb")  # noqa: SIM115 - the child writes to it while running
+    mode = "wb" if rotate_log() else "ab"   # the last run's log (a crash) is kept as comfyui.1.log
+    log_file = open(COMFYUI_LOG, mode)  # noqa: SIM115 - the child writes to it while running
     kw: dict[str, Any] = {"cwd": str(folder), "stdout": log_file, "stderr": subprocess.STDOUT,
                           "stdin": subprocess.DEVNULL}
     if os.name == "nt":
@@ -275,9 +276,35 @@ def stop_started_comfyui() -> None:
                 proc.kill()
 
 
-def _log_tail(lines: int = 6) -> str:
+LOG_KEEP = 5               # old ComfyUI logs kept: comfyui.1.log (the last run) .. comfyui.5.log
+
+
+def old_log(i: int = 1) -> Path:
+    """comfyui.<i>.log: the log of the i-th ComfyUI run before the current one."""
+    return COMFYUI_LOG.with_name(f"{COMFYUI_LOG.stem}.{i}{COMFYUI_LOG.suffix}")
+
+
+def rotate_log(keep: int = LOG_KEEP) -> bool:
+    """Before a start: comfyui.log -> comfyui.1.log -> ... -> comfyui.<keep>.log (the oldest
+    goes), so a crash's log survives the restart. False = the log couldn't be moved (still open
+    by a ComfyUI that didn't stop): the new run appends to it instead."""
+    if not COMFYUI_LOG.exists() or COMFYUI_LOG.stat().st_size == 0:
+        return True
     try:
-        text = COMFYUI_LOG.read_text(errors="replace").strip().splitlines()
+        old_log(keep).unlink(missing_ok=True)
+        for i in range(keep - 1, 0, -1):
+            if old_log(i).exists():
+                os.replace(old_log(i), old_log(i + 1))
+        os.replace(COMFYUI_LOG, old_log(1))
+        return True
+    except OSError as e:
+        log.info("Couldn't rotate %s: %s", COMFYUI_LOG, e)
+        return False
+
+
+def _log_tail(lines: int = 6, path: Path | None = None) -> str:
+    try:
+        text = Path(path or COMFYUI_LOG).read_text(errors="replace").strip().splitlines()
     except OSError:
         return ""
     return "\n".join(text[-lines:])
@@ -298,6 +325,7 @@ class ComfyClient:
         self.base_url = url if "://" in url else f"http://{url}"
         self.timeout = timeout
         self.poll_interval = poll_interval
+        self.answered = False           # set by the first ping that ComfyUI answers
         self.client_id = uuid.uuid4().hex
         host = urllib.parse.urlsplit(self.base_url).hostname or ""
         # Never send local traffic through a system HTTP proxy.
@@ -355,6 +383,7 @@ class ComfyClient:
                                      f"ComfyUI ({e}).") from None
         if not isinstance(stats, dict) or "system" not in stats:
             raise ComfyUIUnavailable(f"Something answered at {self.base_url} but it isn't ComfyUI.")
+        self.answered = True            # it was up: going down later is a crash worth waiting out
         return stats
 
     def ensure_running(self, wait: float = 240.0, say=None, extra_args: tuple = ()) -> dict:
@@ -590,6 +619,161 @@ class ComfyClient:
                                f"{_short(e.body.decode('utf-8', 'replace'))}") from None
         got, sub = data.get("name") or name, data.get("subfolder") or ""
         return f"{sub}/{got}" if sub else got
+
+
+# --------------------------------------------------------------------------- surviving a crash
+#
+# A GPU driver reset (or a driver update, or ComfyUI running out of memory and dying) used to
+# end a 12-minute drawn character at the first lost picture. Now every picture (and 3D shape)
+# runs under a GpuRetry: ComfyUI stopped answering or failed with a CUDA / driver error ->
+# wait for it to come back (the ComfyUI we started is started again, backing off 2, 4, 8 .. 30 s,
+# up to RECOVER_S), then the same picture is made again; pictures already made stay made. Only
+# after `attempts` such failures in one job does it give up (ComfyUIGaveUp, with the log tail).
+
+RETRY_ENV = "PIXEL_GPU_RETRIES"          # failures survived per job (default 3; 0 = no retry)
+RECOVER_ENV = "PIXEL_GPU_RECOVER_S"      # how long to wait for ComfyUI to come back (240 s)
+GPU_FAULT_WORDS = ("cuda error", "cudaerror", "cuda_error", "cublas", "cudnn", "device-side assert",
+                   "illegal memory access", "unspecified launch failure", "device lost",
+                   "launch timed out", "nvml", "driver", "out of memory", "outofmemory",
+                   "accelerator error", "cuda failure")
+_sleep = time.sleep                      # tests replace it
+
+
+class ComfyUIGaveUp(ComfyUIUnavailable):
+    """ComfyUI failed `attempts` times in one job and didn't recover: the job stops (what it made
+    so far is kept by the callers that resume, e.g. drawn characters)."""
+
+
+def gpu_fault(e: BaseException) -> bool:
+    """Worth waiting and trying again: ComfyUI stopped answering (crash, driver reset), or a
+    picture failed with a CUDA / driver / out-of-memory error."""
+    if isinstance(e, ComfyUIGaveUp):
+        return False
+    if isinstance(e, ComfyUIUnavailable):
+        return True
+    if isinstance(e, ComfyUIModelMissing) or not isinstance(e, ComfyUIWorkflowError):
+        return False
+    low = str(e).lower()
+    return "failed in" in low and any(w in low for w in GPU_FAULT_WORDS)
+
+
+def _env_number(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
+def recover_comfyui(client: "ComfyClient", *, wait: float | None = None, restart: bool = False,
+                    say=None) -> dict:
+    """Wait until ComfyUI answers again. The ComfyUI we started is started again when it died
+    (or always with restart=True: it answers but its GPU is gone after a CUDA error); one you
+    started yourself is waited for (start it again and the job carries on). Backs off 2, 4, 8 ..
+    30 s; raises ComfyUIUnavailable after `wait` seconds (default PIXEL_GPU_RECOVER_S, 240)."""
+    say = say or log.info
+    wait = _env_number(RECOVER_ENV, 240.0) if wait is None else float(wait)
+    deadline = time.monotonic() + wait
+    local = client.base_url.replace("localhost", "127.0.0.1") == DEFAULT_URL
+    if restart and any(p.poll() is None for p in _started):
+        say("Restarting ComfyUI (its GPU stopped working)…")
+        with _start_lock:
+            stop_started_comfyui()
+    delay, last = 2.0, None
+    while True:
+        try:
+            if local and find_comfyui() is not None:
+                left = max(10.0, deadline - time.monotonic())
+                return client.ensure_running(wait=left, say=say)
+            return client.ping()
+        except ComfyUIUnavailable as e:
+            last = e
+        if time.monotonic() + delay > deadline:
+            raise ComfyUIUnavailable(f"ComfyUI didn't come back within {wait:.0f} s. "
+                                     f"{str(last).splitlines()[0] if last else ''}") from None
+        say(f"Waiting for ComfyUI to come back ({delay:.0f} s)…")
+        _sleep(delay)
+        delay = min(30.0, delay * 2)
+
+
+class GpuRetry:
+    """Retry policy for one job (a drawn character, a Make job, a batch line). run(fn) calls fn;
+    a gpu_fault waits for ComfyUI (recover_comfyui) and calls fn again, up to `attempts`
+    failures in the whole job, then raises ComfyUIGaveUp with what happened and ComfyUI's log.
+    Use `with gpu_retry(say=...)` around a job so every picture in it shares one count."""
+
+    def __init__(self, attempts: int | None = None, wait: float | None = None, say=None):
+        self.attempts = int(_env_number(RETRY_ENV, 3) if attempts is None else attempts)
+        self.wait = wait
+        self.say = say
+        self.failures = 0
+        self.events: list[str] = []          # one line per failure, for the final message
+
+    def run(self, fn, what: str = "a picture", client: "ComfyClient | None" = None):
+        while True:
+            try:
+                return fn()
+            except ComfyUIError as e:
+                # not running at all when the job started: say so at once (nothing to wait for)
+                never_up = isinstance(e, ComfyUIUnavailable) and not getattr(client, "answered", False)
+                if not gpu_fault(e) or self.attempts <= 0 or never_up:
+                    raise
+                self.failures += 1
+                first = str(e).splitlines()[0] if str(e) else type(e).__name__
+                self.events.append(f"{what}: {first}")
+                tail = _log_tail(8)
+                if self.failures > self.attempts:
+                    raise ComfyUIGaveUp(self.gave_up_text(what, tail)) from e
+                say = self.say or log.warning
+                say(f"ComfyUI failed while making {what} ({_short(first, 160)}). Waiting for it to "
+                    f"come back, then carrying on (failure {self.failures} of {self.attempts} "
+                    "allowed)…")
+                try:
+                    recover_comfyui(client or ComfyClient(), wait=self.wait,
+                                    restart=not isinstance(e, ComfyUIUnavailable), say=say)
+                except ComfyUIUnavailable as e2:
+                    self.events.append(str(e2).splitlines()[0])
+                    raise ComfyUIGaveUp(self.gave_up_text(what, tail or _log_tail(8, old_log()))) \
+                        from e2
+
+    def gave_up_text(self, what: str, tail: str = "") -> str:
+        lines = [f"ComfyUI kept failing (GPU driver reset or crash?) while making {what}; "
+                 f"stopped after {self.failures} failure(s):"]
+        lines += [f"  - {_short(ev, 200)}" for ev in self.events[-4:]]
+        logs = f"{COMFYUI_LOG}" + (f" (the run before: {old_log()})" if old_log().exists() else "")
+        lines.append(f"ComfyUI's log: {logs}")
+        if tail:
+            lines.append("Last lines:\n" + tail)
+        return "\n".join(lines)
+
+
+_retry_local = threading.local()
+
+
+class gpu_retry:
+    """with gpu_retry(say=progress) as r: ... every generate_images / shape in the block shares
+    r (one failure count for the job). Nested blocks reuse the outer one."""
+
+    def __init__(self, attempts: int | None = None, wait: float | None = None, say=None):
+        self.args = (attempts, wait, say)
+        self.outer = None
+
+    def __enter__(self) -> GpuRetry:
+        self.outer = getattr(_retry_local, "current", None)
+        if self.outer is not None:
+            if self.outer.say is None:
+                self.outer.say = self.args[2]
+            return self.outer
+        _retry_local.current = GpuRetry(*self.args)
+        return _retry_local.current
+
+    def __exit__(self, *exc) -> None:
+        if self.outer is None:
+            _retry_local.current = None
+
+
+def current_retry() -> GpuRetry:
+    """The job's GpuRetry (gpu_retry block), else a fresh default one."""
+    return getattr(_retry_local, "current", None) or GpuRetry()
 
 
 def _execution_error(status: dict) -> ComfyUIWorkflowError:
@@ -1090,7 +1274,7 @@ def _models(client: ComfyClient, opts: GenOptions, needed: set[str]) -> dict:
 def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | None = None,
                     seed: int | None = None, count: int = 1, init_image: ImageSource | None = None,
                     denoise: float = 0.6, aspect: float | None = None, mask=None,
-                    grow_mask_by: int | None = None,
+                    grow_mask_by: int | None = None, retry: "GpuRetry | None" = None,
                     **gen_opts) -> list[tuple[Image.Image, int]]:
     """Raw ComfyUI images, no conversion: [(image, seed)]. Prompts are sent as given
     (a "negative" in gen_opts is ignored here; pass `negative`).
@@ -1101,6 +1285,9 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
 
     count > 1 queues one prompt per image with seeds seed, seed+1, ... so each image can
     be re-made from its own seed.
+
+    ComfyUI crashing / a GPU driver reset mid-way: waits for it to come back and makes the
+    missing images again (retry: a GpuRetry; default the job's, see gpu_retry).
     """
     opts = gen_options(**gen_opts)
     if count < 1:
@@ -1122,6 +1309,16 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
             raise ValueError("This workflow template is img2img ({{image}}): give it an init image.")
 
     client = client or ComfyClient()
+    done: dict = {}                     # images made so far: a retry after a crash skips them
+    seed = random.randrange(2**32) if seed is None else int(seed)    # the same seeds on a retry
+    args =(prompt, negative, client, seed, count, init_image, denoise, aspect, mask, grow_mask_by,
+            opts, template, used, done)
+    results = (retry or current_retry()).run(lambda: _generate_once(*args), "a picture", client)
+    return results
+
+
+def _generate_once(prompt, negative, client, seed, count, init_image, denoise, aspect, mask,
+                   grow_mask_by, opts, template, used, done) -> list[tuple[Image.Image, int]]:
     client.ensure_running()
     init = load_image(init_image) if init_image is not None else None
     if init is not None and aspect is None:
@@ -1168,18 +1365,19 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
                                 mask=mask_name, grow_mask_by=grow_mask_by)
             _apply_project_style(wf, opts)
         key = cache_key(wf, client)
-        hit = cache_get(key)
+        hit = done.get(i) or cache_get(key)
         jobs.append([s, key, hit, None])
         if hit is None:              # queued now: ComfyUI starts the next one with no gap
             jobs[-1][3] = client.queue(wf)
             log.info("Queued ComfyUI prompt %s (seed %d)", jobs[-1][3], s)
     try:
-        for job in jobs:
+        for i, job in enumerate(jobs):
             s, key, images, pid = job
             if images is None:
                 entry = client.wait(pid, opts.timeout)
                 images = client.fetch_images(pid, entry)
                 cache_put(key, images)
+                done[i] = images
                 job[3] = None
             else:
                 log.info("Reused a cached picture (seed %d)", s)

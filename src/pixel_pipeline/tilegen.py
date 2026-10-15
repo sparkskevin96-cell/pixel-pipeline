@@ -97,13 +97,19 @@ MATERIAL = {
     "grass": ("(short green grass lawn:1.2), small leaves and clover", "dirt, path, stones, water, flowers"),
     "dirt": ("(packed dirt path:1.3), (bare worn brown earth:1.2), small pebbles, top-down ground texture",
              "leaves, grass, plants, trees, moss, forest, roots, ferns, flowers, mushrooms, water, green"),
-    "road": ("(cobblestone road:1.3), rounded grey paving stones, mortar joints",
-             "grass, leaves, moss, plants, trees, forest, water, dirt"),
+    # QA 2026-10-15: "cobblestone road, paving stones, mortar joints" drew a brick wall
+    "road": ("(cobblestone road:1.3), (rounded irregular cobbles:1.25), round river stones of mixed "
+             "sizes, uneven organic shapes, dark gaps between the stones",
+             "grass, leaves, moss, plants, trees, forest, water, dirt, (bricks:1.3), brick wall, "
+             "rectangular blocks, rows of tiles, mortar lines, grid"),
     "stone": ("(stone floor:1.3), worn grey flagstones, square slabs", "grass, leaves, moss, plants, trees"),
     "sand": ("(fine beach sand:1.3), small ripples, warm pale sand", "grass, leaves, plants, rocks, water, shells"),
     "snow": ("(fresh white snow:1.3), soft drifts, blue shadows", "grass, leaves, trees, rocks, dirt"),
-    "water": ("(clear blue water surface:1.3), gentle ripples, light glints",
-              "lily pads, leaves, islands, land, rocks, moss, sand, green, swamp, algae"),
+    # QA 2026-10-15: the lagoon came out as a grid of light dashes (a circuit board)
+    "water": ("(clear blue water surface:1.3), calm water with clearly visible small ripples, "
+              "bright light glints, darker depth bands",
+              "lily pads, leaves, islands, land, rocks, moss, sand, green, swamp, algae, (grid:1.3), "
+              "tiles, squares, straight lines, circuit board, maze"),
     "cliff": ("(grey rock:1.2), layered stone, rough rock surface", "grass, trees, leaves, water, sky"),
     "fence": ("(weathered wooden planks:1.2), wood grain", "grass, leaves, metal, stone"),
     "wall": ("(stone brick wall:1.2), mortar lines, cut stone blocks", "grass, leaves, wood, plants"),
@@ -118,7 +124,8 @@ COLOUR_RULES = {
     "sand": {"hue": (20, 60), "sat": (0.1, 0.65), "val": (0.45, 1.0), "green": 0.15},
     "snow": {"sat": (0.0, 0.3), "val": (0.6, 1.0), "green": 0.1},
     "grass": {"hue": (55, 160), "green_min": 0.35},
-    "water": {"hue": (170, 260), "blue_min": 0.35, "green": 0.3},
+    # v2 GPU lagoon: islands + a palm drawn in (blue 0.51): water must be mostly water
+    "water": {"hue": (170, 260), "blue_min": 0.7, "green": 0.15, "warm": 0.08},
     "cliff": {"sat": (0.0, 0.5), "green": 0.35},
     "fence": {"hue": (5, 55), "sat": (0.1, 0.75), "green": 0.15},
     "wall": {"sat": (0.0, 0.4), "green": 0.25},
@@ -143,7 +150,8 @@ def colour_stats(picture) -> dict:
     hue, sat = hsv[:, 0] * 2, hsv[:, 1]
     return {"hue": h * 360, "sat": s, "val": v,
             "green": float(((hue > 70) & (hue < 170) & (sat > 60)).mean()),
-            "blue": float(((hue >= 170) & (hue < 260) & (sat > 60)).mean())}
+            "blue": float(((hue >= 170) & (hue < 260) & (sat > 60)).mean()),
+            "warm": float(((hue < 60) & (sat > 60)).mean())}       # earth, sand, wood
 
 
 def colour_miss(terrain: str, picture=None, stats: dict | None = None) -> float:
@@ -167,7 +175,220 @@ def colour_miss(terrain: str, picture=None, stats: dict | None = None) -> float:
         miss += max(0.0, rule["green_min"] - st["green"]) * 3
     if "blue_min" in rule:
         miss += max(0.0, rule["blue_min"] - st["blue"]) * 3
+    if "warm" in rule:
+        miss += max(0.0, st.get("warm", 0.0) - rule["warm"]) * 3
     return round(miss, 4)
+
+
+# --------------------------------------------------------------------------- pattern checks
+#
+# Colour isn't enough: the QA cobblestone road was grey (colour fine) but drawn as bricks, the
+# lagoon blue but drawn as a grid of straight dashes. Two cheap statistics of the picture:
+#  - edge orientation (strong edges' gradient angles): rounded cobbles point every way (4-fold
+#    coherence |mean exp(4i theta)| ~0.05), bricks / grids run along two perpendicular axes
+#    (0.4-0.8). Water ripples run one way (also 4-fold coherent), so for grids the horizontal and
+#    vertical edges must also balance.
+#  - row / column line energy: the high-passed mean of every row and column; long straight lines
+#    across the picture stand out of it (natural textures ~0.1 of the picture's contrast).
+# Measured: QA bricks 0.45 (real GPU cobbles 0.21-0.30, synthetic 0.04); QA lagoon grid 0.38 / lines 0.32
+# (water 0.0-0.18 / 0.09-0.13).
+BRICK_CHECK = ("road",)                                   # rounded stones wanted
+GRID_CHECK = ("water", "grass", "dirt", "sand", "snow", "road")   # no straight-line grids wanted
+BRICK_MAX = 0.36           # 4-fold edge coherence (GPU cobbles 2026-10-15: 0.21-0.30)
+GRID_MAX = 0.31            # x horizontal/vertical balance (GPU cobbles 0.14-0.25)
+LINES_MAX = 0.22           # row / column line energy (both directions)
+PATTERN_WORDS = {"road": ("(round cobbles:1.4), (irregular rounded stones:1.3)",
+                          "(bricks:1.5), (rectangular:1.3), (straight rows:1.3), grid"),
+                 "water": ("(organic flowing ripples:1.3), soft caustics",
+                           "(grid:1.5), (straight lines:1.4), (squares:1.3), dashes, pattern")}
+_DEFAULT_PATTERN = ("(natural organic irregular texture:1.3), scattered",
+                    "(grid:1.4), (straight lines:1.3), squares, (rows:1.3), courses, bricks, planks, "
+                    "streaks, stripes")
+# One direction everywhere (2-fold edge coherence): brick courses in dirt / snow / road and
+# wood-grain streaks in sand (house-style GPU run 2026-10-15: dirt 0.54, snow 0.45, brick road
+# 0.41-0.48, sand 0.95) vs round cobbles 0.23-0.27, grass 0.09, water 0.0-0.22.
+ROWS_MAX = {"road": 0.35, "dirt": 0.35, "snow": 0.35, "grass": 0.35, "sand": 0.6, "water": 0.45}
+
+
+def _grey256(picture) -> np.ndarray:
+    import cv2
+    rgb = _rgb(picture)
+    g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    interp = cv2.INTER_AREA if min(g.shape) >= 256 else cv2.INTER_NEAREST
+    return cv2.resize(g, (256, 256), interpolation=interp).astype(np.float32)
+
+
+def pattern_stats(picture) -> dict:
+    """{brick: 4-fold edge-orientation coherence, balance: horizontal vs vertical edge energy
+    (min/max), grid: brick x balance (capped), lines: row/column line energy (the weaker of the
+    two directions)} of a swatch picture."""
+    import cv2
+    from scipy.ndimage import gaussian_filter1d
+    g = _grey256(picture)
+    b = cv2.GaussianBlur(g, (0, 0), 1.5)
+    gx = cv2.Sobel(b, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(b, cv2.CV_32F, 0, 1, ksize=3)
+    m = np.hypot(gx, gy)
+    keep = m > np.percentile(m, 70)
+    w, th = m[keep].astype(np.float64), np.arctan2(gy, gx)[keep]
+    total = max(float(w.sum()), 1e-6)
+    c4 = float(abs((w * np.exp(4j * th)).sum()) / total) if w.size else 0.0
+    a = np.abs(np.cos(th))
+    vert = float(w[a > np.cos(np.radians(20))].sum())      # gradient across: vertical edges
+    horiz = float(w[a < np.sin(np.radians(20))].sum())     # horizontal edges
+    bal = min(vert, horiz) / max(vert, horiz, 1e-6)
+    sd = max(float(g.std()), 1e-6)
+
+    def line_energy(profile):
+        hp = profile - gaussian_filter1d(profile, 6, mode="wrap")
+        return float(hp.std()) / sd
+    lines = min(line_energy(g.mean(1)), line_energy(g.mean(0)))
+    c2 = float(abs((w * np.exp(2j * th)).sum()) / total) if w.size else 0.0
+    return {"brick": round(c4, 4), "balance": round(bal, 4),
+            "grid": round(c4 * min(1.0, 2 * bal), 4), "lines": round(lines, 4), "rows": round(c2, 4)}
+
+
+def pattern_miss(terrain: str, picture=None, stats: dict | None = None,
+                 seamless: bool = False) -> float:
+    """How far a swatch's PATTERN is from its terrain's (0 = fine): bricks where rounded cobbles
+    belong (road), a grid of straight lines in water / grass / dirt / sand / snow."""
+    if terrain not in BRICK_CHECK and terrain not in GRID_CHECK and terrain not in ROWS_MAX:
+        return 0.0
+    st = stats or pattern_stats(picture)
+    miss = 0.0
+    # seamless=True: the blended picture (half-offset copies) — only straight lines / grids are
+    # its own fault; its edge directions follow the blend on a small crop (rows 0.01 -> 0.38)
+    if terrain in BRICK_CHECK and not seamless:
+        miss += max(0.0, st["brick"] - BRICK_MAX) * 4
+    if terrain in GRID_CHECK:
+        miss += max(0.0, st["grid"] - GRID_MAX) * 4 + max(0.0, st["lines"] - LINES_MAX) * 4
+    if terrain in ROWS_MAX and not seamless:
+        miss += max(0.0, st.get("rows", 0.0) - ROWS_MAX[terrain]) * 4
+    return round(miss, 4)
+
+
+# --------------------------------------------------------------------------- scale + the final tile
+#
+# GPU run 2026-10-15: the road swatch had proper cobbles (~70 px across in the 1024 picture),
+# but the whole picture squeezed into a 32 px tile made each cobble ~2 px: grey noise. So the
+# swatch is CROPPED to the piece whose features land at FEATURE_PX in the final tile (feature
+# size = twice the first zero of the picture's radial autocorrelation: ~ the blob diameter,
+# checked on Voronoi cobbles of known size), and the converted tile itself is checked: region
+# size in 4 lightness bands (noise ~1.9, squeezed cobbles 2.6, readable 4.5+; tile_stats) and
+# lightness spread (the lagoon came out one flat blue: L std 0.2).
+FEATURE_PX = {"road": 6, "stone": 9, "cliff": 7, "wall": 8, "fence": 7, "grass": 3, "dirt": 6,
+              "sand": 5, "snow": 7, "water": 8}       # GPU v2: dirt rocks ~106 px squeezed to 3
+STRUCTURE_MIN = {"road": 3.5, "stone": 4.0, "cliff": 3.0, "wall": 3.5, "fence": 3.5, "water": 3.0}
+FLAT_MIN = {"water": 3.0, "snow": 1.5}         # L std (0-100) of the final tile
+FLAT_DEFAULT = 2.0
+FLAT_WORDS = ("(clearly visible ripples:1.4), (bright glints:1.2), darker depth bands, "
+              "hand-drawn 16-bit water", "flat colour, plain, empty, blank, solid fill")
+
+
+def feature_size(picture) -> float:
+    """Typical feature (stone, ripple, tuft) diameter in the picture's own pixels."""
+    import cv2
+    rgb = _rgb(picture)
+    g = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    g = g - cv2.GaussianBlur(g, (0, 0), max(4.0, g.shape[0] / 12))
+    g -= g.mean()
+    F = np.fft.rfft2(g)
+    ac = np.fft.irfft2(F * np.conj(F), s=g.shape)
+    if ac[0, 0] <= 1e-6:
+        return float(min(g.shape)) / 4
+    ac = np.fft.fftshift(ac / ac[0, 0])
+    h, w = ac.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    r = np.hypot(yy - h // 2, xx - w // 2).astype(int).ravel()
+    prof = np.bincount(r, ac.ravel()) / np.maximum(np.bincount(r), 1)
+    below = np.nonzero(prof[: min(h, w) // 2] < 0.0)[0]
+    r0 = int(below[0]) if below.size else min(h, w) // 4
+    return float(2 * max(1, r0))
+
+
+def tile_crop(picture, terrain: str, tile: int) -> np.ndarray:
+    """The centred square of the picture whose features come out ~FEATURE_PX pixels in a
+    `tile` px tile (the whole picture when its features are already that coarse)."""
+    rgb = _rgb(picture)
+    side = min(rgb.shape[:2])
+    want = max(2.0, FEATURE_PX.get(terrain, 4) * min(1.0, (tile / 32) ** 0.5))   # small tiles: smaller
+    c = int(round(tile * feature_size(rgb) / want))
+    c = int(np.clip(c, max(2 * tile, side // 10), side))
+    best = None                       # of 9 placements, the one most like the terrain (the
+    for fy in (0.5, 0.2, 0.8):        # centre of the v2 lagoon was an island)
+        for fx in (0.5, 0.2, 0.8):
+            y0 = int(round((rgb.shape[0] - c) * fy))
+            x0 = int(round((rgb.shape[1] - c) * fx))
+            piece = rgb[y0:y0 + c, x0:x0 + c]
+            score = colour_miss(terrain, piece) if terrain in COLOUR_RULES else 0.0
+            if best is None or score < best[0] - 1e-6:
+                best = (score, piece)
+    return np.ascontiguousarray(best[1])
+
+
+def tile_stats(texture) -> dict:
+    """{blob: mean region size (px) of the tile split into 4 lightness bands (quartiles; tiled
+    3x3 so regions run across its edges), lstd: lightness spread (Lab L 0-100), colours} of a
+    converted tile. Pure noise ~1.9, the v1 GPU road (cobbles squeezed to 2 px) 2.5-2.7, the same
+    road cropped to scale 4.5-8.8, built-in looks 6-98."""
+    import cv2
+    from scipy import ndimage as ndi
+    rgb = np.ascontiguousarray(np.asarray(texture)[..., :3]).astype(np.uint8)
+    lum = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)[..., 0].astype(np.float64) * 100 / 255
+    q = np.quantile(lum, (0.25, 0.5, 0.75))
+    idx = np.tile(np.digitize(lum, q), (3, 3))
+    regions = sum(ndi.label(idx == v)[1] for v in np.unique(idx))
+    colours = len(np.unique(rgb.reshape(-1, 3), axis=0))
+    return {"blob": round(idx.size / max(1, regions), 3), "lstd": round(float(lum.std()), 3),
+            "colours": int(colours)}
+
+
+def tile_miss(terrain: str, texture=None, stats: dict | None = None, tile: int | None = None) -> float:
+    """How far the FINAL tile is from readable (0 = fine): structure lost to pixel noise (road,
+    stone, cliff, wall, fence, water) or too flat to read (every terrain; water needs more).
+    Region sizes are for 32 px tiles; smaller tiles need less (x sqrt(tile / 32))."""
+    st = stats or tile_stats(texture)
+    t = tile or (np.asarray(texture).shape[0] if texture is not None else 32)
+    miss = 0.0
+    if terrain in STRUCTURE_MIN:
+        need = STRUCTURE_MIN[terrain] * min(1.0, (t / 32) ** 0.5)
+        miss += max(0.0, need - st["blob"]) * 0.5
+    miss += max(0.0, FLAT_MIN.get(terrain, FLAT_DEFAULT) - st["lstd"]) * 0.5
+    return round(miss, 4)
+
+
+def lift_detail(picture, target: float = 7.0, most: float = 6.0) -> np.ndarray:
+    """A too-flat picture with its lightness spread stretched to `target` (Lab L std, at most
+    `most` x): the faint ripples SDXL drew in a calm lagoon become readable bands and glints."""
+    import cv2
+    rgb = _rgb(picture)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    L = lab[..., 0] * 100 / 255
+    sd = float(L.std())
+    k = float(np.clip(target / max(sd, 1e-3), 1.0, most))
+    m = float(L.mean())
+    lab[..., 0] = np.clip(m + (L - m) * k, 0, 100) * 255 / 100
+    return cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+
+
+def neo_water_tile(colour, size: int, seed: int = 0, style=None) -> np.ndarray:
+    """A calm neo-16-bit open-water tile (water.py's waves, crest lines, glints) in a ramp built
+    around `colour` (the swatch's own blue): the last resort when SDXL keeps drawing flat water."""
+    from .effects import project_palette as pp
+    from . import water as W
+    c = np.asarray(colour, np.float64)
+    white = np.full(3, 255.0)
+    keys = [c * 0.42, c * 0.6, c * 0.78, c, c + (white - c) * 0.3, c + (white - c) * 0.62,
+            c + (white - c) * 0.88]
+    hexes = ["%02x%02x%02x" % tuple(int(v) for v in np.clip(np.rint(k), 0, 255)) for k in keys]
+    ramp = W._ramp(None, hexes, None, pp(style) if style is not None else None)
+    rng = np.random.default_rng(seed)
+    F = W._fields(size, rng, 0.8)
+    f, _ = W._open_frame(size, 0.0, F, ramp, 0.8)
+    g = np.zeros_like(f)
+    W._put_glints(f, g, W._glints(size, 2, rng, max(1, size * size // 500)), 0, 2, ramp)
+    f[..., 3] = 255
+    return f
 
 
 def role_of(terrain: str) -> str:
@@ -185,11 +406,14 @@ def camera_for(style: assets.Style | None = None) -> str:
 
 
 def swatch_prompt(terrain: str, words: str = "", camera: str = "topdown",
-                  style: assets.Style | None = None, colour: bool = False) -> tuple[str, str]:
+                  style: assets.Style | None = None, colour: bool = False,
+                  pattern: bool = False, flat: bool = False) -> tuple[str, str]:
     """(positive, negative) for a texture swatch, with the house style appended. The terrain's
     material words lead (MATERIAL: "forest path" still draws packed earth, not a forest floor)
     and its negatives keep leaves / grass / water out (unless the words ask for them); colour:
-    a retry after a colour miss, the terrain's colour word weighted in."""
+    a retry after a colour miss, the terrain's colour word weighted in; pattern: a retry after a
+    pattern miss (bricks for cobbles, a grid in water): the right shapes weighted in, the wrong
+    ones weighted out."""
     if camera not in CAMERAS:
         raise ValueError(f"camera must be one of {', '.join(CAMERAS)}")
     text = (words or "").strip().rstrip(".,; ") or (TERRAINS[terrain][0] if terrain in TERRAINS
@@ -202,6 +426,13 @@ def swatch_prompt(terrain: str, words: str = "", camera: str = "topdown",
     asked = text.lower()
     neg = ", ".join([NEGATIVE] + [w for w in (x.strip() for x in avoid.split(","))
                                   if w and w not in asked])
+    if pattern:
+        good, bad = PATTERN_WORDS.get(terrain, _DEFAULT_PATTERN)
+        text = f"{good}, {text}"
+        neg = f"{neg}, {bad}"
+    if flat:                         # the last tile came out one flat colour
+        text = f"{FLAT_WORDS[0]}, {text}"
+        neg = f"{neg}, {FLAT_WORDS[1]}"
     return assets.with_style(PROMPTS[camera].format(words=text), neg,
                              style or assets.project_style(), "tile")
 
@@ -506,6 +737,7 @@ class Swatch:
     prompt: str = ""
     raw: np.ndarray | None = None   # what SDXL drew
     colour_miss: float = 0.0        # 0 = its colours fit the terrain (colour_miss)
+    pattern_miss: float = 0.0       # 0 = no bricks in a cobble road, no grid in water (pattern_miss)
 
 
 def builtin_swatch(terrain: str, size: int = 32, seed: int = 0,
@@ -529,8 +761,10 @@ def make_swatches(terrain: str, words: str = "", *, count: int = 3, camera: str 
     """`count` texture variations from the GPU (seeds seed, seed+1, ...), each made seamless,
     evened out (even_out) and pixelized at the project's tile size. A picture whose colours miss
     the terrain's (colour_miss: dirt must be brown and dull, water blue...) is drawn again, up to
-    `retries` times, with a new seed and the terrain's colour word weighted in; the closest one
-    is kept (Swatch.colour_miss says how far it still is)."""
+    `retries` times, with a new seed and the terrain's colour word weighted in; so is one whose
+    pattern misses (pattern_miss: bricks drawn for a cobble road, a grid of lines in water),
+    checked on the picture as drawn and again once it is seamless. The closest one is kept
+    (Swatch.colour_miss / pattern_miss say how far it still is)."""
     from .generate import generate_images
     st = style or assets.project_style()
     camera = camera or camera_for(st)
@@ -539,27 +773,75 @@ def make_swatches(terrain: str, words: str = "", *, count: int = 3, camera: str 
     say = say or (lambda text: None)
     say(f"Drawing {count} {terrain} texture(s) on the GPU…")
     pics = generate_images(pos, neg, client=client, seed=seed, count=count, aspect=1.0, **gen_opts)
+    def tileable(raw, prompt, s):
+        """The crop whose features survive at the tile size, made seamless + evened out, its
+        tile, and how far that tile is from readable (lifted once when it is too flat)."""
+        pic = seamless(tile_crop(raw, terrain, size), client=client, prompt=prompt, negative=neg,
+                       seed=s, inpaint=inpaint_seams)
+        pic = even_out(pic) if even else pic
+        tex = pixel_texture(pic, size, st)
+        ts = tile_stats(tex)
+        tm = tile_miss(terrain, stats=ts, tile=size)
+        if ts["lstd"] < FLAT_MIN.get(terrain, FLAT_DEFAULT):     # faint detail: make it read
+            lifted = lift_detail(pic, target=max(7.0, 2.5 * FLAT_MIN.get(terrain, FLAT_DEFAULT)))
+            tex2 = pixel_texture(lifted, size, st)
+            tm2 = tile_miss(terrain, tex2)
+            if tm2 < tm:
+                pic, tex, tm = lifted, tex2, tm2
+        return pic, tex, tm
+
+    def neo_water(pic, s):
+        """Water still flat (or still full of land) after the redraws: the neo water tile in the
+        swatch's own blue (its picture = the tile scaled up, so variety crops keep it)."""
+        import cv2
+        px = _rgb(pic).reshape(-1, 3)
+        hsv = cv2.cvtColor(px[None].astype(np.uint8), cv2.COLOR_RGB2HSV)[0].astype(int)
+        blue = px[(hsv[:, 0] * 2 >= 170) & (hsv[:, 0] * 2 < 260) & (hsv[:, 1] > 60)]
+        colour = blue.mean(0) if len(blue) >= 50 else np.array([40.0, 120.0, 200.0])
+        tex = neo_water_tile(colour, size, s, st)
+        big = cv2.resize(np.ascontiguousarray(tex[..., :3]), (512, 512), interpolation=cv2.INTER_NEAREST)
+        return big, tex, tile_miss(terrain, tex)
+
     out = []
     for i, (img, s) in enumerate(pics):
-        prompt = pos
-        miss = colour_miss(terrain, img)
-        for k in range(max(0, retries)):
-            if miss <= 0:
+        s0, prompt, best = s, pos, None
+        cm = pm = tm = 0.0
+        for k in range(max(0, retries) + 1):
+            if k:                       # the last try missed: draw it again, aimed at the miss
+                what = " and ".join(w for w, bad in (
+                    ("the wrong colour", cm > 0), ("the wrong pattern (bricks / a grid)", pm > 0),
+                    ("unreadable at tile size (noise / flat)", tm > 0)) if bad)
+                say(f"Texture {i + 1} came out {what} for {terrain}; drawing it again "
+                    f"({k} of {retries})…")
+                prompt, n2 = swatch_prompt(terrain, words, camera, st, colour=cm > 0,
+                                           pattern=pm > 0, flat=tm > 0)
+                (img, s), = generate_images(prompt, n2, client=client, seed=s0 + 1000 * k, count=1,
+                                            aspect=1.0, **gen_opts)
+            cm, pm, tm = colour_miss(terrain, img), pattern_miss(terrain, img), 0.0
+            raw = np.asarray(img.convert("RGB"))
+            pic = tex = None
+            if cm <= 0 and pm <= 0:      # fine as drawn: made seamless and converted, looked at
+                say(f"Making texture {i + 1} of {len(pics)} seamless…")   # again (seams can add
+                pic, tex, tm = tileable(raw, prompt, s)                   # lines; the tile can
+                pm = pattern_miss(terrain, pic, seamless=True)            # turn to noise)
+            score = cm + pm + tm
+            if best is None or score < best[0]:
+                best = (score, s, prompt, cm, pm + tm, raw, pic, tex)
+            if score <= 0:
                 break
-            say(f"Texture {i + 1} came out the wrong colour for {terrain}; drawing it again "
-                f"({k + 1} of {retries})…")
-            p2, n2 = swatch_prompt(terrain, words, camera, st, colour=True)
-            (img2, s2), = generate_images(p2, n2, client=client, seed=s + 1000 * (k + 1), count=1,
-                                          aspect=1.0, **gen_opts)
-            m2 = colour_miss(terrain, img2)
-            if m2 < miss:
-                img, s, miss, prompt = img2, s2, m2, p2
-        say(f"Making texture {i + 1} of {len(pics)} seamless…")
-        raw = np.asarray(img.convert("RGB"))
-        pic = seamless(raw, client=client, prompt=prompt, negative=neg, seed=s, inpaint=inpaint_seams)
-        if even:
-            pic = even_out(pic)
-        out.append(Swatch(terrain, pixel_texture(pic, size, st), pic, s, prompt, raw, miss))
+        _, s, prompt, cm, pm, raw, pic, tex = best
+        if pic is None:
+            say(f"Making texture {i + 1} of {len(pics)} seamless…")
+            pic, tex, tm = tileable(raw, prompt, s)
+            pm += tm
+        if terrain == "water" and (tile_stats(tex)["lstd"] < FLAT_MIN["water"] or cm > 0):
+            why = "has land / plants in it" if cm > 0 else "stays flat"
+            say(f"Texture {i + 1}: the GPU's water {why}; using calm drawn ripples in its blue")
+            pic, tex, tm = neo_water(raw if cm > 0 else pic, s)
+            cm = colour_miss(terrain, tex[..., :3])
+            pm = tm                   # drawn by code: no bricks / grid to look for
+            prompt += " [neo water ripples]"
+        out.append(Swatch(terrain, tex, pic, s, prompt, raw, cm, pm))
     return out
 
 
