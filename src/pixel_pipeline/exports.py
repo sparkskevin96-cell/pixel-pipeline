@@ -1003,6 +1003,15 @@ def _model3d(engine: str, src: Source, out: Path, **opts) -> list[Path]:
 
 # --------------------------------------------------------------------------- public API
 
+def _is_draft(asset) -> bool:
+    """A library character whose front drawing waits for the user's OK (no sheet yet)."""
+    from .library import is_draft_folder
+    folder = getattr(asset, "folder", None)
+    if folder is None and isinstance(asset, (str, Path)):
+        folder = Path(asset) if Path(asset).is_dir() else Path(asset).parent
+    return folder is not None and is_draft_folder(folder)
+
+
 def export_asset(asset, preset: str, out_dir, **opts) -> list[Path]:
     """Write one asset for an engine into out_dir; returns the files written.
 
@@ -1013,6 +1022,10 @@ def export_asset(asset, preset: str, out_dir, **opts) -> list[Path]:
     True)."""
     if preset not in _WRITERS:
         raise ValueError(f"Unknown export preset '{preset}' (use {', '.join(PRESETS)})")
+    if _is_draft(asset):
+        raise ValueError(f"{getattr(asset, 'name', asset)} is a draft: only its front is drawn, "
+                         "waiting for your OK (Characters page -> Looks good), so it has no "
+                         "sprites to export yet.")
     # 3D model presets read the asset's model files, not a sprite sheet
     src = asset if preset.endswith("-3d-model") else source(asset)
     out = Path(out_dir)
@@ -1046,6 +1059,14 @@ def export_collection(collection, preset: str, out_dir, project=None, **opts) ->
     index = {"collection": name, "preset": preset, "assets": []}
     written: list[Path] = []
     used: set[str] = set()
+    drafts = [a for a in items if _is_draft(a)]
+    if drafts:                    # characters waiting for an OK have no sprites yet: skipped
+        index["skipped"] = [{"name": getattr(a, "name", str(a)), "why": "draft: waiting for your OK"}
+                            for a in drafts]
+        items = [a for a in items if not _is_draft(a)]
+        if not items:
+            raise ValueError("Nothing to export: every character in it is a draft waiting for "
+                             "your OK.")
     for a in items:
         src = source(a)
         sub = src.file_name

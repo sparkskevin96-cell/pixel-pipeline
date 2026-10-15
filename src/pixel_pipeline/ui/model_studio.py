@@ -24,11 +24,11 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSpinBox,
-    QSplitter, QVBoxLayout, QWidget,
+    QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from ..settings import settings_for
@@ -179,13 +179,25 @@ class ModelStudio(QMainWindow):
         self.picture_view = _label("Front picture")
         self.model_view = _label("3D model (spins)")
         self.sprite_view = _label("Direction sprites")
-        panels = QHBoxLayout()
+        panels_w = QWidget()
+        panels = QHBoxLayout(panels_w)
+        panels.setContentsMargins(0, 0, 0, 0)
         for title, view in (("Picture", self.picture_view), ("3D model", self.model_view),
                             ("In the game (every direction)", self.sprite_view)):
             box = QGroupBox(title)
             lay = QVBoxLayout(box)
             lay.addWidget(view)
             panels.addWidget(box, 1)
+        # a drawn character's front drawing waiting for the OK (library.in_preview)
+        from .character_review import CharacterReview
+        self.review = CharacterReview(self._run, self.statusBar().showMessage)
+        self.review.approved.connect(self._review_approved)
+        self.review.changed.connect(self._review_changed)
+        self.review.closed.connect(self._review_closed)
+        self.panels_page = panels_w
+        self.stack = QStackedWidget()
+        self.stack.addWidget(panels_w)
+        self.stack.addWidget(self.review)
 
         self.directions = QComboBox()
         self.directions.addItems(["16", "8", "4"])
@@ -226,6 +238,11 @@ class ModelStudio(QMainWindow):
                               "the library to redraw one direction.")
         from ..drawnrig import available
         self.drawn.setChecked(available())
+        self.front_first = QCheckBox("Front first, wait for my OK")
+        self.front_first.setChecked(True)
+        self.front_first.setToolTip("Drawn sprites: draw only the front (~1 min of GPU) and show it "
+                                    "with a short idle; the other directions are drawn when you "
+                                    "say it looks good (or redraw it first). Off: all at once.")
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setToolTip("Stop drawing after the current picture (the drawings so far are "
                                  "kept: Add to library again carries on)")
@@ -280,6 +297,7 @@ class ModelStudio(QMainWindow):
         row.addWidget(self.animate)
         row.addWidget(self.swing)
         row.addWidget(self.drawn)
+        row.addWidget(self.front_first)
         row.addWidget(self.frames)
         row.addStretch(1)
         row.addWidget(self.redo_btn)
@@ -321,7 +339,7 @@ class ModelStudio(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addLayout(top)
         lay.addWidget(self.paint_box)
-        lay.addLayout(panels, 1)
+        lay.addWidget(self.stack, 1)
         lay.addLayout(keep)
         lay.addWidget(self.more)
         split = QSplitter()
@@ -348,20 +366,30 @@ class ModelStudio(QMainWindow):
         self.more_btn.setText("More settings ▾" if on else "More settings ▸")
 
     def refresh_library(self, select=None):
-        from ..library import list_characters
+        from ..library import in_preview, list_characters
         self.library.clear()
         chars = list_characters()
+        waiting = 0
         for ch in chars:
-            item = QListWidgetItem(ch.name)
+            draft = in_preview(ch)
+            waiting += draft
+            item = QListWidgetItem(ch.name + ("\nwaiting for OK" if draft else ""))
             if ch.thumb.exists():
-                item.setIcon(QIcon(QPixmap(str(ch.thumb))))
+                pix = QPixmap(str(ch.thumb))
+                item.setIcon(QIcon(_badged(pix) if draft else pix))
             item.setData(Qt.UserRole, ch)
-            item.setToolTip(f"{ch.name}: {ch.kind}, {ch.size}. Class {ch.stats_class}: "
-                            "HP %d  ATK %d  DEF %d  MOV %d  JMP %d  RNG %d" % ch.stats())
+            item.setToolTip(
+                (f"{ch.name}: a draft — only its front is drawn, waiting for your OK. Click it "
+                 "to review (or right-click).") if draft else
+                (f"{ch.name}: {ch.kind}, {ch.size}. Class {ch.stats_class}: "
+                 "HP %d  ATK %d  DEF %d  MOV %d  JMP %d  RNG %d" % ch.stats()))
+            if draft:
+                item.setForeground(QColor("#e0a020"))
             self.library.addItem(item)
             if select is not None and ch.folder == select.folder:
                 self.library.setCurrentItem(item)
-        self.lib_title.setText(f"Your characters ({len(chars)})")
+        self.lib_title.setText(f"Your characters ({len(chars)})"
+                               + (f" — {waiting} waiting for your OK" if waiting else ""))
 
     def show_library_folder(self):
         from PySide6.QtCore import QUrl
@@ -385,13 +413,19 @@ class ModelStudio(QMainWindow):
             view.clear()
             view.setText(text)
         self.library.clearSelection()
+        self.review.set_character(None)
+        self.stack.setCurrentWidget(self.panels_page)
         self._busy(False)
         self.statusBar().showMessage(self.HINT)
 
     def open_character(self, ch):
         """Show a library character: its picture, spinning model, and every animation playing."""
-        from ..library import load_animated
+        from ..library import in_preview, load_animated
         from ..model3d import ModelResult
+        if in_preview(ch):                       # a draft: its front drawing, for the OK
+            self.show_review(ch)
+            return
+        self.stack.setCurrentWidget(self.panels_page)
         self.character = ch
         self.name.setText(ch.name)
         self.subject.setCurrentText(ch.kind)
@@ -459,20 +493,16 @@ class ModelStudio(QMainWindow):
         model = self.result.model
         swing = self.swing.isChecked()
         drawn = self.drawn.isChecked() and kind in ("person", "animal")
+        preview = drawn and self.front_first.isChecked()     # the front first, then the OK
         cancel = self._new_cancel() if drawn else None
         picture = self.result.picture if self.result.picture and \
             Path(self.result.picture).suffix.lower() == ".png" else None
 
         def job(say):
-            ch = add_character(name, model, kind=kind, size=size, picture=picture, progress=say,
-                               prompt=prompt, drawn=drawn, cancel=cancel)
-            if swing:
-                from ..library import add_character_springs
-                try:
-                    ch = add_character_springs(ch, progress=say)
-                except ValueError as e:                  # nothing hangs off this one
-                    say(str(e))
-            return ch
+            # springs go on the rig before anything is drawn or rendered (one render)
+            return add_character(name, model, kind=kind, size=size, picture=picture, progress=say,
+                                 prompt=prompt, drawn=drawn, cancel=cancel, preview=preview,
+                                 springs=swing)
 
         def done(ch):
             self.refresh_library(select=ch)
@@ -480,6 +510,39 @@ class ModelStudio(QMainWindow):
             self.open_character(ch)
             self.show_notice(ch)
         self._run(job, done)
+
+    # ---- the front drawing, for the OK ------------------------------------------
+    def show_review(self, ch):
+        """A draft character: its front drawing + idle, Looks good / Redraw / Change words."""
+        self.character = ch
+        self.name.setText(ch.name)
+        self.subject.setCurrentText(ch.kind)
+        if self.size_.findText(ch.size) >= 0:
+            self.size_.setCurrentText(ch.size)
+        self.prompt.setText(ch.prompt)
+        self._anim_timer.stop()
+        self._spin_timer.stop()
+        self.review.sync = self.sync
+        self.review.set_character(ch)
+        self.stack.setCurrentWidget(self.review)
+        self._busy(False)
+        info = self.review.info or {}
+        self.statusBar().showMessage(f"{ch.name}: the front is drawn — does it look right? The "
+                                     f"rest: {info.get('estimate', 'a few minutes of GPU')}.")
+
+    def _review_approved(self, ch):
+        self.refresh_library(select=ch)
+        self.library_changed.emit()
+        self.open_character(ch)
+
+    def _review_changed(self, ch):
+        self.refresh_library(select=ch)
+        self.library_changed.emit()
+
+    def _review_closed(self, ch):
+        self.refresh_library(select=ch)
+        self.library_changed.emit()
+        self.new_character()
 
     def show_notice(self, ch):
         """Something the user must know about an add (the GPU failed: 3D render instead, the
@@ -514,7 +577,18 @@ class ModelStudio(QMainWindow):
         if item is None:
             return
         ch = item.data(Qt.UserRole)
-        from ..library import drawing_unfinished
+        from ..library import drawing_unfinished, in_preview
+        if in_preview(ch):
+            menu = QMenu(self)
+            review = menu.addAction("Review the front drawing…")
+            finish = menu.addAction("Finish the drawn sprites (it looks good: every direction)")
+            act = menu.exec(self.library.mapToGlobal(pos))
+            if act is review:
+                self.show_review(ch)
+            elif act is finish:
+                self.show_review(ch)
+                self.review.approve()
+            return
         if drawing_unfinished(ch):
             menu = QMenu(self)
             finish = menu.addAction("Finish the drawn sprites (carry on where the GPU stopped)")
@@ -599,7 +673,9 @@ class ModelStudio(QMainWindow):
             self.add_btn.setText("In your library" if self.character is not None else "Add to library")
         if hasattr(self, "add_anim_btn"):
             self.add_anim_btn.setEnabled(not busy and self.character is not None
-                                         and self.more_anim.count() > 0)
+                                         and self.more_anim.count() > 0
+                                         and getattr(self, "stack", None) is not None
+                                         and self.stack.currentWidget() is not self.review)
         has_pic = self.result is not None and self.result.picture is not None \
             and Path(self.result.picture).suffix.lower() == ".png"
         self.edit_btn.setEnabled(not busy and has_pic)
@@ -901,6 +977,27 @@ class ModelStudio(QMainWindow):
             return []
         self.statusBar().showMessage("Saved " + ", ".join(p.name for p in written))
         return written
+
+
+def _badged(pix: QPixmap) -> QPixmap:
+    """A thumbnail with a "waiting for your OK" badge (an amber ? in the corner)."""
+    from PySide6.QtGui import QFont, QPainter
+    out = QPixmap(pix)
+    p = QPainter(out)
+    try:
+        r = max(10, out.width() // 4)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor("#e0a020"))
+        p.setPen(QColor("#1c2030"))
+        p.drawEllipse(out.width() - r - 2, 2, r, r)
+        f = QFont()
+        f.setBold(True)
+        f.setPixelSize(int(r * 0.8))
+        p.setFont(f)
+        p.drawText(out.width() - r - 2, 2, r, r, Qt.AlignCenter, "?")
+    finally:
+        p.end()
+    return out
 
 
 def _drawn_directions(ch) -> int:

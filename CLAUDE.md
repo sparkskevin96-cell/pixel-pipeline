@@ -619,6 +619,30 @@ wants terse answers and fixes over polish.
   (prompt_to_model picture=, views front; GPU ~1.5 min, said in the dialog). makeany.GPU recalibrated from the
   QA timings (tile 0.22/texture, card art 0.16, icon 0.2 + item 3D 1.2, prop drawing 0.35). Tests:
   tests/test_robust.py (fake ComfyUI that drops connections mid-run).
+- **Front first, then OK (2026-10-15, Kevin: "show one side then ask for approval to make all 16
+  directions, or redraw if it's not up to par")**: `library.add_character(drawn=True, preview=True)` =
+  picture -> model -> rig -> ONLY the reference drawing (S; animals E) + its idle bent from it
+  (`drawnrig.drawn_preview`: same `_drawn_setup` cameras/framing as drawn_animation, `draw_keys_paired(
+  only=(ref,))`, CPU idle via bend_direction) -> a DRAFT: keys/keys.json {"partial", "preview": {direction,
+  current, attempts, frame_ms}} (survives restarts), no sheet, thumb from the key. `in_preview` /
+  `Character.waiting` / `is_draft_folder`; `approve_preview` = finish_drawing (resume path: the S
+  candidate files are reused byte for byte, the rest paired to them); `redraw_preview(seed=, words=,
+  new_model=)` (new seed S only; words keep the seed; new_model = prompt_to_model again + re-rig, old
+  tries dropped); `pick_preview(ch, n)` (keys/attempts/<n>/: drawn_S_*, key.png, idle_*.png; no GPU);
+  `rest_estimate` = makeany.GPU drawn_dir 0.75 min x (n-1) + bend 1.8 min. Drafts: badge + "waiting for OK" in the Character
+  Library, right-click Review / Finish; Game tab lists only finished ones; exports raise / skip
+  ("skipped" in index.json); restyle skips; add animation/mocap/springs refuse. UI `ui/character_review.py`
+  (CharacterReview: key big + idle playing + picture small + estimate, Looks good / Redraw this side /
+  Change words… (words, house style words, "New model too") / Not now (keep draft) / Throw it away,
+  earlier tries strip, Stop) in ModelStudio (stack page; "Front first, wait for my OK" in More settings,
+  default on) and MakeTab (beside the plan; plan param `review`, default on; batch "Stop for my OK on each
+  character" -> drafts in a "Waiting for your OK" list; jobqueue result "waiting"; batch_summary counts
+  them). jobqueue kind "character" options review (default True). Note: the preview key's palette is S's
+  own; the final keys share one palette over all directions, so S's colours can shift slightly.
+  Tests tests/test_preview.py; shot Pictures/PixelPipeline/character_review_ui.png (tools/review_shot.py,
+  knight-v3 copy, no GPU). GPU e2e (QA 2026-10-15, dwarf-front-first, gpu_lock): model 3.2 min, front + idle 49 s,
+  redraw 37 s, pick try 1, approve 13.9 min (25 drawings 11.6 min + bending 1.8 min; S files sha1-identical);
+  shot character_review_ui_gpu.png (two tries).
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

@@ -610,6 +610,7 @@ def plan_for(kind: str, text: str, hits: list[Hit] | None = None, style=None) ->
         body = _first(hits, "character", "body") or "person"
         p["body"] = body
         p["drawn"] = True            # drawn by the GPU (people and animals); 3D render without it
+        p["review"] = True           # drawn: the front first, the rest after the user's OK
         p["size"] = {"small": "small", "large": "large"}.get(size_word or "", "") or \
             ("normal" if body == "person" else "medium")
         p["directions"] = int(getattr(st, "directions", 16))
@@ -881,7 +882,10 @@ def parse_batch(text: str) -> list[str]:
 # 20-60% under (a chunky item's 3D model is the front picture + shape only, ~1.2 min; healing
 # potion 2.0 min in all), a 3-drawing prop ~1.3 min (wooden crate).
 GPU = {"sdxl": 0.25, "model3d": 2.5, "drawn16": 8.5, "rig": 2.0, "inpaint": 0.3,
-       "icon": 0.2, "item3d": 1.2, "tile": 0.22, "card_art": 0.16, "prop_drawing": 0.35}
+       "icon": 0.2, "item3d": 1.2, "tile": 0.22, "card_art": 0.16, "prop_drawing": 0.35,
+       # front-first characters: the directions after the OK'd front, per direction (QA dwarf
+       # 2026-10-15: 15 directions = 25 drawings in 11.6 min) and the bending after (~1.8 min CPU)
+       "drawn_dir": 0.75, "bend": 1.8}
 
 
 def gpu_minutes(plan: Plan, style=None) -> float:
@@ -890,7 +894,8 @@ def gpu_minutes(plan: Plan, style=None) -> float:
     if k == "character":
         m = GPU["model3d"]
         if p.get("drawn"):           # animals ~ people (wolf 11.7 vs knight 12.5 min)
-            m += GPU["drawn16"] * max(1, int(p.get("directions", 16))) / 16
+            n = max(1, int(p.get("directions", 16)))
+            m += GPU["drawn16"] * (1 if p.get("review") else n) / 16   # review: the front only
         return m
     if k == "item":
         m = GPU["icon"] * max(1, int(p.get("variations", 3))) + 0.2
@@ -922,6 +927,14 @@ def gpu_minutes(plan: Plan, style=None) -> float:
     return 0.0
 
 
+def after_ok_minutes(plan: Plan) -> float:
+    """GPU minutes a drawn character still needs once its front is OK'd (review plans)."""
+    p = plan.params
+    if plan.kind != "character" or not (p.get("drawn") and p.get("review")):
+        return 0.0
+    return GPU["drawn_dir"] * max(0, int(p.get("directions", 16)) - 1)
+
+
 def cpu_minutes(plan: Plan) -> float:
     if plan.kind == "character":
         return GPU["rig"] + (1.7 if plan.params.get("drawn") else 0.0)
@@ -944,7 +957,8 @@ def summary(plan: Plan, style=None) -> str:
     how = ""
     if k == "character":
         how = (f"{'drawn sprites' if p.get('drawn') else '3D-rendered sprites'}, "
-               f"{p.get('directions', 16)} directions, all the project's animations")
+               f"{p.get('directions', 16)} directions, all the project's animations"
+               + (", the front first for your OK" if p.get("drawn") and p.get("review") else ""))
     elif k == "item":
         how = (f"{p.get('variations', 3)} icon variations to pick"
                + (" + a world sprite" if p.get("world") else ""))
@@ -977,6 +991,9 @@ def summary(plan: Plan, style=None) -> str:
         how = (f"parallax layers drawn from your words on the GPU, {p.get('tod')}" if p.get("words")
                else f"{p.get('scene')} parallax layers, {p.get('tod')}")
     cost = f"{_minutes(gpu)} of GPU" if gpu > 0 else "no GPU, a few seconds"
+    later = after_ok_minutes(plan)
+    if later > 0:
+        cost += f" (then {_minutes(later)} more once you OK the front)"
     cpu = cpu_minutes(plan)
     if cpu > 0.75:
         cost += f" + {_minutes(cpu)[6:] if _minutes(cpu).startswith('about ') else _minutes(cpu)} on the CPU"
@@ -999,6 +1016,7 @@ def fields_for(kind: str) -> list[tuple[str, str, object]]:
     themes = tuple(dict.fromkeys((*SPELL_THEMES, *THEMES)))
     return {
         "character": [("body", "Body", ("person", "animal")), ("drawn", "Drawn sprites (people)", bool),
+                      ("review", "Front first, wait for my OK", bool),
                       ("size", "Size", ("small", "normal", "medium", "large")), ("role", "Class", "text")],
         "item": [("category", "Category", tuple(CATEGORIES)), ("size", "Icon size", tuple(ITEM_SIZES)),
                  ("world", "World sprite too", bool), ("variations", "Variations", "int:1:6")],
@@ -1052,6 +1070,11 @@ class Made:
         return self.asset is not None
 
     @property
+    def waiting(self) -> bool:
+        """A drawn character whose front waits for the user's OK (library.in_preview)."""
+        return bool(getattr(self.asset, "waiting", False))
+
+    @property
     def notice(self) -> str:
         """What the user must hear (e.g. the GPU failed: 3D-rendered sprites, drawings kept)."""
         return self.extra.get("notice") or getattr(self.asset, "notice", "") or ""
@@ -1085,9 +1108,11 @@ def _make_character(plan: Plan, project, say, client=None) -> Made:
         sizes = library.SIZES.get(body, {})
         if size not in sizes:
             size = None
+        drawn = bool(p.get("drawn"))
         ch = library.add_character(plan.name, getattr(res, "model", None) or out, kind=body,
                                    size=size, picture=picture, role=p.get("role", ""),
-                                   progress=say, prompt=plan.prompt, drawn=bool(p.get("drawn")))
+                                   progress=say, prompt=plan.prompt, drawn=drawn,
+                                   preview=drawn and bool(p.get("review", False)))
     return Made(plan, ch)
 
 
@@ -1327,7 +1352,9 @@ def batch_summary(jobs) -> str:
     done = [j for j in jobs if j.status == "done"]
     failed = [j for j in jobs if j.status == "failed"]
     left = [j for j in jobs if j.status in ("pending", "running")]
-    head = f"{len(done)} made" + (f", {len(failed)} failed" if failed else "") + \
+    waiting = [j for j in done if any(r.get("waiting") for r in j.results)]
+    head = f"{len(done)} made" + (f" ({len(waiting)} waiting for your OK)" if waiting else "") + \
+        (f", {len(failed)} failed" if failed else "") + \
         (f", {len(left)} not done (stopped)" if left else "")
     lines = [head]
     for j in jobs:
@@ -1339,5 +1366,7 @@ def batch_summary(jobs) -> str:
         notes = [r["notice"].splitlines()[0] for r in j.results if r.get("notice")]
         if notes and not err:
             err = f" ({notes[-1]})"
+        if not err and any(r.get("waiting") for r in j.results):
+            err = " (front drawn: waiting for your OK)"
         lines.append(f"{mark} {LABELS.get(kind, kind)} “{j.name}”{err}" + (f" -> {where}" if where else ""))
     return "\n".join(lines)

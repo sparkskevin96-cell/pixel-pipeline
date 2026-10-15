@@ -110,10 +110,12 @@ class GameTab(ToolTab):
 
     def refresh(self):
         """Fill both teams from the library, keeping what was ticked (new characters unticked)."""
-        from ..library import list_characters
+        from ..library import in_preview, list_characters
         ticked = {lst: {i.data(Qt.UserRole).folder for i in self._items(lst)
                         if i.checkState() == Qt.Checked} for lst in (self.blue, self.red)}
-        chars = list_characters()
+        every = list_characters()
+        chars = [c for c in every if not in_preview(c)]   # drafts have no sprites yet
+        self.drafts = len(every) - len(chars)
         first_time = not any(ticked.values())
         for k, lst in enumerate((self.blue, self.red)):
             lst.blockSignals(True)
@@ -157,8 +159,11 @@ class GameTab(ToolTab):
     def _count(self):
         b, r = len(self.team(self.blue)), len(self.team(self.red))
         self.make_btn.setEnabled(1 <= b <= MAX_TEAM and 1 <= r <= MAX_TEAM)
+        drafts = getattr(self, "drafts", 0)
         self.say(f"Blue {b}, red {r}." + ("" if self.make_btn.isEnabled() else
-                                          f" Tick 1 to {MAX_TEAM} characters on each side."))
+                                          f" Tick 1 to {MAX_TEAM} characters on each side.")
+                 + (f" ({drafts} draft character(s) waiting for your OK on the Characters page "
+                    "aren't listed: they have no sprites yet.)" if drafts else ""))
 
     def make(self):
         from ..diorama import harbour, place_units

@@ -2,7 +2,11 @@
 pipeline and fills in its settings -> the plan is shown (editable, with "it could also be…")
 -> Make it runs it off the UI thread -> variations to pick where there are some -> saved in the
 project, then its own page opens for tweaking. A list (one per line) goes through the paced
-creation queue (jobqueue) with a summary at the end."""
+creation queue (jobqueue) with a summary at the end.
+
+Drawn characters stop after their front drawing (plan "review"): the review panel
+(character_review.py) shows it here; Looks good draws the rest and opens it. A batch with "Stop
+for my OK on each character" collects those drafts in a list to review one by one."""
 from __future__ import annotations
 
 import threading
@@ -12,7 +16,8 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .. import makeany as M
@@ -163,7 +168,15 @@ class MakeTab(ToolTab):
         col.addLayout(mk)
         col.addStretch(1)
         mid.addLayout(col, 2)
-        mid.addWidget(self.view, 3)
+        from .character_review import CharacterReview
+        self.review = CharacterReview(self._review_run, self.say)
+        self.review.approved.connect(self._review_approved)
+        self.review.changed.connect(lambda ch: self.changed.emit())
+        self.review.closed.connect(self._review_closed)
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.view)
+        self.view_stack.addWidget(self.review)
+        mid.addWidget(self.view_stack, 3)
         left.addLayout(mid, 1)
         left.addWidget(self.picks)
 
@@ -176,6 +189,22 @@ class MakeTab(ToolTab):
         self.rest = spin(0, 600, 20)
         self.rest.setSuffix(" s")
         self.rest.setToolTip("Rest between generations so the laptop never runs flat out for hours")
+        self.batch_review = QCheckBox("Stop for my OK on each character")
+        self.batch_review.setChecked(True)
+        self.batch_review.setToolTip("Drawn characters: only the front is drawn, then they wait in "
+                                     "the list below (and the Character Library) for your OK. "
+                                     "Items and props are made as usual. Off: every character all "
+                                     "the way (16 directions) with nobody looking.")
+        self.waiting = QListWidget()
+        self.waiting.setViewMode(QListWidget.IconMode)
+        self.waiting.setIconSize(QSize(56, 56))
+        self.waiting.setGridSize(QSize(84, 86))
+        self.waiting.setMovement(QListWidget.Static)
+        self.waiting.setFixedHeight(100)
+        self.waiting.itemClicked.connect(lambda item: self.review_character(item.data(Qt.UserRole)))
+        self.waiting_box = QGroupBox("Waiting for your OK (click one)")
+        QVBoxLayout(self.waiting_box).addWidget(self.waiting)
+        self.waiting_box.setVisible(False)
         self.queue_btn = QPushButton("Queue them all")
         self.queue_btn.clicked.connect(self.queue_batch)
         self.stop_btn = QPushButton("Stop after this one")
@@ -190,12 +219,14 @@ class MakeTab(ToolTab):
         mv.addWidget(self.batch_plan)
         f = QFormLayout()
         f.addRow("Rest between", self.rest)
+        f.addRow(self.batch_review)
         mv.addLayout(f)
         b = QHBoxLayout()
         b.addWidget(self.queue_btn)
         b.addWidget(self.stop_btn)
         mv.addLayout(b)
         mv.addWidget(self.report, 1)
+        mv.addWidget(self.waiting_box)
         many.setMaximumWidth(380)
 
         outer = QHBoxLayout(self)
@@ -218,6 +249,7 @@ class MakeTab(ToolTab):
         self.guesses = M.classify(text)
         self.made = None                       # a new request: the last result's picks go
         self._show_picks([])
+        self.view_stack.setCurrentWidget(self.view)
         self.view.show_rgba(None)
         self.view.setText("What you make shows here")
         self.set_plan(self.guesses[0].plan, self.guesses[0].plan.why)
@@ -365,6 +397,12 @@ class MakeTab(ToolTab):
             box.show()
             self._notice_box = box
         took = f" in {made.seconds / 60:.1f} min" if made.seconds >= 60 else ""
+        if made.waiting:                    # a drawn character's front, for the OK
+            self._show_picks([])
+            self.review_character(made.asset)
+            self.say(f"{made.name}: the front is drawn{took}. Looks good? Then the other "
+                     "directions are drawn.")
+            return
         if len(made.variations) > 1:
             self._show_picks(made.variations, made.chosen)
             self.say(f"{made.plan.name}: made{took}. Pick the one you like, then “Use this one and "
@@ -420,9 +458,73 @@ class MakeTab(ToolTab):
             self.open_btn.setEnabled(True)
             self.open_result(self.made)
 
+    # ------------------------------------------------------------------ front first, then OK
+    def _review_run(self, job, on_done):
+        self.review.sync = self.sync
+        self.run(job, on_done, "Working on the drawing…")
+
+    def review_character(self, ch):
+        """Show a draft character's front drawing for the OK (here, beside the plan)."""
+        self.review.sync = self.sync
+        self.review.set_character(ch)
+        self.view_stack.setCurrentWidget(self.review)
+
+    def _review_approved(self, ch):
+        self._drop_waiting(ch)
+        self.changed.emit()
+        self.view_stack.setCurrentWidget(self.view)
+        self.say(f"{ch.name}: every direction drawn -> {ch.folder}")
+        if self.made is not None and getattr(self.made.asset, "folder", None) == ch.folder:
+            self.made.asset = ch
+        else:
+            self.made = M.Made(M.Plan("character", ch.name, ch.prompt, {"body": ch.kind}), ch)
+        self.open_made()
+
+    def _review_closed(self, ch):
+        if ch is None:                       # thrown away
+            if self.made is not None and self.made.plan.kind == "character":
+                self.made = None
+            self._show_picks([])
+            self._refresh_waiting()
+        self.changed.emit()
+        self.view_stack.setCurrentWidget(self.view)
+        self.view.show_rgba(None)
+        self.view.setText("What you make shows here")
+
+    def _drop_waiting(self, ch):
+        for i in range(self.waiting.count() - 1, -1, -1):
+            if self.waiting.item(i).data(Qt.UserRole).folder == ch.folder:
+                self.waiting.takeItem(i)
+        self.waiting_box.setVisible(self.waiting.count() > 0)
+
+    def _refresh_waiting(self, chars=None):
+        """The batch's characters still waiting for an OK."""
+        from ..library import in_preview
+        if chars is None:
+            chars = [self.waiting.item(i).data(Qt.UserRole) for i in range(self.waiting.count())]
+        self.waiting.clear()
+        seen = set()
+        for ch in chars:
+            if (ch.folder in seen or not (ch.folder / "character.json").exists()
+                    or not in_preview(ch)):
+                continue
+            seen.add(ch.folder)
+            item = QListWidgetItem(_icon(ch.thumb, 56), ch.name)
+            item.setData(Qt.UserRole, ch)
+            item.setToolTip(f"{ch.name}: the front is drawn, waiting for your OK")
+            self.waiting.addItem(item)
+        self.waiting_box.setVisible(self.waiting.count() > 0)
+
+    def waiting_characters(self) -> list:
+        return [self.waiting.item(i).data(Qt.UserRole) for i in range(self.waiting.count())]
+
     # ------------------------------------------------------------------ many at once
     def batch_plans(self) -> list[M.Plan]:
-        return [M.route(t) for t in M.parse_batch(self.batch.toPlainText())]
+        plans = [M.route(t) for t in M.parse_batch(self.batch.toPlainText())]
+        for p in plans:                      # the batch's choice for every drawn character
+            if p.kind == "character":
+                p.params["review"] = self.batch_review.isChecked()
+        return plans
 
     def _batch_changed(self):
         plans = self.batch_plans()
@@ -469,8 +571,17 @@ class MakeTab(ToolTab):
         self.say("Stopping after the current one…")
 
     def _batch_done(self, jobs):
+        from ..library import from_folder
         self.stop_btn.setEnabled(False)
         text = M.batch_summary(self.batch_jobs or jobs)
         self.report.setPlainText(text)
+        waiting = []
+        for j in self.batch_jobs or jobs:
+            for r in j.results:
+                if r.get("waiting") and r.get("folder"):
+                    ch = from_folder(r["folder"])
+                    if ch is not None:
+                        waiting.append(ch)
+        self._refresh_waiting(self.waiting_characters() + waiting)
         self.changed.emit()
         self.say(text.splitlines()[0])

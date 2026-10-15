@@ -717,6 +717,9 @@ def restyle_plan(project: Project | None = None, old: Style | None = None,
 def _restyle_how(a: Asset) -> str:
     f = Path(a.folder)
     if a.kind == "character":
+        from .library import is_draft_folder
+        if is_draft_folder(f):           # a draft is drawn in the current style once OK'd
+            return ""
         if (f / "keys" / "keys.json").exists() and (f / "rigged.glb").exists():
             return "draw it again in the new style (GPU, ~10 min) and bend it for every animation"
         return ("re-render every animation from its rigged model (CPU, a few minutes)"

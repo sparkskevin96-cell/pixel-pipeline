@@ -160,7 +160,9 @@ def _call(fn, *args, **kwargs):
 
 
 def _character_worker(name: str, prompt: str, options: dict, project):
-    """Prompt -> 3D model (local GPU via ComfyUI) -> rigged, animated library character."""
+    """Prompt -> 3D model (local GPU via ComfyUI) -> rigged, animated library character.
+    options["review"] (default True): drawn characters stop after the front drawing and wait in
+    the library for the user's OK (library.add_character(preview=True)); False = all at once."""
     import tempfile
     from . import library
     from .model3d import prompt_to_model
@@ -169,6 +171,7 @@ def _character_worker(name: str, prompt: str, options: dict, project):
     size = opts.pop("size", None)
     role = opts.pop("role", "")
     seed = opts.pop("seed", None)
+    review = bool(opts.pop("review", True))
     folder = None if os.environ.get("PIXEL_LIBRARY") else _folder(project) / "characters"
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "model.glb"
@@ -176,9 +179,9 @@ def _character_worker(name: str, prompt: str, options: dict, project):
         res = prompt_to_model(prompt or name, out, subject=subject, seed=seed, **opts)
         model = Path(getattr(res, "model", None) or out)
         picture = getattr(res, "picture", None)
-        return library.add_character(name, model, kind=kind, size=size, role=role,
-                                     picture=picture if picture and Path(picture).exists() else None,
-                                     folder=folder, prompt=prompt or name)
+        return _call(library.add_character, name, model, kind=kind, size=size, role=role,
+                     picture=picture if picture and Path(picture).exists() else None,
+                     folder=folder, prompt=prompt or name, preview=review)
 
 
 def _object_worker(kind: str):
@@ -215,6 +218,8 @@ def _result_info(result, name: str) -> dict:
     if folder is None and isinstance(result, (str, Path)):
         folder = result
     info = {"name": getattr(result, "name", name), "folder": str(folder) if folder else ""}
+    if getattr(result, "waiting", False):     # a drawn character's front, for the user's OK
+        info["waiting"] = True
     notice = getattr(result, "notice", "")
     if notice:                       # e.g. drawn sprites failed: the 3D render, drawings kept
         info["notice"] = str(notice)

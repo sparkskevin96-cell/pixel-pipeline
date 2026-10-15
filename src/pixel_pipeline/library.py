@@ -92,6 +92,11 @@ class Character:
         return self.folder / "thumb.png"
 
     @property
+    def waiting(self) -> bool:
+        """A draft: only its front drawing is made and it waits for the user's OK (in_preview)."""
+        return in_preview(self)
+
+    @property
     def stats_class(self) -> str:
         if self.role in CLASSES:
             return self.role
@@ -171,6 +176,12 @@ def make_thumb(sheet_png: Path, out: Path, px: int = 96) -> Path:
     key = next((k for k in ("idle_SE 0", "idle_S 0") if k in frames), meta["frames"][0]["filename"])
     r = frames[key]
     im = Image.open(sheet_png).convert("RGBA").crop((r["x"], r["y"], r["x"] + r["w"], r["y"] + r["h"]))
+    return thumb_from(im, out, px)
+
+
+def thumb_from(im: Image.Image, out: Path, px: int = 96) -> Path:
+    """One frame (RGBA) -> the list thumbnail: cropped, enlarged crisp, feet near the bottom."""
+    im = im.convert("RGBA")
     box = im.getbbox()
     if box:
         im = im.crop(box)
@@ -219,12 +230,15 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int
 def add_character(name: str, model, *, kind: str = "person", size: str | None = None,
                   picture=None, role: str = "", folder: Path | None = None,
                   progress=None, prompt: str = "", drawn: bool | None = None, cancel=None,
-                  gpu=None) -> Character:
+                  gpu=None, preview: bool = False, springs: bool = False) -> Character:
     """A coloured 3D model -> a library character: skeleton + animations (people: idle walk run
     attack hurt death; animals: idle walk run sit happy lie_down death), sheets, thumbnail.
     drawn: None = drawn by the GPU when this PC has ComfyUI (drawnrig.available()), else the 3D
     render; a cancelled drawing keeps its drawings: adding the same model under the same name
-    again carries on where it stopped."""
+    again carries on where it stopped. preview (drawn only): draw just the front (S; animals
+    the side) + a short idle and stop: the character is a draft waiting for the user's OK
+    (in_preview; approve_preview draws the rest, redraw_preview / pick_preview change the
+    front). springs: capes/hair/tails swing (springs.add_springs on the rig before drawing)."""
     say = progress or (lambda t: None)
     size = size or DEFAULT_SIZE.get(kind, "normal")
     base = Path(folder) if folder else root()
@@ -241,9 +255,15 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
     say("Adding a skeleton and animations…")
     auto_rig_cached(ch.model, ch.rigged, kind)
     add_project_clips(ch.rigged, kind, progress=say)      # house style: the type's clip set
+    if springs:
+        _add_springs(ch, say)
     if drawn:
         from .generate import ComfyUIUnavailable
         try:
+            if preview:
+                _draw_preview(ch, say, cancel=cancel, gpu=gpu, springs=springs)
+                ch.save()
+                return ch
             render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, drawn=True,
                           prompt=prompt, name=name, cancel=cancel, gpu=gpu)
         except ComfyUIUnavailable as e:       # no GPU after all (or it kept crashing): the 3D
@@ -357,6 +377,248 @@ def redraw(ch: Character, directions=None, progress=None, cancel=None, gpu=None)
     return ch
 
 
+# --------------------------------------------------------------------------- front first, then OK
+#
+# A drawn character can stop after its front drawing (add_character(preview=True)): it is a
+# DRAFT, saved in the library with keys/keys.json {"partial": true, "preview": {...}} (survives a
+# restart), no sheet yet. Every try of the front is kept in keys/attempts/<n>/ (its drawn_<d>_*
+# candidate files as drawn, key.png, idle_<i>.png) so an older one can be picked again; the
+# current try's files are also in keys/ where drawing the rest (approve_preview -> the resume
+# path of drawn_sheets) reuses them byte for byte.
+
+def in_preview(ch: Character) -> bool:
+    """A draft: only the front is drawn and it waits for the user's OK."""
+    return is_draft_folder(ch.folder)
+
+
+def is_draft_folder(folder) -> bool:
+    """in_preview for a character folder (exports, the Game tab, restyle skip drafts)."""
+    p = Path(folder) / "keys" / "keys.json"
+    if not p.exists():
+        return False
+    try:
+        meta = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(meta.get("partial") and meta.get("preview"))
+
+
+def from_folder(folder) -> Character | None:
+    """The library character saved in this folder (None if there's none)."""
+    folder = Path(folder)
+    return next((c for c in list_characters(folder.parent) if c.folder == folder), None)
+
+
+def ready_characters(folder: Path | None = None) -> list[Character]:
+    """Characters with finished sprites (drafts waiting for an OK left out)."""
+    return [c for c in list_characters(folder) if not in_preview(c) and c.sheet.exists()]
+
+
+def rest_minutes(directions: int) -> float:
+    """GPU minutes for the directions after the first (makeany.GPU["drawn_dir"], measured on
+    the 4070 laptop; the bending afterwards is CPU, GPU["bend"])."""
+    from .makeany import GPU
+    return GPU["drawn_dir"] * max(0, directions - 1)
+
+
+def rest_estimate(ch: Character) -> str:
+    """'about 8 min for the other 15 directions + all animations'."""
+    meta = _keys_meta(ch) or {}
+    n = int((meta.get("camera") or {}).get("directions") or style().directions)
+    m = rest_minutes(n)
+    when = "under a minute" if m < 0.75 else f"about {max(1, round(m))} min"
+    from .makeany import GPU
+    return (f"{when} of GPU for the other {n - 1} directions + about {round(GPU['bend'])} min "
+            "bending all animations")
+
+
+def _not_draft(ch: Character) -> None:
+    if in_preview(ch):
+        raise ValueError(f"{ch.name} is waiting for your OK on its front drawing: say it looks "
+                         "good (or redraw it) first, then add animations.")
+
+
+def _write_keys_meta(ch: Character, meta: dict) -> None:
+    p = ch.folder / "keys" / "keys.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+
+
+def _add_springs(ch: Character, say) -> None:
+    from .springs import add_springs
+    say("Swinging the capes, hair and tails…")
+    try:
+        add_springs(ch.rigged)
+    except ValueError as e:                  # nothing hangs off this one
+        say(str(e))
+
+
+def _draw_preview(ch: Character, say, cancel=None, gpu=None, springs=None) -> dict:
+    """Draw (or reuse) the front drawing + idle preview; store it as a new attempt."""
+    from .drawnrig import drawn_preview, drawn_settings
+    st = style()
+    keys = ch.folder / "keys"
+    meta = _keys_meta(ch) or {}
+    prev = dict(meta.get("preview") or {})
+    seeds = {d: int(v) for d, v in (meta.get("seeds") or {}).items()}
+    prompt = ch.prompt or f"a {ch.name.lower()}"
+    info = drawn_preview(ch.rigged, prompt, drawn_settings(ch.kind, ch.size, st),
+                         directions=st.directions, elevation=st.elevation, style=st,
+                         folder=keys, kind=ch.kind, seeds=seeds, cancel=cancel, gpu=gpu,
+                         progress=say)
+    ref = info["direction"]
+    attempts = list(prev.get("attempts") or [])
+    n = max([int(a["n"]) for a in attempts] + [0]) + 1
+    box = keys / "attempts" / str(n)
+    box.mkdir(parents=True, exist_ok=True)
+    for f in keys.glob(f"drawn_{ref}_*.png"):
+        shutil.copyfile(f, box / f.name)
+    Image.fromarray(info["key"].rgba).save(box / "key.png")
+    for i, sp in enumerate(info["frames"]):
+        Image.fromarray(sp.rgba).save(box / f"idle_{i}.png")
+    attempts.append({"n": n, "seed": info["seed"], "words": prompt, "made": time.time()})
+    meta = _keys_meta(ch) or {}                      # drawn_preview wrote the camera
+    meta.update(partial=True, prompt=prompt, seeds={**seeds, ref: info["seed"]},
+                camera=meta.get("camera") or info["camera"])
+    meta["preview"] = {"direction": ref, "current": n, "attempts": attempts,
+                       "frame_ms": info["frame_ms"], "clip": info["clip"],
+                       "springs": bool(prev.get("springs") if springs is None else springs),
+                       "report": {k: v for k, v in info["report"].items()
+                                  if isinstance(v, (int, float, str, list))}}
+    _write_keys_meta(ch, meta)
+    thumb_from(Image.fromarray(info["key"].rgba), ch.thumb)
+    say(f"{ch.name}: the {ref} drawing is ready — waiting for your OK "
+        f"({rest_estimate(ch)} once you say go).")
+    return info
+
+
+def preview_info(ch: Character) -> dict | None:
+    """What the review panel shows: {direction, key, frames, frame_ms, clip, picture, words,
+    estimate, current, attempts: [{n, seed, words, key, current}]} (paths), None = no draft."""
+    meta = _keys_meta(ch) or {}
+    prev = meta.get("preview")
+    if not prev:
+        return None
+    keys = ch.folder / "keys"
+    cur = int(prev.get("current", 1))
+    box = keys / "attempts" / str(cur)
+    frames = sorted(box.glob("idle_*.png"), key=lambda p: int(p.stem.split("_")[1]))
+    return {"direction": prev.get("direction", "S"), "key": box / "key.png", "frames": frames,
+            "frame_ms": int(prev.get("frame_ms", 120)), "clip": prev.get("clip", "idle"),
+            "picture": ch.picture if ch.picture.exists() else None, "words": ch.prompt,
+            "estimate": rest_estimate(ch), "current": cur,
+            "attempts": [{**a, "key": keys / "attempts" / str(a["n"]) / "key.png",
+                          "current": int(a["n"]) == cur} for a in prev.get("attempts", [])]}
+
+
+def approve_preview(ch: Character, progress=None, cancel=None, gpu=None) -> Character:
+    """The user likes the front: draw the other directions paired to it (the front's files are
+    reused as they are, not drawn again) and bend every animation. Stopping keeps the drawings
+    (the character stays a draft; approving again carries on)."""
+    if not in_preview(ch):
+        raise ValueError(f"{ch.name} isn't waiting for an OK")
+    return finish_drawing(ch, progress=progress, cancel=cancel, gpu=gpu)
+
+
+def redraw_preview(ch: Character, seed: int | None = None, words: str | None = None,
+                   new_model: bool = False, progress=None, cancel=None, gpu=None) -> Character:
+    """Draw the front again: a new seed (or `seed`); `words` = new words for the character (the
+    same seed, so only the words change, unless seed is given); new_model = a new picture and
+    3D shape from the words too (the shape may be the problem; earlier tries are dropped then,
+    they belong to the old model). The earlier tries stay pickable (pick_preview)."""
+    say = progress or (lambda t: None)
+    meta = _keys_meta(ch) or {}
+    prev = meta.get("preview") or {}
+    if not prev:
+        raise ValueError(f"{ch.name} isn't waiting for an OK")
+    ref = prev.get("direction", "S")
+    if words is not None and words.strip() and words.strip() != ch.prompt:
+        ch.prompt = words.strip()
+        ch.save()
+    springs = bool(prev.get("springs"))
+    if new_model:
+        _new_model(ch, say)
+        if springs:
+            _add_springs(ch, say)
+        keys = ch.folder / "keys"
+        shutil.rmtree(keys / "attempts", ignore_errors=True)   # tries of the old model
+        for f in keys.glob("drawn_*.png"):          # every drawing was of the old model
+            f.unlink()
+        meta = {k: v for k, v in (_keys_meta(ch) or {}).items() if k not in ("camera", "seeds")}
+        meta["partial"] = True                       # framed anew for the new model
+        meta["preview"] = {"springs": springs}
+        if seed is not None:
+            meta["seeds"] = {ref: int(seed)}
+        _write_keys_meta(ch, meta)
+    else:
+        keys = ch.folder / "keys"
+        for f in keys.glob(f"drawn_{ref}_*.png"):    # kept in attempts/<n>
+            f.unlink()
+        seeds = {d: int(v) for d, v in (meta.get("seeds") or {}).items()}
+        used = {int(a.get("seed", -1)) for a in prev.get("attempts", [])}
+        if seed is not None:
+            seeds[ref] = int(seed)
+        elif words is None:
+            s = int(seeds.get(ref, 1234)) + 7919
+            while s in used:
+                s += 7919
+            seeds[ref] = s
+        meta["seeds"] = seeds
+        _write_keys_meta(ch, meta)
+    _draw_preview(ch, say, cancel=cancel, gpu=gpu)
+    ch.save()
+    return ch
+
+
+def pick_preview(ch: Character, n: int) -> Character:
+    """Use an earlier try of the front again (its drawing files, seed and words; no GPU)."""
+    meta = _keys_meta(ch) or {}
+    prev = meta.get("preview") or {}
+    a = next((a for a in prev.get("attempts", []) if int(a["n"]) == int(n)), None)
+    if a is None:
+        raise ValueError(f"{ch.name} has no try number {n}")
+    keys = ch.folder / "keys"
+    box = keys / "attempts" / str(n)
+    ref = prev.get("direction", "S")
+    for f in keys.glob(f"drawn_{ref}_*.png"):
+        f.unlink()
+    for f in box.glob(f"drawn_{ref}_*.png"):
+        shutil.copyfile(f, keys / f.name)
+    meta.setdefault("seeds", {})[ref] = int(a["seed"])
+    meta["prompt"] = a.get("words") or meta.get("prompt", "")
+    prev["current"] = int(n)
+    meta["preview"] = prev
+    _write_keys_meta(ch, meta)
+    if a.get("words") and a["words"] != ch.prompt:
+        ch.prompt = a["words"]
+    if (box / "key.png").exists():
+        thumb_from(Image.open(box / "key.png"), ch.thumb)
+    ch.save()
+    return ch
+
+
+def _new_model(ch: Character, say) -> None:
+    """A new picture + 3D shape from the character's words, then a new skeleton (the old
+    drawings go: keys/model.sha1 no longer matches)."""
+    import tempfile
+
+    from .model3d import prompt_to_model
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "model.glb"
+        say(f"Making a new {ch.kind} model of “{ch.prompt or ch.name}” on your GPU…")
+        res = prompt_to_model(ch.prompt or ch.name, out, subject=ch.kind,
+                              progress=lambda step, text: say(text))
+        model = Path(getattr(res, "model", None) or out)
+        pic = getattr(res, "picture", None)
+        _keep_keys_for(ch, model)
+        shutil.copyfile(model, ch.model)
+        if pic and Path(pic).suffix.lower() == ".png" and Path(pic).exists():
+            shutil.copyfile(pic, ch.picture)
+    say("Adding a skeleton and animations…")
+    auto_rig_cached(ch.model, ch.rigged, ch.kind)
+    add_project_clips(ch.rigged, ch.kind, progress=say)
+
+
 def import_sheet(name: str, sheet_png, *, kind: str = "person", size: str | None = None,
                  model=None, rigged=None, picture=None, role: str = "",
                  folder: Path | None = None) -> Character:
@@ -458,6 +720,7 @@ def add_character_animations(ch: Character, names, progress=None, *, replace: bo
     say = progress or (lambda t: None)
     if not ch.rigged.exists():
         raise ValueError(f"{ch.name} has no rigged.glb (add it to the library again first)")
+    _not_draft(ch)
     old = [a.get("name") for a in Gltf(ch.rigged).doc.get("animations", [])]
     if clean is None:
         p = inspect.signature(render_sheets).parameters.get("clean")
@@ -580,6 +843,7 @@ def add_mocap(ch: Character, bvh_files_or_library_names, progress=None, *, repla
         raise ValueError("Mocap clips are for people (the humanoid rig)")
     if not ch.rigged.exists():
         raise ValueError(f"{ch.name} has no rigged.glb (add it to the library again first)")
+    _not_draft(ch)
     items = [resolve(x) for x in bvh_files_or_library_names]           # fail before any work
     old = [a.get("name") for a in Gltf(ch.rigged).doc.get("animations", [])]
     tmp = ch.rigged.with_name("rigged.new.glb")
@@ -615,6 +879,7 @@ def add_character_springs(ch: Character, progress=None, **options) -> Character:
     say = progress or (lambda t: None)
     if not ch.rigged.exists():
         raise ValueError(f"{ch.name} has no rigged.glb (add it to the library again first)")
+    _not_draft(ch)
     tmp = ch.rigged.with_name("rigged.new.glb")
     say(f"{ch.name}: finding capes, hair and tails…")
     try:

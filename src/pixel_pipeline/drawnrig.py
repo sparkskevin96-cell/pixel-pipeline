@@ -1105,7 +1105,7 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
                      back_candidates=BACK_CANDIDATES, reference: str | None = None,
                      drop_held: bool = True, absent=(), kind: str = "person",
                      seeds: dict | None = None, mirror: bool | None = None, never_mirror=(),
-                     tint: bool = True, palette=None, cancel=None, gpu=None,
+                     tint: bool = True, palette=None, cancel=None, gpu=None, only=None,
                      progress=None) -> KeySet:
     """Key drawings that agree with each other: the reference direction (S) is drawn first over
     the model (img2img on the frame grid); every other direction is painted on a canvas
@@ -1122,7 +1122,8 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
     (raises Cancelled; finished drawings stay for a resume). gpu(what): a context manager held
     around each drawing (e.g. a lock shared with other GPU users). palette: keep this one (a
     redrawn direction is snapped to the palette the others were made with, so they stay as
-    they were)."""
+    they were). only: draw just these directions (the preview: the reference alone); the
+    KeySet then holds only them, on a palette of their own pixels."""
     from contextlib import nullcontext
 
     from .assets import project_style, with_style
@@ -1152,6 +1153,8 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
     reference = reference or REFERENCES.get(kind, REFERENCE)
     ref = reference if reference in names else names[0]
     order = draw_order(names, cams, ref)
+    if only is not None:
+        order = [k for k in order if names[k] in set(only)]
     same = SAME_WORDS.get(kind, SAME_WORDS["person"])
 
     def cands(k):
@@ -1280,7 +1283,7 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
         preps[d] = best[1]
         report[d] = best[2]
         keyrgba[d] = clean_sprite(finish(preps[d], s_plain, None), outline_style).rgba
-    order_n = list(names)
+    order_n = [d for d in names if d in preps]
     if palette is None:
         pixels = np.concatenate([preps[d].rgb[preps[d].mask] for d in order_n
                                  if preps[d].mask.any()])
@@ -1760,26 +1763,11 @@ def bend_directions(state: BendState, *, cancel=None, progress=None, names=None,
         raise Cancelled("Stopped while bending the drawings (the key drawings are kept)")
 
 
-def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frames: int = 8,
-                    animations: list[str] | None = None, elevation: float = 30.0,
-                    seed: int = 1234, denoise: float = 0.6, style=None, client=None,
-                    folder=None, reuse: bool = True, points: int = 400_000, clean: bool = True,
-                    normals: bool = True, mirror: bool | None = None, key_pose: str = "idle",
-                    blocky: bool = True, retries: int = 1, min_iou: float = 0.72,
-                    paired: bool = True, candidates=CANDIDATES, back_candidates=BACK_CANDIDATES,
-                    max_turn: float = 45.0, min_face: float = 0.55, absent=None,
-                    kind: str = "person", seeds: dict | None = None, never_mirror=(),
-                    recolour=None, palette=None, cancel=None, gpu=None, progress=None
-                    ) -> tuple[AnimatedSet, dict]:
-    """A rigged character -> AnimatedSet whose every frame is a key drawing bent by the
-    skeleton. settings: converter settings at the frame size (width x height, colours,
-    outline). absent: None = auto_absent (from the model and the words). Poses whose torso
-    turned more than max_turn degrees out of a drawing (lying down, spins) bend the drawing that
-    faces the camera then (facing_choice); under min_face (cosine) the model's own surface is
-    used, coloured from the drawings (model_frame). recolour: a re-skin's colour swaps.
-    Returns (set, info: keys, ious, seeds, seconds)."""
-    say = _say(progress)
-    t0 = time.time()
+def _drawn_setup(rigged, settings, directions, frames, animations, elevation, key_pose, folder,
+                 reuse, points, say):
+    """The skeleton, every clip's poses, the key pose and the cameras (the scale the keys were
+    drawn at when keys.json has it; written there first so a stopped run resumes at it).
+    Shared by drawn_animation and drawn_preview, so a preview's drawing is the final one's."""
     rig = load_rig([rigged])
     clips = select_clips(rig, animations)
     names = direction_names(directions)
@@ -1812,6 +1800,93 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
     if saved is not None and not saved.exists():   # a cancelled run resumes at the same scale
         saved.parent.mkdir(parents=True, exist_ok=True)
         saved.write_text(json.dumps({"camera": camera, "partial": True}), encoding="utf-8")
+    return rig, clips, names, body, poses, rest, cams, camera, old
+
+
+def reference_name(names: list[str], kind: str = "person") -> str:
+    """The direction drawn first, which every other direction copies (S; animals E)."""
+    ref = REFERENCES.get(kind, REFERENCE)
+    return ref if ref in names else names[0]
+
+
+def drawn_preview(rigged, prompt: str, settings, *, directions: int = 16, frames: int = 8,
+                  elevation: float = 30.0, seed: int = 1234, style=None, client=None,
+                  folder=None, points: int = 400_000, candidates=CANDIDATES,
+                  back_candidates=BACK_CANDIDATES, absent=None, kind: str = "person",
+                  seeds: dict | None = None, key_pose: str = "idle", clip: str = "idle",
+                  max_turn: float = 45.0, min_face: float = 0.55, clean: bool = True,
+                  cancel=None, gpu=None, progress=None) -> dict:
+    """Only the reference direction (S; animals E) drawn, plus its `clip` (idle) bent from that
+    drawing: what the user approves before the GPU draws the other directions. Same skeleton,
+    cameras, words and candidate files as drawn_animation, so drawing the rest later
+    (drawn_sheets with the same folder) reuses this drawing as it is. A drawing of the reference
+    already in the folder is reused (no GPU). Returns {direction, key (Sprite), frames (Sprites
+    of the clip), frame_ms, seed, report, absent, camera, seconds}."""
+    say = _say(progress)
+    t0 = time.time()
+    rig, clips, names, body, poses, rest, cams, camera, _ = _drawn_setup(
+        rigged, settings, directions, frames, None, elevation, key_pose, folder, True, points, say)
+    ref = reference_name(names, kind)
+    k = names.index(ref)
+    pts, nrm = body.pose(rest.worlds)
+    view = rest_view(body, cams[k], rest, pts, nrm)
+    views = [view if i == k else None for i in range(len(names))]
+    if absent is None:
+        absent = auto_absent(prompt, kind, body, rest)
+    from .generate import gpu_retry
+    with gpu_retry(say=say):
+        keys = draw_keys_paired(rig, body, cams, views, rest, prompt, settings, seed=seed,
+                                style=style, client=client, folder=folder, reuse=True,
+                                candidates=candidates, back_candidates=back_candidates,
+                                absent=absent, kind=kind, seeds=seeds, only=(ref,),
+                                cancel=cancel, gpu=gpu, progress=say)
+    t_bend = time.time()
+    sp = keys.sprites[0]
+    palette = sp.palette
+    say(f"Bending the {ref} drawing for a short {clip} preview…")
+    colours = _point_colours(body, [view], keys, rest)
+    held, arm = _held_slots(body)
+    drawn = glue(body, view, cams[k], rest, sp.indices, palette, rgb=sp.rgba[..., :3],
+                 held=held, arm=arm)
+    add_hidden(drawn, body, view, rest, colours[0], pts)
+    names_c = [c.name for c in clips]
+    a = names_c.index(clip) if clip in names_c else 0
+    outline = settings.outline_style if settings.outline else "none"
+    state = BendState(BodyArrays(body.weights, body.bind, body.bind_n), [poses[a]], rest,
+                      [cams[k]], [drawn], colours, palette, _torso_node(rig), max_turn, min_face,
+                      clean, False, outline)
+    rows, _, _ = bend_direction(state, 0)
+    c = clips[a]
+    frame_ms = max(16, int(round(1000 * c.duration / max(1, frames if c.loop else frames - 1))))
+    return {"direction": ref, "key": sp, "frames": rows[0], "frame_ms": frame_ms, "clip": c.name,
+            "seed": int(keys.seeds[0]), "report": keys.report.get(ref, {}),
+            "absent": list(absent or ()), "camera": camera,
+            "seconds": {"drawing": t_bend - t0, "bending": time.time() - t_bend}}
+
+
+def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frames: int = 8,
+                    animations: list[str] | None = None, elevation: float = 30.0,
+                    seed: int = 1234, denoise: float = 0.6, style=None, client=None,
+                    folder=None, reuse: bool = True, points: int = 400_000, clean: bool = True,
+                    normals: bool = True, mirror: bool | None = None, key_pose: str = "idle",
+                    blocky: bool = True, retries: int = 1, min_iou: float = 0.72,
+                    paired: bool = True, candidates=CANDIDATES, back_candidates=BACK_CANDIDATES,
+                    max_turn: float = 45.0, min_face: float = 0.55, absent=None,
+                    kind: str = "person", seeds: dict | None = None, never_mirror=(),
+                    recolour=None, palette=None, cancel=None, gpu=None, progress=None
+                    ) -> tuple[AnimatedSet, dict]:
+    """A rigged character -> AnimatedSet whose every frame is a key drawing bent by the
+    skeleton. settings: converter settings at the frame size (width x height, colours,
+    outline). absent: None = auto_absent (from the model and the words). Poses whose torso
+    turned more than max_turn degrees out of a drawing (lying down, spins) bend the drawing that
+    faces the camera then (facing_choice); under min_face (cosine) the model's own surface is
+    used, coloured from the drawings (model_frame). recolour: a re-skin's colour swaps.
+    Returns (set, info: keys, ious, seeds, seconds)."""
+    say = _say(progress)
+    t0 = time.time()
+    rig, clips, names, body, poses, rest, cams, camera, old = _drawn_setup(
+        rigged, settings, directions, frames, animations, elevation, key_pose, folder, reuse,
+        points, say)
     if recolour is None:
         recolour = old.get("recolour")
     pts, nrm = body.pose(rest.worlds)
