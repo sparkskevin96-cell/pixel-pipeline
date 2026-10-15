@@ -77,21 +77,35 @@ def worker_count(tasks: int, per_worker_mb: float = 300.0, reserve_mb: float = R
 _THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 
 
+BELOW_NORMAL = 0x00004000
+
+
+def lower_priority() -> bool:
+    """This process below the app (the UI stays responsive). True when it worked."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)   # own copy: own argtypes
+            k32.GetCurrentProcess.restype = wintypes.HANDLE
+            k32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            k32.SetPriorityClass.restype = wintypes.BOOL
+            # without the types the pseudo-handle -1 went in as a 32-bit int: "invalid handle",
+            # and the call failed silently (workers ran at normal priority)
+            return bool(k32.SetPriorityClass(k32.GetCurrentProcess(), BELOW_NORMAL))
+        os.nice(5)
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
 def _call_init(init, args):
     try:                                  # OpenCV's own threads would fight the other workers
         import cv2
         cv2.setNumThreads(1)
     except ImportError:
         pass
-    try:                                  # below the app: the UI stays responsive
-        if sys.platform == "win32":
-            import ctypes
-            ctypes.windll.kernel32.SetPriorityClass(
-                ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000)  # BELOW_NORMAL
-        else:
-            os.nice(5)
-    except (OSError, AttributeError):
-        pass
+    lower_priority()
     if init is not None:
         init(*args)
 

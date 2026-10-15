@@ -298,6 +298,10 @@ def _godot_hd2d(src: Source, out: Path, ppu: float | None = None, **_) -> list[P
     from .hd2d import SPRITE_SHADER, add_unit
     if src.sheet is None:
         raise ValueError(f"'{src.name}' has no sprite sheet; HD-2D units need one.")
+    if src.kind == "tileset":            # its sheet is tiles, not unit frames (was KeyError: 0)
+        raise ValueError(f"'{src.name}' is a tileset, not an HD-2D unit: export it with godot-2d "
+                         "(TileSet .tres), or use it in Try in a game (the board takes the "
+                         "project's tilesets).")
     if ppu is None:
         ppu = _project_style_value("ppu", 42.0)
     n = src.file_name

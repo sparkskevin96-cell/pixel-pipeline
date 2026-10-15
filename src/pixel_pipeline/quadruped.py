@@ -86,6 +86,26 @@ def _turn(v: np.ndarray, yaw: float) -> np.ndarray:
 
 # --------------------------------------------------------------------------- orientation
 
+def body_axis_yaw(pts: np.ndarray, min_turn: float = 12.0) -> float:
+    """Yaw (degrees, as _turn) that lines a body lying diagonally in x-z up with the nearest of
+    the x / z axes; 0 when it already is (within min_turn) or the body isn't clearly long.
+    Prompt-to-model animals come from a three-quarter picture, and the model is turned so that
+    picture is its front: the wolf's body ran ~45 degrees between x and z, so the long-axis
+    test below (x or z) cut it across and the rig + every sprite came out skewed."""
+    y = pts[:, 1]
+    H = float(y.max() - y.min()) or 1.0
+    body = pts[(y > y.min() + 0.3 * H) & (y < y.min() + 0.9 * H)]
+    if len(body) < 50:
+        return 0.0
+    xz = body[:, [0, 2]] - body[:, [0, 2]].mean(0)
+    w, v = np.linalg.eigh(np.cov(xz.T))
+    if w[1] < 1.3 * max(w[0], 1e-12):                     # round footprint: no clear long axis
+        return 0.0
+    phi = math.degrees(math.atan2(v[1, 1], v[0, 1]))      # angle from +x towards +z
+    snap = phi - 90.0 * round(phi / 90.0)
+    return float(snap) if abs(snap) >= min_turn else 0.0
+
+
 def facing_yaw(pts: np.ndarray, head: str = "auto") -> tuple[float, str, list[str]]:
     """(yaw that turns the head to +z, which end the head was, notes)."""
     if head != "auto":
@@ -753,12 +773,18 @@ def auto_rig_quadruped(model, out_glb=None, *, actions=ACTIONS, head: str = "aut
     out = Path(out_glb) if out_glb else model.with_name(model.stem + ".rigged.glb")
     parts = _load(model, up, yaw)
     pts = _surface_points(parts, points)
+    align = body_axis_yaw(pts)                 # a diagonal body (three-quarter picture) first
+    if align:
+        parts = _load(model, up, yaw + align)
+        pts = _surface_points(parts, points)
     turn, name, notes = facing_yaw(pts, head)
+    if align:
+        notes = [f"body lay {align:+.0f} degrees off the axes: turned it straight"] + notes
     if turn:
-        parts = _load(model, up, yaw + turn)
+        parts = _load(model, up, yaw + align + turn)
         pts = _surface_points(parts, points)
     sk, grid, _ = find_quadruped_skeleton(pts, "+z")
-    sk.yaw, sk.head = turn, name
+    sk.yaw, sk.head = turn + align, name
     sk.notes = notes + sk.notes
     write_quadruped(parts, sk, out, actions)
     return QuadRigResult(out, sk, rig_preview(grid, sk),

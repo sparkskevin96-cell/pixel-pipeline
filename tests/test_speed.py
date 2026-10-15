@@ -180,6 +180,21 @@ def test_pool_runs_the_same_work_here_or_on_workers():
     assert parallel.run(_square, range(5), workers=2) == [0, 1, 4, 9, 16]
 
 
+def _priority(_):
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32")
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.GetPriorityClass.argtypes = (wintypes.HANDLE,)
+    return k32.GetPriorityClass(k32.GetCurrentProcess())
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows priority classes")
+def test_workers_run_below_normal_priority():
+    # SetPriorityClass used to get the pseudo-handle as a 32-bit int and fail silently
+    assert parallel.run(_priority, range(2), workers=2) == [parallel.BELOW_NORMAL] * 2
+
+
 def test_animated_turnaround_workers_give_the_same_sprites(tmp_path):
     path = write_robot(tmp_path / "robot.glb")
     s = settings_for("person", width=24, height=32, colors=12)

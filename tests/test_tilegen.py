@@ -197,6 +197,9 @@ def test_save_writes_godot_tiled_unity_and_lists(tmp_path):
     assert "terrain_set_0/mode = 0" in tres and "terrains_peering_bit/bottom_right_corner = 1" in tres
     tsx = (f / "tileset.tsx").read_text(encoding="utf-8")
     assert 'type="mixed"' in tsx and tsx.count("<wangtile") == len(gs.tiles)
+    from pixel_pipeline import exports                            # not a unit: a clear message
+    with pytest.raises(ValueError, match="is a tileset"):         # (was KeyError: 0)
+        exports.export_asset(a, "godot-hd2d", tmp_path / "hd2d")
     tmj = json.loads((f / "example.tmj").read_text(encoding="utf-8"))
     assert tmj["tilesets"][0]["source"] == "tileset.tsx" and max(tmj["layers"][0]["data"]) > 1
     from pixel_pipeline.exports import export_asset

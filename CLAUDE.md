@@ -548,6 +548,14 @@ wants terse answers and fixes over polish.
   more slivers (0.1-2.6%) - Pictures/PixelPipeline/decimate_ab.png. Knight: drawn render 121 ->
   55 s (cold) / 14 s (warm), Add animation 133 -> 21 s; 3D render 329 -> 105 s, Add animation
   390 -> 70 s; game model 84 -> 40 s, again 0 s.
+- **QA pass 2026-10-15** (project "QA 2026-10-15", Pictures/PixelPipeline/qa_all.png, qa_hd2d.png): fixed
+  parallel workers never lowering priority (SetPriorityClass got the pseudo-handle as a 32-bit int; now typed
+  WinDLL, test), quadruped rig on three-quarter-picture animals (`body_axis_yaw` turns a diagonal body
+  straight first; the Make-tab wolf was skewed in every sprite), godot-hd2d export of a tileset (KeyError 0
+  -> clear ValueError), test_updater wrote the real update.log. Open: drawn props/items/portrait subjects
+  come out as sprite sheets / several objects ~60% of pictures (style LoRA also turns barrels into huts; extra
+  negatives don't help); router has no weather/background kinds ("rain at night" -> a drawn prop); a
+  ComfyUI/driver reset mid-draw drops the drawings and silently falls back to the 3D render.
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

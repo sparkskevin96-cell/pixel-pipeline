@@ -62,6 +62,22 @@ def test_head_override_and_other_end(tmp_path):
     assert np.allclose(forced.skeleton.joints["front_l_paw"], res.skeleton.joints["front_l_paw"], atol=0.02)
 
 
+def test_a_diagonal_body_is_turned_straight(tmp_path):
+    # prompt-to-model animals come from a three-quarter picture: the body lies diagonally
+    m = trimesh.load(box_dog(tmp_path / "d.glb"), force="mesh")
+    m.apply_transform(trimesh.transformations.rotation_matrix(np.radians(40), [0, 1, 0]))
+    m.export(tmp_path / "diag.glb")
+    res = auto_rig_quadruped(tmp_path / "diag.glb", tmp_path / "diag.rigged.glb", actions=["idle"])
+    j = res.skeleton.joints
+    assert res.skeleton.head == "-x" and any("turned it straight" in n for n in res.notes)
+    for leg in LEGS:                    # same layout as the straight dog: legs +-0.38 along z
+        pair, side = leg.split("_")
+        paw = j[f"{leg}_paw"]
+        assert np.sign(paw[0]) == (1 if side == "l" else -1) and abs(abs(paw[0]) - 0.13) < 0.05
+        assert np.sign(paw[2]) == (1 if pair == "front" else -1) and abs(abs(paw[2]) - 0.38) < 0.06
+    assert j["head"][2] > j["chest"][2] > j["hips"][2]
+
+
 def test_legs_bind_to_their_own_leg(rigged):
     rig = load_rig([rigged.path])
     prim = rig.primitives[0]
