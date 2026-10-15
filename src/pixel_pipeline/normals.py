@@ -66,6 +66,12 @@ def _fill_from_neighbours(vec: np.ndarray, have: np.ndarray, want: np.ndarray) -
 def normal_sprite(view: np.ndarray, sprite: Sprite, settings: Settings) -> np.ndarray:
     """One encoded normal view (same size and framing as the colour view the sprite was made
     from) -> (H, W, 4) normal sprite on the sprite's grid and mask."""
+    return normal_from_blocks(*normal_blocks(view, settings), sprite)
+
+
+def normal_blocks(view: np.ndarray, settings: Settings) -> tuple[np.ndarray, np.ndarray]:
+    """normal_sprite's first half, which needs only the view: (mean vectors, trusted) per
+    sprite pixel. The second half (normal_from_blocks) needs the finished sprite's mask."""
     s = settings
     sh, sw = view.shape[:2]
     out_w, out_h = s.resolve_size(sw, sh)
@@ -85,14 +91,19 @@ def normal_sprite(view: np.ndarray, sprite: Sprite, settings: Settings) -> np.nd
     gh, gw = ch // p, cw // p
     blocks = canvas[:gh * p, :gw * p].reshape(gh, p, gw, p, 4).sum((1, 3))
     weight, vec = blocks[..., 3], blocks[..., :3]
-    mask = sprite.rgba[..., 3] > 0
-    if mask.shape != weight.shape:
-        raise ValueError(f"normal grid {weight.shape} doesn't match the sprite {mask.shape}")
     # trust blocks the subject mostly covers (slivers at the edge are noisy); the outline
     # ring and the rest borrow from their neighbours
     cover = weight / (p * p)
     have = (cover >= 0.25) & (np.linalg.norm(vec, axis=-1) > 1e-3 * weight)
     vec = np.where(have[..., None], vec / np.maximum(weight, 1e-9)[..., None], 0.0)
+    return vec, have
+
+
+def normal_from_blocks(vec: np.ndarray, have: np.ndarray, sprite: Sprite) -> np.ndarray:
+    """normal_sprite's second half: the blocks on the finished sprite's mask, encoded."""
+    mask = sprite.rgba[..., 3] > 0
+    if mask.shape != have.shape:
+        raise ValueError(f"normal grid {have.shape} doesn't match the sprite {mask.shape}")
     vec = face_camera(_fill_from_neighbours(vec, have & mask, mask))
     out = np.zeros(mask.shape + (4,), np.uint8)
     out[mask, :3] = encode(vec[mask])

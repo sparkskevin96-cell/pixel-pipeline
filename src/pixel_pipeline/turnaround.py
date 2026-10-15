@@ -196,40 +196,93 @@ def render_points(poses: list[tuple[np.ndarray, np.ndarray]], colours: np.ndarra
     light_dir = np.array([-0.45, 0.6, 0.66])
     light_dir /= np.linalg.norm(light_dir)
     base = colours.astype(np.float32)
-    views, nviews = [], []
-    for k in range(len(names)):
-        a = k * 360.0 / len(names)                   # facing angle on screen (Godot)
+    return splat_views(poses, base, len(names), ce, se, scale, ox, oy, size, yaw, light,
+                       light_dir, normals)
+
+
+def splat_views(poses, base, directions: int, ce, se, scale, ox, oy, size, yaw, light,
+                light_dir, normals):
+    """views[direction][pose] (and normal views) with one framing. Pose by pose (its columns
+    made once for every direction); each view is the same as rendering it on its own."""
+    turns = []
+    for k in range(directions):
+        a = k * 360.0 / directions                   # facing angle on screen (Godot)
         t = math.radians(90.0 - a + yaw)            # model turn about its up axis
-        ct, st = math.cos(t), math.sin(t)
-        row = [_splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir,
-                      normals) for pts, nrm in poses]
-        if normals:
-            views.append([r[0] for r in row])
-            nviews.append([r[1] for r in row])
-        else:
-            views.append(row)
+        turns.append((math.cos(t), math.sin(t)))
+    views = [[None] * len(poses) for _ in range(directions)]
+    nviews = [[None] * len(poses) for _ in range(directions)]
+    for i, (pts, nrm) in enumerate(poses):
+        cols = pose_columns(pts)
+        for k, (ct, st) in enumerate(turns):
+            r = _splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir,
+                       normals, cols)
+            if normals:
+                views[k][i], nviews[k][i] = r
+            else:
+                views[k][i] = r
+        del cols
     return (views, nviews) if normals else views
 
 
 def _splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir,
-           normals: bool = False):
+           normals: bool = False, cols=None):
     """One view: turn the points, project orthographically, keep the nearest per pixel.
-    normals=True: (colour RGBA, normal-map RGBA) of the same kept points."""
-    x = pts[:, 0] * ct + pts[:, 2] * st
-    z = -pts[:, 0] * st + pts[:, 2] * ct
-    y = pts[:, 1]
-    sy = y * ce - z * se                         # up on screen
-    depth = -y * se - z * ce                     # smaller = nearer the camera
-    ix = np.floor(ox + x * scale).astype(np.int64)
-    iy = np.floor(oy - sy * scale).astype(np.int64)
+    normals=True: (colour RGBA, normal-map RGBA) of the same kept points.
+    cols: (x, y, z) columns of pts as contiguous arrays (render_points makes them once per
+    pose for all directions; the same numbers, read faster). The arithmetic is the same
+    element for element as the plain version, and everything after the depth test works on
+    the box the kept points cover (outside it the views are empty), so the views are the
+    same bit for bit."""
+    if cols is None:
+        cols = pose_columns(pts)
+    px, py, pz = cols.x, cols.y, cols.z
+    x, z, t = cols.buf
+    # x = px * ct + pz * st; z = -px * st + pz * ct; sy = y * ce - z * se;
+    # depth = -y * se - z * ce: the same float32 operations, into reused buffers
+    np.multiply(px, ct, out=x)
+    np.add(x, np.multiply(pz, st, out=t), out=x)
+    np.negative(px, out=z)
+    np.multiply(z, st, out=z)
+    np.add(z, np.multiply(pz, ct, out=t), out=z)
+    depth = np.negative(py)                      # smaller = nearer the camera
+    np.multiply(depth, se, out=depth)
+    np.subtract(depth, np.multiply(z, ce, out=t), out=depth)
+    sy = np.multiply(py, ce, out=t)              # up on screen
+    np.subtract(sy, np.multiply(z, se, out=z), out=sy)
+    np.multiply(x, scale, out=x)                 # ix = floor(ox + x * scale)
+    np.add(ox, x, out=x)
+    ix = np.floor(x, out=x).astype(np.int64)
+    np.multiply(sy, scale, out=sy)               # iy = floor(oy - sy * scale)
+    np.subtract(oy, sy, out=sy)
+    iy = np.floor(sy, out=sy).astype(np.int64)
     ok = (ix >= 0) & (ix < size) & (iy >= 0) & (iy < size)
-    lin = iy[ok] * size + ix[ok]
+    every = bool(ok.all())
+    if every:                                    # the usual case: the framing fits them all
+        lin = iy * size + ix
+        dk = depth
+    else:
+        lin = iy[ok] * size + ix[ok]
+        dk = depth[ok]
     zbuf = np.full(size * size, np.inf, depth.dtype)
-    np.minimum.at(zbuf, lin, depth[ok])            # nearest depth per pixel
-    near = depth[ok] <= zbuf[lin]
-    pick, lin = np.nonzero(ok)[0][near], lin[near]
-    rgb = np.zeros((size * size, 3), np.float32)
-    alpha = np.zeros(size * size, np.uint8)
+    np.minimum.at(zbuf, lin, dk)                   # nearest depth per pixel
+    near = dk <= zbuf[lin]
+    pick = np.flatnonzero(near) if every else np.nonzero(ok)[0][near]
+    lin = lin[near]
+    out = np.zeros((size, size, 4), np.uint8)
+    nout = None
+    if normals:
+        nout = np.zeros((size, size, 4), np.uint8)
+        nout[..., :3] = 128                      # encode(face_camera(0)): no normal
+    if not len(lin):
+        return (out, nout) if normals else out
+    # the kept points' box, one pixel wider (the hole filling never reaches past it)
+    ly, lx = np.divmod(lin, size)
+    y0, y1 = max(0, int(ly.min()) - 1), min(size, int(ly.max()) + 2)
+    x0, x1 = max(0, int(lx.min()) - 1), min(size, int(lx.max()) + 2)
+    bh, bw = y1 - y0, x1 - x0
+    blin = (ly - y0) * bw + (lx - x0)
+    rgb = np.zeros((bh * bw, 3), np.float32)
+    alpha = np.zeros(bh * bw, np.uint8)
     c = base[pick]
     if light > 0 or normals:
         nx = nrm[pick, 0] * ct + nrm[pick, 2] * st
@@ -239,9 +292,70 @@ def _splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir
     if light > 0:
         lam = np.abs(cam @ light_dir)            # meshes may have flipped normals
         c = c * ((1 - light) + light * lam)[:, None]
+    rgb[blin] = c
+    alpha[blin] = 1
+    if normals:                                  # hole-filled along with the colour
+        from .normals import encode, face_camera
+        nmap = np.zeros((bh * bw, 3), np.float32)
+        nmap[blin] = face_camera(cam.astype(np.float32))
+        rgb = np.concatenate([rgb, nmap], 1)
+    rgb, alpha = rgb.reshape(bh, bw, -1), alpha.reshape(bh, bw)
+    _fill_holes(rgb, alpha)
+    box = out[y0:y1, x0:x1]
+    box[..., :3] = np.clip(rgb[..., :3], 0, 255).astype(np.uint8)
+    box[..., 3] = alpha * 255
+    if not normals:
+        return out
+    on = alpha > 0
+    nbox = nout[y0:y1, x0:x1]
+    nbox[on, :3] = encode(face_camera(rgb[..., 3:][on]))
+    nbox[..., 3] = box[..., 3]
+    return out, nout
+
+
+class PoseColumns:
+    """A pose's x, y, z as contiguous float32 arrays plus scratch buffers, made once and used
+    for every direction (render_points / _splat)."""
+
+    def __init__(self, pts: np.ndarray):
+        self.x, self.y, self.z = (np.ascontiguousarray(pts[:, i]) for i in range(3))
+        self.buf = tuple(np.empty_like(self.x) for _ in range(3))
+
+
+def pose_columns(pts: np.ndarray) -> PoseColumns:
+    return PoseColumns(pts)
+
+
+def _splat_plain(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir,
+                 normals: bool = False):
+    """_splat as first written (whole-canvas arrays): the reference the tests compare with."""
+    x = pts[:, 0] * ct + pts[:, 2] * st
+    z = -pts[:, 0] * st + pts[:, 2] * ct
+    y = pts[:, 1]
+    sy = y * ce - z * se
+    depth = -y * se - z * ce
+    ix = np.floor(ox + x * scale).astype(np.int64)
+    iy = np.floor(oy - sy * scale).astype(np.int64)
+    ok = (ix >= 0) & (ix < size) & (iy >= 0) & (iy < size)
+    lin = iy[ok] * size + ix[ok]
+    zbuf = np.full(size * size, np.inf, depth.dtype)
+    np.minimum.at(zbuf, lin, depth[ok])
+    near = depth[ok] <= zbuf[lin]
+    pick, lin = np.nonzero(ok)[0][near], lin[near]
+    rgb = np.zeros((size * size, 3), np.float32)
+    alpha = np.zeros(size * size, np.uint8)
+    c = base[pick]
+    if light > 0 or normals:
+        nx = nrm[pick, 0] * ct + nrm[pick, 2] * st
+        nz = -nrm[pick, 0] * st + nrm[pick, 2] * ct
+        ny = nrm[pick, 1]
+        cam = np.stack([nx, ny * ce - nz * se, ny * se + nz * ce], 1)
+    if light > 0:
+        lam = np.abs(cam @ light_dir)
+        c = c * ((1 - light) + light * lam)[:, None]
     rgb[lin] = c
     alpha[lin] = 1
-    if normals:                                  # hole-filled along with the colour
+    if normals:
         from .normals import encode, face_camera
         nmap = np.zeros((size * size, 3), np.float32)
         nmap[lin] = face_camera(cam.astype(np.float32))

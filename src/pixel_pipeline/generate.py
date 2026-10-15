@@ -32,6 +32,7 @@ import math
 import os
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -54,6 +55,7 @@ URL_ENV = "COMFYUI_URL"
 DEFAULT_CHECKPOINT = "sd_xl_base_1.0.safetensors"
 DEFAULT_LORA = "pixel-art-xl.safetensors"
 DEFAULT_LCM_LORA = "lcm-lora-sdxl.safetensors"
+DEFAULT_LIGHTNING_LORA = "sdxl_lightning_8step_lora.safetensors"   # ByteDance SDXL-Lightning
 COMFY_DIR = r"ComfyUI_windows_portable\ComfyUI"
 
 # SDXL's native ~1 megapixel sizes; we pick the one closest to the sprite's aspect.
@@ -83,11 +85,13 @@ DOWNLOADS = {
     DEFAULT_LCM_LORA: "https://huggingface.co/latent-consistency/lcm-lora-sdxl "
                       "(pytorch_lora_weights.safetensors, 394 MB; rename it to lcm-lora-sdxl.safetensors)",
     "sdxl_vae.safetensors": "https://huggingface.co/madebyollin/sdxl-vae-fp16-fix (335 MB)",
+    DEFAULT_LIGHTNING_LORA: "https://huggingface.co/ByteDance/SDXL-Lightning (393 MB)",
 }
 # Other file names accepted for the defaults (compared as lower-case letters/digits only),
 # e.g. sd_xl_base_1.0_0.9vae.safetensors or Civitai's Pixel_Art_XL_v1.1.safetensors.
 _ALIASES = {DEFAULT_CHECKPOINT: ("sdxlbase",), DEFAULT_LORA: ("pixelartxl",),
-            DEFAULT_LCM_LORA: ("lcmlorasdxl", "lcmsdxl")}
+            DEFAULT_LCM_LORA: ("lcmlorasdxl", "lcmsdxl"),
+            DEFAULT_LIGHTNING_LORA: ("sdxllightning8step",)}
 
 
 # --------------------------------------------------------------------------- errors
@@ -200,6 +204,38 @@ def comfyui_command(folder: Path) -> list[str]:
 
 COMFYUI_LOG = Path.home() / ".pixel-pipeline" / "comfyui.log"
 _started: list = []        # ComfyUI processes we started; stopped when we exit
+_start_lock = threading.Lock()
+WARM_ENV = "PIXEL_WARM"    # 0 = don't start ComfyUI when the app opens
+
+
+def warm_up() -> threading.Thread | None:
+    """Start the installed ComfyUI in the background (the app calls this when it opens), so
+    the first picture doesn't wait for ComfyUI's start-up (~20 s, ~80 s after a reboot). No
+    picture is made and no model is loaded. Nothing happens when ComfyUI isn't installed or
+    already answers, under pytest, or with PIXEL_WARM=0."""
+    if os.environ.get(WARM_ENV, "").strip().lower() in ("0", "off", "false", "no")             or "PYTEST_CURRENT_TEST" in os.environ or find_comfyui() is None:
+        return None
+
+    def run():
+        try:
+            ComfyClient().ensure_running()
+        except Exception as e:  # noqa: BLE001 - the first real job reports it properly
+            log.info("ComfyUI warm-up: %s", e)
+    t = threading.Thread(target=run, name="comfyui-warm-up", daemon=True)
+    t.start()
+    return t
+
+
+# fp16 matmul accumulation: ~10-15% faster SDXL and Hunyuan3D sampling on the RTX 4070. A/B
+# 2026-10-14 (Pictures/PixelPipeline/speed_ab_fp16_*.png): same seeds give pictures you can't
+# tell apart (<1% of pixels move) and the same shape from the same picture. PIXEL_COMFY_FAST=0
+# starts ComfyUI without it. A ComfyUI you start yourself is never changed.
+SPEED_FLAGS = ("--fast", "fp16_accumulation")
+SPEED_ENV = "PIXEL_COMFY_FAST"
+
+
+def speed_flags_on() -> bool:
+    return os.environ.get(SPEED_ENV, "").strip().lower() not in ("0", "off", "false", "no")
 
 
 def start_comfyui(folder: Path, extra_args: tuple = ()):
@@ -216,6 +252,8 @@ def start_comfyui(folder: Path, extra_args: tuple = ()):
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
     cmd = comfyui_command(folder)
     cmd += [a for a in extra_args if a not in cmd]
+    if not extra_args and speed_flags_on() and "--fast" not in cmd:
+        cmd += list(SPEED_FLAGS)      # pictures (not training runs, which pass their own flags)
     proc = subprocess.Popen(cmd, **kw)
     proc.pp_flags = tuple(extra_args)
     log_file.close()
@@ -323,7 +361,12 @@ class ComfyClient:
         """ping(), but if nothing answers at the default address, start the installed
         ComfyUI portable (find_comfyui) hidden in the background and wait for it.
         extra_args: flags it must run with; a ComfyUI we started without them is restarted
-        (one you started yourself is used as it is)."""
+        (one you started yourself is used as it is). One start at a time (warm_up's thread and
+        a job may both ask): the second waits for the first's ComfyUI."""
+        with _start_lock:
+            return self._ensure_running(wait, say, extra_args)
+
+    def _ensure_running(self, wait: float, say, extra_args: tuple) -> dict:
         try:
             info = self.ping()
             ours = [p for p in _started if p.poll() is None]
@@ -397,6 +440,17 @@ class ComfyClient:
         if not pid:
             raise ComfyUIWorkflowError(f"ComfyUI didn't queue the workflow: {_short(data)}")
         return str(pid)
+
+    def unqueue(self, prompt_ids) -> None:
+        """Best effort: drop prompts still waiting in ComfyUI's queue (after a failure)."""
+        ids = [str(p) for p in prompt_ids if p]
+        if not ids:
+            return
+        try:
+            self._request("POST", "/queue", json.dumps({"delete": ids}).encode("utf-8"),
+                          {"Content-Type": "application/json"})
+        except Exception:  # noqa: BLE001 - nothing more to do
+            pass
 
     def _rejection(self, data: Any) -> ComfyUIWorkflowError:
         """ComfyUI's 400 {"error": ..., "node_errors": ...} -> one readable exception."""
@@ -610,6 +664,11 @@ class GenOptions:
     vae: str | None = None                 # e.g. sdxl_vae.safetensors (fp16-fix); None = checkpoint's
     fast: bool = False                     # LCM-LoRA: 8 steps, cfg 1.5 (~3x faster, a bit rougher)
     lcm_lora: str = DEFAULT_LCM_LORA       # used when fast
+    # Draft (faster): SDXL-Lightning 8-step LoRA, euler/sgm_uniform, cfg 1.5 (~2x faster per
+    # picture). Opt-in only: the 2026-10-14 A/B (Pictures/PixelPipeline/speed_ab_*.png) kept
+    # the 25-step default for quality. Wins over `fast` when both are set.
+    draft: bool = False
+    lightning_lora: str = DEFAULT_LIGHTNING_LORA
     steps: int | None = None               # 25 (8 with fast)
     cfg: float | None = None               # 6.0 (1.5 with fast)
     sampler: str | None = None             # euler_ancestral (lcm with fast)
@@ -624,6 +683,10 @@ class GenOptions:
     auto_models: bool = True               # accept similarly named files for the default models
 
     def sampling(self) -> dict:
+        if self.draft:
+            return {"steps": self.steps or 8, "cfg": self.cfg if self.cfg is not None else 1.5,
+                    "sampler": self.sampler or "euler", "scheduler": self.scheduler or "sgm_uniform",
+                    "lora_strength": self.lora_strength if self.lora_strength is not None else 1.0}
         fast = self.fast
         return {"steps": self.steps or (8 if fast else 25),
                 "cfg": self.cfg if self.cfg is not None else (1.5 if fast else 6.0),
@@ -640,6 +703,31 @@ class GenOptions:
 GEN_OPTION_NAMES = tuple(f.name for f in fields(GenOptions))
 
 
+DRAFT_ENV = "PIXEL_DRAFT"
+
+
+def draft_default() -> bool:
+    """Draft (faster) for every generation that doesn't say: PIXEL_DRAFT=1/0, else the app's
+    File -> "Draft pictures" switch (settings.json "draft"). Off by default: the A/B of
+    2026-10-14 found Lightning rougher for characters, items, props and portraits."""
+    env = os.environ.get(DRAFT_ENV)
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    try:
+        from .assets import _settings
+        return bool(_settings().get("draft", False))
+    except Exception:  # noqa: BLE001 - no settings: today's quality
+        return False
+
+
+def set_draft_default(on: bool) -> None:
+    """The app's switch: every generation after this uses Draft (Lightning) or not."""
+    from .assets import _save_settings, _settings
+    data = _settings()
+    data["draft"] = bool(on)
+    _save_settings(data)
+
+
 def gen_options(**opts) -> GenOptions:
     """GenOptions from keyword args; None values keep the default (like settings_for)."""
     unknown = set(opts) - set(GEN_OPTION_NAMES)
@@ -647,6 +735,8 @@ def gen_options(**opts) -> GenOptions:
         raise TypeError(f"Unknown generation option(s): {', '.join(sorted(unknown))} "
                         f"(valid: {', '.join(GEN_OPTION_NAMES)})")
     out = GenOptions(**{k: v for k, v in opts.items() if v is not None})
+    if opts.get("draft") is None and draft_default():
+        out.draft = True
     if out.template is not None:
         out.template = str(out.template)
     return out
@@ -721,7 +811,8 @@ def build_workflow(prompt: str, negative: str = "", *, seed: int, width: int = 1
                    lora_strength: float = 1.0, lcm_lora: str | None = None, vae: str | None = None,
                    steps: int = 25, cfg: float = 6.0, sampler: str = "euler_ancestral",
                    scheduler: str = "normal", filename_prefix: str = "pixel-pipeline",
-                   mask: str | None = None, grow_mask_by: int | None = None) -> dict:
+                   mask: str | None = None, grow_mask_by: int | None = None,
+                   lightning_lora: str | None = None) -> dict:
     """ComfyUI API-format workflow from core nodes only.
 
     txt2img: CheckpointLoaderSimple -> [LoraLoader] -> 2x CLIPTextEncode -> EmptyLatentImage
@@ -731,7 +822,8 @@ def build_workflow(prompt: str, negative: str = "", *, seed: int, width: int = 1
              SetLatentNoiseMask on the VAEEncode latent (keeps the init under the noise, so a
              denoise below 1 still starts from it); grow_mask_by = VAEEncodeForInpaint instead
              (greys the masked pixels: for denoise 1.0 / inpainting checkpoints).
-    lcm_lora adds a second LoraLoader + ModelSamplingDiscrete(lcm); vae adds a VAELoader.
+    lcm_lora adds a second LoraLoader + ModelSamplingDiscrete(lcm); lightning_lora (draft) a
+    plain second LoraLoader (SDXL-Lightning samples as an eps model); vae adds a VAELoader.
     """
     wf: dict[str, dict] = {}
 
@@ -750,6 +842,10 @@ def build_workflow(prompt: str, negative: str = "", *, seed: int, width: int = 1
         model, clip = ["3", 0], ["3", 1]
         node("4", "ModelSamplingDiscrete", "LCM sampling", model=model, sampling="lcm", zsnr=False)
         model = ["4", 0]
+    elif lightning_lora:
+        node("3", "LoraLoader", "Lightning LoRA (draft)", model=model, clip=clip,
+             lora_name=lightning_lora, strength_model=1.0, strength_clip=1.0)
+        model, clip = ["3", 0], ["3", 1]
     if vae:
         node("5", "VAELoader", "Load VAE", vae_name=vae)
         vae_out = ["5", 0]
@@ -972,12 +1068,14 @@ def _models(client: ComfyClient, opts: GenOptions, needed: set[str]) -> dict:
                              installed=cache[kind])
 
     out: dict[str, str | None] = {"checkpoint": opts.checkpoint, "lora": None, "lcm_lora": None,
-                                  "vae": opts.vae}
+                                  "lightning_lora": None, "vae": opts.vae}
     if "checkpoint" in needed:
         out["checkpoint"] = find("checkpoints", opts.checkpoint, DEFAULT_CHECKPOINT)
     if "lora" in needed and opts.use_lora:
         out["lora"] = find("loras", opts.lora, DEFAULT_LORA)
-    if "lcm_lora" in needed and opts.fast:
+    if "lcm_lora" in needed and opts.draft:
+        out["lightning_lora"] = find("loras", opts.lightning_lora, DEFAULT_LIGHTNING_LORA)
+    elif "lcm_lora" in needed and opts.fast:
         out["lcm_lora"] = find("loras", opts.lcm_lora, DEFAULT_LCM_LORA)
     if "vae" in needed and opts.vae:
         out["vae"] = find("vae", opts.vae, None)
@@ -1048,6 +1146,7 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
 
     base = random.randrange(2**32) if seed is None else int(seed)
     results = []
+    jobs: list = []                  # [seed, cache key, cached images, prompt id]
     for i in range(count):
         s = (base + i) % 2**64
         if template is not None:
@@ -1063,18 +1162,126 @@ def generate_images(prompt: str, negative: str = "", *, client: ComfyClient | No
                                 image=image_name, denoise=denoise, checkpoint=models["checkpoint"],
                                 lora=models["lora"], lora_strength=samp["lora_strength"],
                                 lcm_lora=models["lcm_lora"], vae=models["vae"],
+                                lightning_lora=models["lightning_lora"],
                                 steps=samp["steps"], cfg=samp["cfg"], sampler=samp["sampler"],
                                 scheduler=samp["scheduler"], filename_prefix=opts.filename_prefix,
                                 mask=mask_name, grow_mask_by=grow_mask_by)
             _apply_project_style(wf, opts)
-        pid = client.queue(wf)
-        log.info("Queued ComfyUI prompt %s (seed %d)", pid, s)
-        entry = client.wait(pid, opts.timeout)
-        images = client.fetch_images(pid, entry)
-        if placed_mask is not None:
-            images = [composite_masked(prepared, img, placed_mask) for img in images]
-        results += [(img, s) for img in images]
+        key = cache_key(wf, client)
+        hit = cache_get(key)
+        jobs.append([s, key, hit, None])
+        if hit is None:              # queued now: ComfyUI starts the next one with no gap
+            jobs[-1][3] = client.queue(wf)
+            log.info("Queued ComfyUI prompt %s (seed %d)", jobs[-1][3], s)
+    try:
+        for job in jobs:
+            s, key, images, pid = job
+            if images is None:
+                entry = client.wait(pid, opts.timeout)
+                images = client.fetch_images(pid, entry)
+                cache_put(key, images)
+                job[3] = None
+            else:
+                log.info("Reused a cached picture (seed %d)", s)
+            if placed_mask is not None:
+                images = [composite_masked(prepared, img, placed_mask) for img in images]
+            results += [(img, s) for img in images]
+    except BaseException:
+        client.unqueue([j[3] for j in jobs if j[3]])
+        raise
     return results
+
+
+# --------------------------------------------------------------------------- picture cache
+
+CACHE_ENV = "PIXEL_GEN_CACHE"            # 0 = off, 1 = on for any ComfyUI address
+CACHE_DIR_ENV = "PIXEL_GEN_CACHE_DIR"
+CACHE_LIMIT = 3 * 2**30                  # bytes kept; oldest pictures go first
+_pruned: list = []
+
+
+def _cache_dir() -> Path:
+    env = os.environ.get(CACHE_DIR_ENV)
+    return Path(env) if env else Path.home() / ".pixel-pipeline" / "gen_cache"
+
+
+def _cache_on(client: ComfyClient) -> bool:
+    env = os.environ.get(CACHE_ENV, "").strip().lower()
+    if env in ("0", "off", "false", "no"):
+        return False
+    if env in ("1", "on", "true", "yes"):
+        return True
+    # default: only the local ComfyUI this app starts (test fakes and other machines: off)
+    return client.base_url.replace("localhost", "127.0.0.1") == DEFAULT_URL
+
+
+_MODEL_INPUTS = {"ckpt_name": "checkpoints", "lora_name": "loras", "vae_name": "vae",
+                 "unet_name": "diffusion_models"}
+
+
+def cache_key(wf: dict, client: ComfyClient) -> str | None:
+    """Content key of a built workflow: the same nodes, prompts, seed and inputs (uploaded
+    pictures are named by their content hash) give the same picture, so it is reused. Model
+    files are keyed by size + date too (a retrained style LoRA with the same name is new).
+    None = caching off."""
+    if not _cache_on(client):
+        return None
+    clean = copy.deepcopy(wf)
+    folder = find_comfyui()
+    for n in clean.values():
+        n.pop("_meta", None)
+        inp = n.get("inputs") or {}
+        inp.pop("filename_prefix", None)
+        for k, kind in _MODEL_INPUTS.items():
+            if isinstance(inp.get(k), str) and folder is not None:
+                f = folder / "ComfyUI" / MODEL_FOLDERS[kind] / inp[k]
+                try:
+                    st = f.stat()
+                    inp[k + "@"] = [st.st_size, int(st.st_mtime)]
+                except OSError:
+                    pass
+    text = json.dumps(clean, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def cache_get(key: str | None) -> list[Image.Image] | None:
+    if not key:
+        return None
+    files = sorted(_cache_dir().glob(f"{key}_*.png"))
+    if not files:
+        return None
+    try:
+        images = []
+        for f in files:
+            img = Image.open(f)
+            img.load()
+            images.append(img)
+            os.utime(f)              # recently used: kept longest
+        return images
+    except OSError:
+        return None
+
+
+def cache_put(key: str | None, images: list[Image.Image]) -> None:
+    if not key or not images:
+        return
+    folder = _cache_dir()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        for i, img in enumerate(images):
+            tmp = folder / f"{key}_{i}.tmp"
+            img.save(tmp, "PNG", compress_level=1)
+            tmp.replace(folder / f"{key}_{i}.png")
+        if not _pruned:
+            _pruned.append(True)
+            files = sorted(folder.glob("*.png"), key=lambda f: f.stat().st_mtime, reverse=True)
+            total = 0
+            for f in files:
+                total += f.stat().st_size
+                if total > CACHE_LIMIT:
+                    f.unlink(missing_ok=True)
+    except OSError as e:             # a full disk never stops a generation
+        log.info("Picture cache not written: %s", e)
 
 
 def generate_sprite(prompt: str, settings: Settings, *, client: ComfyClient | None = None,
@@ -1131,6 +1338,8 @@ def check_setup(client: ComfyClient | None = None, **gen_opts) -> tuple[bool, st
     if opts.use_lora:
         checks.append(("pixel-art LoRA", "loras", opts.lora, DEFAULT_LORA, True))
     checks.append(("LCM LoRA (fast mode)", "loras", opts.lcm_lora, DEFAULT_LCM_LORA, opts.fast))
+    checks.append(("Lightning LoRA (draft mode)", "loras", opts.lightning_lora,
+                   DEFAULT_LIGHTNING_LORA, opts.draft))
     if opts.vae:
         checks.append(("VAE", "vae", opts.vae, None, True))
     cache: dict[str, list[str]] = {}

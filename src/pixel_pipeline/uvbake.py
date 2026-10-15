@@ -514,9 +514,11 @@ def _turn(c: Chart) -> np.ndarray:
     return np.stack([c.uv[:, 1], c.size[0] - c.uv[:, 0]], 1)
 
 
-def _place(occ: np.ndarray, mask: np.ndarray):
+def _place(occ: np.ndarray, mask: np.ndarray, sat: list | None = None):
     """Lowest-then-leftmost free spot for mask in occupancy (or None). Looks in a band below
-    the first row with room first, then everywhere."""
+    the first row with room first, then everywhere. sat: [summed-area table of occ or None],
+    shared by the searches until occ changes (whole numbers: the same sums a band's own table
+    gives)."""
     G = occ.shape[0]
     h, w = mask.shape
     if h > G or w > G:
@@ -526,12 +528,33 @@ def _place(occ: np.ndarray, mask: np.ndarray):
         return None
     top = max(0, int(rows[0]) - 1)
     for bottom in (min(G, top + h + 96), G):
-        spot = _search(occ[top:bottom], mask)
+        if sat is not None and h * w <= 400:
+            if sat[0] is None:
+                t = np.zeros((G + 1, occ.shape[1] + 1), np.int32)
+                t[1:, 1:] = occ.cumsum(0, dtype=np.int32).cumsum(1, dtype=np.int32)
+                sat[0] = t
+            spot = _search_sat(sat[0][top:bottom + 1], mask)
+        else:
+            spot = _search(occ[top:bottom], mask)
         if spot is not None:
             return spot[0] + top, spot[1]
         if bottom == G:
             break
     return None
+
+
+def _search_sat(sat: np.ndarray, mask: np.ndarray):
+    """_search's small-mask case on rows of a summed-area table of the whole grid (sat rows
+    top..bottom): the first spot whose box is free."""
+    h, w = mask.shape
+    if sat.shape[0] - 1 < h or sat.shape[1] - 1 < w:
+        return None
+    hit = sat[h:, w:] - sat[:-h, w:] - sat[h:, :-w] + sat[:-h, :-w]
+    free = np.flatnonzero(hit.ravel() == 0)
+    if len(free) == 0:
+        return None
+    y, x = divmod(int(free[0]), hit.shape[1])
+    return y, x
 
 
 def _search(sub_occ: np.ndarray, mask: np.ndarray):
@@ -584,12 +607,13 @@ def pack(m: Mesh, charts: list[Chart], size: int = 1024, padding: int = 2,
         for i in order:
             c = charts[i]
             best = None
+            sat = [None]                          # occ's summed areas, until it changes
             for turn in (False, True):
                 cc = Chart(c.faces, c.verts, _turn(c) if turn else c.uv,
                            c.size[::-1] if turn else c.size)
                 mk = _chart_mask(cc, scale, cell, pad_cells, locals_[i])
                 probe = cv2.dilate(mk, kernel) if pad_cells else mk     # keep a gap of pad
-                spot = _place(occ, probe)
+                spot = _place(occ, probe, sat)
                 if spot is not None and (best is None or spot < best[0]):
                     best = (spot, turn, mk)
                 if c.size[0] == c.size[1]:

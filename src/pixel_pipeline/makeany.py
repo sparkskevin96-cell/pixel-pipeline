@@ -761,10 +761,10 @@ def parse_batch(text: str) -> list[str]:
 
 # --------------------------------------------------------------------------- estimates
 
-# Rough GPU minutes on Kevin's RTX 4070 8 GB (CLAUDE.md measurements: 2 SDXL sprites 53 s with
-# the model load; all-four-views 3D model 3.5 min; drawn Knight 16 directions ~4 min GPU +
-# ~100 s bending on the CPU).
-GPU = {"sdxl": 0.35, "model3d": 3.5, "drawn16": 4.0, "rig": 2.0, "inpaint": 0.4}
+# Rough GPU minutes on Kevin's RTX 4070 8 GB, measured 2026-10-14 with ComfyUI warm and
+# fp16 accumulation (generate.SPEED_FLAGS): an SDXL picture ~14 s; prompt to model (front +
+# back + Hunyuan3D) ~2.5 min; drawn knight 16 directions ~23-27 drawings, ~8.5 min.
+GPU = {"sdxl": 0.25, "model3d": 2.5, "drawn16": 8.5, "rig": 2.0, "inpaint": 0.3}
 
 
 def gpu_minutes(plan: Plan, style=None) -> float:

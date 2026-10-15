@@ -28,6 +28,9 @@ ONNX for parallax layers. Only the Small model is used; Base/Large are CC-BY-NC.
   pre/post-processing in `cutout.py` mirrors rembg's.
 - PySide6 (LGPLv3): desktop UI.
 - mcp (MIT): MCP server.
+- fast-simplification (MIT, pyvista/fast-simplification; wraps Sven Forstmann's Fast Quadric
+  Mesh Simplification, MIT): game-model decimation (`gamemesh.decimate_fast`); without it the
+  numpy decimation runs.
 
 ## YuNet face detector (portraits)
 

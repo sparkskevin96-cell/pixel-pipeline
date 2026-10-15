@@ -21,6 +21,12 @@ HIDDEN = collect_submodules("pixel_pipeline", filter=lambda name: name != "pixel
 # trimesh (3D models for turnarounds) loads its file formats lazily and reads its own resources.
 HIDDEN += collect_submodules("trimesh.exchange") + collect_submodules("trimesh.visual")
 DATAS = collect_data_files("trimesh")
+# fast-simplification (game-model decimation, gamemesh.decimate_fast): a compiled extension
+# imported lazily inside a function, so PyInstaller's import scan would miss it.
+try:
+    HIDDEN += collect_submodules("fast_simplification")
+except Exception:  # not installed: gamemesh falls back to its numpy decimation
+    pass
 # The window/taskbar icon the app loads at runtime.
 DATAS += [(str(SRC / "pixel_pipeline" / "ui" / "icon.png"), "pixel_pipeline/ui")]
 # The curated mocap library index (mocap.py).

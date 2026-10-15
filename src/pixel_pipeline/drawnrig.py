@@ -430,6 +430,23 @@ class Drawn:
     normal: np.ndarray         # (N, 3)
     hidden: np.ndarray = field(default=None, repr=False)   # body points for disocclusion
     hidden_idx: np.ndarray = field(default=None, repr=False)  # their palette indices
+    _cache: dict = field(default=None, repr=False)   # bend()'s per-drawing arrays (float64)
+
+    def arrays(self, body: "Body") -> dict:
+        """What bend() needs every frame, converted once: the same float64 values Body.blend
+        and _pose_points make from the float32 weights each time (so the same results).
+        drop() frees them."""
+        if self._cache is None:
+            c = {"w": self.weights.astype(np.float64)}
+            if self.hidden is not None and len(self.hidden):
+                c["hw"] = body.weights[self.hidden].astype(np.float64)
+                c["hb"] = body.bind[self.hidden]
+                c["hn"] = body.bind_n[self.hidden]
+            self._cache = c
+        return self._cache
+
+    def drop(self) -> None:
+        self._cache = None
 
 
 def bone_names(body: Body) -> list[str]:
@@ -601,7 +618,9 @@ def bend(drawn: Drawn, body: Body, pose: Pose, *, fill: bool = True, cam: Camera
     down, shows this drawing's face to it; its pixel squares are the same size)."""
     cam = cam or drawn.cam
     W, H = cam.width, cam.height
-    b = Body.blend(drawn.weights, pose.mats)
+    pre = drawn.arrays(body)
+    mats16 = pose.mats.reshape(len(pose.mats), 16)
+    b = (pre["w"] @ mats16).reshape(-1, 4, 4)            # = Body.blend(drawn.weights, mats)
     R = b[:, :3, :3]
     c = np.einsum("pij,pj->pi", R, drawn.centre) + b[:, :3, 3] - pose.shift
     r = np.einsum("pij,pj->pi", R, drawn.right)
@@ -645,7 +664,9 @@ def bend(drawn: Drawn, body: Body, pose: Pose, *, fill: bool = True, cam: Camera
     n_all = np.einsum("pij,pj->pi", R, drawn.normal)
     nrm[keep] = n_all[chosen[keep]]
     if fill and drawn.hidden is not None and len(drawn.hidden):
-        pts, pn = _pose_points(body, pose.mats, drawn.hidden)
+        bh = (pre["hw"] @ mats16).reshape(-1, 4, 4)      # = _pose_points(body, mats, hidden)
+        pts = np.einsum("pij,pj->pi", bh[:, :3, :3], pre["hb"]) + bh[:, :3, 3]
+        pn = np.einsum("pij,pj->pi", bh[:, :3, :3], pre["hn"])
         fx, fy, fz = cam.project(pts - pose.shift)
         jx, jy = np.floor(fx).astype(np.int64), np.floor(fy).astype(np.int64)
         okf = (jx >= 0) & (jx < W) & (jy >= 0) & (jy < H)
@@ -777,11 +798,23 @@ def grid_region(view: RestView, target: int = 1024, pad: int = 6) -> tuple[tuple
 
 def drawing_to_frame(drawing: Image.Image, region, frame: tuple[int, int], settings,
                      patch: int | None = None):
-    """A drawn picture of the region -> (prepared RGB, mask) on the frame grid, cut out."""
+    """A drawn picture of the region -> (prepared RGB, mask) on the frame grid, cut out.
+    Remembered by content (cache.py): the same drawing again (a resumed or re-bent character,
+    a new animation) skips the cut-out model and the converter."""
+    from . import cache
     from .model3d import cut_out
     from .objects import main_subject
     from .pipeline import Prepared, prepare
     from .settings import Settings
+    key = None
+    if cache.enabled():
+        key = cache.digest(drawing.mode, np.asarray(drawing), tuple(region), tuple(frame),
+                           settings.to_dict(), patch, cache.source_of(drawing_to_frame),
+                           cache.code_digest("model3d", "objects", "pipeline", "pixelize",
+                                             "color", "settings", "cutout", "systems"))
+        hit = cache.load("drawn_frame", key)
+        if hit is not None:
+            return Prepared(hit["rgb"], hit["mask"])
     rgba = main_subject(cut_out(drawing))
     x0, y0, size = region
     s = Settings(**{**settings.to_dict(), "width": size, "height": size, "fit": "stretch",
@@ -797,6 +830,8 @@ def drawing_to_frame(drawing: Image.Image, region, frame: tuple[int, int], setti
     ok = (fy >= 0) & (fy < H) & (fx >= 0) & (fx < W)
     rgb[fy[ok], fx[ok]] = prep.rgb[ys[ok], xs[ok]]
     mask[fy[ok], fx[ok]] = prep.mask[ys[ok], xs[ok]]
+    if key is not None:
+        cache.save("drawn_frame", key, rgb=rgb, mask=mask)
     return Prepared(rgb, mask)
 
 
@@ -1383,7 +1418,8 @@ def _point_colours(body: Body, views: list[RestView], keys: KeySet, key_pose: Po
     rest_pts, _ = body.pose(key_pose.worlds)
     out = []
     steps = sorted(range(1, n), key=lambda s_: (min(s_, n - s_), s_))
-    for k in range(n):
+    last = None                     # (missing, near): the points no direction sees are the
+    for k in range(n):              # same for every k, so the tree is built once
         idx = seen[k].copy()
         for pool in (inner, seen):
             for step in steps:
@@ -1392,9 +1428,11 @@ def _point_colours(body: Body, views: list[RestView], keys: KeySet, key_pose: Po
                 idx[need] = pool[j][need]
         missing = idx < 0
         if missing.any() and (~missing).any():
-            tree = cKDTree(rest_pts[~missing])
-            _, near = tree.query(rest_pts[missing])
-            idx[missing] = idx[~missing][near]
+            if last is None or not np.array_equal(last[0], missing):
+                tree = cKDTree(rest_pts[~missing])
+                _, near = tree.query(rest_pts[missing])
+                last = (missing, near)
+            idx[missing] = idx[~missing][last[1]]
         out.append(idx)
     return out
 
@@ -1485,6 +1523,243 @@ def _check(cancel, what: str):
         raise Cancelled(what)
 
 
+@dataclass
+class BodyArrays:
+    """The parts of a Body bending reads (bend, model_frame): small enough to hand to worker
+    processes, the same arrays (so the same numbers)."""
+    weights: np.ndarray
+    bind: np.ndarray
+    bind_n: np.ndarray
+
+
+@dataclass
+class BendState:
+    """Everything bending one direction's frames needs (drawn_animation's loop)."""
+    body: BodyArrays
+    poses: list
+    rest: Pose
+    cams: list
+    drawns: list
+    colours: list
+    palette: np.ndarray
+    torso: int | None
+    max_turn: float
+    min_face: float
+    clean: bool
+    normals: bool
+    outline: str
+
+
+def bend_direction(state: BendState, k: int, clips=None):
+    """Every frame of every clip facing cams[k] -> (rows [clip][frame] of Sprites, frames from
+    the model's surface, frames bent from another direction's drawing; both counts per clip).
+    clips: only these clip indices (the other rows are None)."""
+    from .normals import decode, encode, face_camera, from_drawing
+    from .pixelclean import clean_sprite
+    body, rest, cams, palette, clean = state.body, state.rest, state.cams, state.palette, state.clean
+    cam = cams[k]
+    torso = state.torso
+    fallback, refaced = [0] * len(state.poses), [0] * len(state.poses)
+    rows = []
+    for a, row in enumerate(state.poses):
+        if clips is not None and a not in clips:
+            rows.append(None)
+            continue
+        out = []
+        for pose in row:
+            j = k
+            if torso is not None and turned_away(rest, pose, cam, torso) > state.max_turn:
+                j, face = facing_choice(rest, pose, cams, k, torso)
+                if face < state.min_face:
+                    j = None
+            if j is None:
+                idx, ncam = model_frame(body, pose, cam, state.colours[k])   # nothing faces it
+                fallback[a] += 1
+            else:
+                idx, ncam = bend(state.drawns[j], body, pose, cam=cam)
+                refaced[a] += j != k
+            if clean:
+                idx = drop_fragments(idx)
+            sp = _sprite(idx, palette, ncam)
+            if clean:
+                sp = clean_sprite(sp, state.outline)
+                gone = (drop_fragments(sp.indices, fill_holes=False) < 0) & (sp.indices >= 0)
+                if gone.any():                 # clean-up can cut a thin bridge
+                    sp.indices[gone] = -1
+                    sp.rgba[gone] = 0
+                    if sp.normal is not None:
+                        sp.normal[gone] = 0
+            if state.normals:
+                nd = decode(from_drawing(sp.rgba)[..., :3])
+                n3 = face_camera(decode(sp.normal[..., :3]) if sp.normal is not None else ncam)
+                mix = 0.65 * n3 + 0.35 * nd
+                mix /= np.maximum(np.linalg.norm(mix, axis=-1, keepdims=True), 1e-12)
+                nm = np.zeros(idx.shape + (4,), np.uint8)
+                on = sp.indices >= 0
+                nm[..., :3] = encode(face_camera(mix))
+                nm[..., 3] = np.where(on, 255, 0)
+                nm[~on] = 0
+                sp.normal = nm
+            out.append(sp)
+        rows.append(out)
+    for dr in state.drawns:                 # one direction's float64 copies at a time
+        dr.drop()
+    return rows, fallback, refaced
+
+
+_WORKER_STATE: BendState | None = None
+
+
+def _bend_worker_init(folder: str) -> None:
+    """In a worker process: the shared state, big arrays memory-mapped (one copy in RAM for
+    all workers)."""
+    import pickle
+    global _WORKER_STATE
+    f = Path(folder)
+    with open(f / "state.pkl", "rb") as fh:
+        state = pickle.load(fh)
+    state.body = BodyArrays(*(np.load(f / f"{n}.npy", mmap_mode="r")
+                              for n in ("weights", "bind", "bind_n")))
+    cols = np.load(f / "colours.npy", mmap_mode="r")
+    state.colours = [cols[i] for i in range(len(cols))]
+    _WORKER_STATE = state
+
+
+def _bend_task(job):
+    k, clips = job
+    return bend_direction(_WORKER_STATE, k, clips)
+
+
+def _state_digest(state: BendState) -> str:
+    """Everything bending reads except the clip poses (cache key base): the body, key pose,
+    cameras, glued drawings, hidden-point colours, palette, options and the code."""
+    import dataclasses
+
+    from . import cache
+    drawns = [[getattr(d, f.name) if f.name != "cam" else dataclasses.astuple(d.cam)
+               for f in dataclasses.fields(d) if f.name != "_cache"] for d in state.drawns]
+    src = cache.source_of(bend_direction, bend, model_frame, turned_away, facing_choice,
+                          drop_fragments, majority, _sprite, _first_per, _pose_points, Camera,
+                          Drawn)
+    return cache.digest(state.body.weights, state.body.bind, state.body.bind_n,
+                        [state.rest.mats, state.rest.shift, state.rest.worlds],
+                        [dataclasses.astuple(c) for c in state.cams], drawns, list(state.colours),
+                        state.palette, state.torso, state.max_turn, state.min_face, state.clean,
+                        state.normals, state.outline, src, SS, DEPTH_EPS, OCCLUDE_EPS, MIN_COVER,
+                        cache.code_digest("pixelclean", "normals", "finishing", "color",
+                                          "pipeline"))
+
+
+def _row_key(base: str, k: int, row) -> str:
+    from . import cache
+    return cache.digest(base, k, [[p.mats, p.shift, p.worlds] for p in row])
+
+
+def _row_save(key: str, sprites, fb: int, rf: int) -> None:
+    from . import cache
+    nrm = [sp.normal for sp in sprites]
+    extra = {"normal": np.stack(nrm)} if all(n is not None for n in nrm) else {}
+    cache.save("drawn_rows", key, rgba=np.stack([sp.rgba for sp in sprites]),
+               idx=np.stack([sp.indices for sp in sprites]), counts=np.array([fb, rf]), **extra)
+
+
+def _row_load(key: str, palette):
+    from . import cache
+    hit = cache.load("drawn_rows", key)
+    if hit is None:
+        return None
+    n = hit.get("normal")
+    row = [Sprite(hit["rgba"][i].copy(), hit["idx"][i].copy(), palette,
+                  None if n is None else n[i].copy()) for i in range(len(hit["rgba"]))]
+    return row, int(hit["counts"][0]), int(hit["counts"][1])
+
+
+def bend_directions(state: BendState, *, cancel=None, progress=None, names=None,
+                    workers: int | None = None) -> list:
+    """bend_direction for every camera, on worker processes when the PC has room (parallel.py;
+    the same frames either way). Returns the per-direction results in camera order."""
+    import pickle
+    import shutil
+    import tempfile
+
+    from . import parallel
+    say = _say(progress)
+    n = len(state.cams)
+    t0 = time.time()
+    finished = []
+
+    def stop():
+        return cancel is not None and cancel()
+    from . import cache
+    na = len(state.poses)
+    got = [[None] * na for _ in range(n)]       # (row, fallback, refaced) per direction, clip
+    keys = None
+    if cache.enabled():                         # clips bent before with the same everything:
+        base = _state_digest(state)             # their frames come back as they were
+        keys = [[_row_key(base, k, state.poses[a]) for a in range(na)] for k in range(n)]
+        for k in range(n):
+            for a in range(na):
+                got[k][a] = _row_load(keys[k][a], state.palette)
+    jobs = [(k, [a for a in range(na) if got[k][a] is None]) for k in range(n)]
+    jobs = [(k, c) for k, c in jobs if c]
+    if keys is not None and len(jobs) < n:
+        kept = sum(x is not None for r in got for x in r)
+        say(f"Reusing {kept} of {n * na} clip directions bent before…")
+    todo = sum(len(state.poses[a]) for _, clips in jobs for a in clips)
+    if workers is None:     # ~150 MB per worker beyond the shared arrays; small jobs aren't
+        workers = parallel.worker_count(len(jobs), per_worker_mb=250) if todo >= 96 else 1
+    workers = max(1, min(workers, len(jobs)))
+
+    def collect(results):
+        for (k, clips), (rows, fb, rf) in zip(jobs, results):
+            for a in clips:
+                got[k][a] = (rows[a], fb[a], rf[a])
+                if keys is not None:
+                    _row_save(keys[k][a], rows[a], fb[a], rf[a])
+        out = []
+        for k in range(n):
+            out.append(([got[k][a][0] for a in range(na)], sum(got[k][a][1] for a in range(na)),
+                        sum(got[k][a][2] for a in range(na))))
+        return out
+    n_jobs = len(jobs)
+
+    def on_done(i, _r):                          # progress over the directions left to bend
+        finished.append(i)
+        left = n_jobs - len(finished)
+        if left:
+            eta = (time.time() - t0) / len(finished) * left
+            say(f"Bending the drawings: {len(finished)} of {n_jobs} directions done "
+                f"(about {max(1, round(eta))} s left)…")
+    try:
+        if workers <= 1:
+            res = []
+            for i, (k, clips) in enumerate(jobs):
+                _check(cancel, "Stopped while bending the drawings (the key drawings are kept)")
+                if i:
+                    on_done(i - 1, None)
+                res.append(bend_direction(state, k, clips))
+            return collect(res)
+        tmp = Path(tempfile.mkdtemp(prefix="pp-bend-"))
+        try:
+            for name, arr in (("weights", state.body.weights), ("bind", state.body.bind),
+                              ("bind_n", state.body.bind_n),
+                              ("colours", np.stack(state.colours))):
+                np.save(tmp / f"{name}.npy", np.ascontiguousarray(arr))
+            light = BendState(None, state.poses, state.rest, state.cams, state.drawns, None,
+                              state.palette, state.torso, state.max_turn, state.min_face,
+                              state.clean, state.normals, state.outline)
+            with open(tmp / "state.pkl", "wb") as fh:
+                pickle.dump(light, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            say(f"Bending the drawings on {workers} workers…")
+            return collect(parallel.run(_bend_task, jobs, init=_bend_worker_init,
+                                        init_args=(str(tmp),), workers=workers,
+                                        on_done=on_done, cancel=stop))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    except parallel.Cancel:
+        raise Cancelled("Stopped while bending the drawings (the key drawings are kept)")
+
+
 def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frames: int = 8,
                     animations: list[str] | None = None, elevation: float = 30.0,
                     seed: int = 1234, denoise: float = 0.6, style=None, client=None,
@@ -1503,8 +1778,6 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
     faces the camera then (facing_choice); under min_face (cosine) the model's own surface is
     used, coloured from the drawings (model_frame). recolour: a re-skin's colour swaps.
     Returns (set, info: keys, ious, seeds, seconds)."""
-    from .normals import decode, encode, face_camera, from_drawing
-    from .pixelclean import clean_sprite
     say = _say(progress)
     t0 = time.time()
     rig = load_rig([rigged])
@@ -1584,52 +1857,15 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
                      held=held, arm=arm)
         add_hidden(drawn, body, views[k], rest, colours[k], pts)
         drawns.append(drawn)
-    total = len(cams) * sum(len(r) for r in poses)
-    done, t_b = 0, time.time()
-    for k, cam in enumerate(cams):
-        _check(cancel, "Stopped while bending the drawings (the key drawings are kept)")
-        if k and done:
-            eta = (time.time() - t_b) / done * (total - done)
-            say(f"Bending the drawings: facing {names[k]} ({k + 1} of {len(cams)}, "
-                f"about {max(1, round(eta))} s left)…")
-        for a, row in enumerate(poses):
-            for f, pose in enumerate(row):
-                done += 1
-                j = k
-                if torso is not None and turned_away(rest, pose, cam, torso) > max_turn:
-                    j, face = facing_choice(rest, pose, cams, k, torso)
-                    if face < min_face:
-                        j = None
-                if j is None:
-                    idx, ncam = model_frame(body, pose, cam, colours[k])   # nothing faces it
-                    fallback += 1
-                else:
-                    idx, ncam = bend(drawns[j], body, pose, cam=cam)
-                    refaced += j != k
-                if clean:
-                    idx = drop_fragments(idx)
-                sp = _sprite(idx, palette, ncam)
-                if clean:
-                    sp = clean_sprite(sp, outline)
-                    gone = (drop_fragments(sp.indices, fill_holes=False) < 0) & (sp.indices >= 0)
-                    if gone.any():                 # clean-up can cut a thin bridge
-                        sp.indices[gone] = -1
-                        sp.rgba[gone] = 0
-                        if sp.normal is not None:
-                            sp.normal[gone] = 0
-                if normals:
-                    nd = decode(from_drawing(sp.rgba)[..., :3])
-                    n3 = face_camera(decode(sp.normal[..., :3]) if sp.normal is not None
-                                     else ncam)
-                    mix = 0.65 * n3 + 0.35 * nd
-                    mix /= np.maximum(np.linalg.norm(mix, axis=-1, keepdims=True), 1e-12)
-                    nm = np.zeros(idx.shape + (4,), np.uint8)
-                    on = sp.indices >= 0
-                    nm[..., :3] = encode(face_camera(mix))
-                    nm[..., 3] = np.where(on, 255, 0)
-                    nm[~on] = 0
-                    sp.normal = nm
-                sprites[a][k][f] = sp
+    state = BendState(BodyArrays(body.weights, body.bind, body.bind_n), poses, rest, cams,
+                      drawns, colours, palette, torso, max_turn, min_face, clean, normals,
+                      outline)
+    for k, (rows, fb, rf) in enumerate(bend_directions(state, cancel=cancel, progress=say,
+                                                       names=names)):
+        for a in range(len(clips)):
+            sprites[a][k] = rows[a]
+        fallback += fb
+        refaced += rf
     actions = [Action(c.name, c.loop, max(16, int(round(1000 * c.duration
                                                          / max(1, frames if c.loop else frames - 1)))))
                for c in clips]

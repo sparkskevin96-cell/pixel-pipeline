@@ -79,13 +79,21 @@ def downscale(rgb: np.ndarray, patch: int, mode: str = "contrast") -> np.ndarray
     if mode == "center":
         c = patch // 2
         return np.ascontiguousarray(rgb[c:h * patch:patch, c:w * patch:patch])
-    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2Lab).astype(np.float32)
-    blocks = _blocks(lab, patch)
-    out = np.median(blocks, axis=2)
+    lab8 = cv2.cvtColor(rgb, cv2.COLOR_RGB2Lab)
+    blocks8 = _blocks(lab8, patch)
+    # median per block = middle of the sorted block (whole numbers: the same float32 values
+    # np.median gives, several times faster)
+    srt = np.sort(blocks8, axis=2)
+    n = srt.shape[2]
+    if n % 2:
+        out = srt[:, :, n // 2].astype(np.float32)
+    else:
+        out = (srt[:, :, n // 2 - 1].astype(np.float32) + srt[:, :, n // 2]) / np.float32(2)
+    blocks = blocks8.astype(np.float32)
     if mode == "contrast":
         lum = blocks[..., 0]
-        med, mean = np.median(lum, -1), lum.mean(-1)
-        hi, lo = lum.max(-1), lum.min(-1)
+        med, mean = out[..., 0].copy(), lum.mean(-1)
+        hi, lo = srt[:, :, -1, 0].astype(np.float32), srt[:, :, 0, 0].astype(np.float32)
         pick = lum[..., (patch // 2) * patch + patch // 2].copy()
         dark = (med < mean) & (hi - med > med - lo)
         light = (med > mean) & (hi - med < med - lo)

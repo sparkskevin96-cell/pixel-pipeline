@@ -236,12 +236,7 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
     if picture is not None and Path(picture).exists():
         shutil.copyfile(picture, ch.picture)
     say("Adding a skeleton and animations…")
-    if kind == "animal":
-        from .quadruped import auto_rig_quadruped
-        auto_rig_quadruped(ch.model, ch.rigged)
-    else:
-        from .autorig import auto_rig
-        auto_rig(ch.model, ch.rigged)
+    auto_rig_cached(ch.model, ch.rigged, kind)
     add_project_clips(ch.rigged, kind, progress=say)      # house style: the type's clip set
     if drawn:
         from .generate import ComfyUIUnavailable
@@ -257,6 +252,38 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
     return ch
+
+
+RIG_CODE = ("autorig", "quadruped", "anim3d", "motions", "mocap", "turnaround")
+
+
+def auto_rig_cached(model, out, kind: str = "person") -> Path:
+    """autorig.auto_rig (people) / quadruped.auto_rig_quadruped (animals) of a model, the
+    rigged.glb remembered by the model file's content (cache.py): the same model again (a
+    rebuild, a restyle, the same model under another name) gets the same file without
+    rigging it again."""
+    from . import cache
+    key = None
+    if cache.enabled():
+        try:
+            import trimesh
+            tv = trimesh.__version__
+        except ImportError:
+            tv = None
+        key = cache.digest(Path(model), kind, tv, cache.code_digest(*RIG_CODE))
+        hit = cache.load("rig", key)
+        if hit is not None:
+            Path(out).write_bytes(hit["glb"].tobytes())
+            return Path(out)
+    if kind == "animal":
+        from .quadruped import auto_rig_quadruped
+        auto_rig_quadruped(model, out)
+    else:
+        from .autorig import auto_rig
+        auto_rig(model, out)
+    if key is not None:
+        cache.save("rig", key, glb=np.frombuffer(Path(out).read_bytes(), np.uint8))
+    return Path(out)
 
 
 def _keep_keys_for(ch: Character, model) -> None:
@@ -360,12 +387,7 @@ def rebuild(ch: Character, model, progress=None) -> Character:
     if Path(model).resolve() != ch.model.resolve():
         shutil.copyfile(model, ch.model)
     say(f"{ch.name}: adding a skeleton and animations…")
-    if ch.kind == "animal":
-        from .quadruped import auto_rig_quadruped
-        auto_rig_quadruped(ch.model, ch.rigged)
-    else:
-        from .autorig import auto_rig
-        auto_rig(ch.model, ch.rigged)
+    auto_rig_cached(ch.model, ch.rigged, ch.kind)
     add_project_clips(ch.rigged, ch.kind, progress=say)   # house style: the type's clip set
     render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say, drawn=is_drawn(ch),
                   prompt=ch.prompt, reuse=False)          # a new model needs new drawings

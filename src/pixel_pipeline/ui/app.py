@@ -490,6 +490,19 @@ class MainWindow(QMainWindow):
             action.setShortcut(shortcut)
             action.triggered.connect(slot)
             menu.addAction(action)
+        from ..generate import draft_default
+        self.draft_action = QAction("&Draft pictures (about 2x faster GPU, rougher)", self)
+        self.draft_action.setCheckable(True)
+        self.draft_action.setChecked(draft_default())
+        self.draft_action.setToolTip("SDXL-Lightning, 8 steps: for quick tries. Off = full quality.")
+        self.draft_action.toggled.connect(self._set_draft)
+        menu.insertAction(menu.actions()[-2], self.draft_action)
+
+    def _set_draft(self, on: bool):
+        from ..generate import set_draft_default
+        set_draft_default(on)
+        self.statusBar().showMessage("Draft pictures on: faster, rougher. Turn off for final assets."
+                                     if on else "Draft pictures off: full quality.")
 
     # ---- settings <-> controls -----------------------------------------------
     def apply_preset(self, subject: str):
@@ -938,6 +951,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0                      # the installed copy is starting instead
     win = MainWindow()
     win.show()
+    from ..generate import warm_up
+    warm_up()                         # ComfyUI starts while you type
     crash.show_previous_crash(win)
     win.updates.started(flags)
     if "--model" in args:  # straight into Prompt to Model

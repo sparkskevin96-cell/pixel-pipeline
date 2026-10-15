@@ -95,7 +95,87 @@ def _fill_pinholes(idx: np.ndarray) -> np.ndarray:
 def _merge_islands(idx: np.ndarray, body: np.ndarray, lab: np.ndarray, size: int,
                    delta: float, passes: int = 2) -> None:
     """Same-colour patches (4-connected) of at most `size` body pixels take the colour they
-    share the most border with, when that is within `delta` (Lab) of theirs. In place."""
+    share the most border with, when that is within `delta` (Lab) of theirs. In place.
+
+    Colours are visited in index order and each colour's patches in raster order of their
+    first pixel (the order connected-component labels number them), so earlier merges feed
+    later ones exactly as labelling every colour would; only pixels that can be in a small
+    patch are looked at (at most size-1 same-colour neighbours, or just merged into that
+    colour), the rest of the picture is never labelled."""
+    if size < 1:
+        return
+    if size > 2:
+        _merge_islands_labelled(idx, body, lab, size, delta, passes)
+        return
+    h, w = idx.shape
+    flat_idx = idx.reshape(-1)
+    flat_body = body.reshape(-1)
+    for _ in range(passes):
+        vals = np.unique(idx[body])
+        links = [(_shift(idx, dy, dx, -1) == idx) & _shift(body, dy, dx, False) & body
+                 for dy, dx in _N4]
+        same = np.sum(links, 0)
+        small = body & (same == 0)                       # one-pixel patches
+        if size == 2:                                    # pairs: both ends have one link
+            for (dy, dx), ln in zip(_N4, links):
+                small |= ln & (same == 1) & (_shift(same, dy, dx, -1) == 1)
+        cand = np.flatnonzero(small.reshape(-1))
+        by_v: dict[int, list[int]] = {}
+        for q, v in zip(cand.tolist(), flat_idx[cand].tolist()):
+            by_v.setdefault(v, []).append(q)
+        turned: dict[int, list[int]] = {}
+        changed = False
+        for v in vals.tolist():
+            seeds = by_v.get(v, []) + turned.get(v, [])
+            if not seeds:
+                continue
+            comps, done = [], set()
+            for s0 in seeds:
+                if s0 in done or flat_idx[s0] != v:
+                    continue
+                comp, stack, seen, big = [s0], [s0], {s0}, False
+                while stack and not big:
+                    q = stack.pop()
+                    qy, qx = divmod(q, w)
+                    for dy, dx in _N4:
+                        ny, nx = qy + dy, qx + dx
+                        if 0 <= ny < h and 0 <= nx < w:
+                            r = ny * w + nx
+                            if r not in seen and flat_body[r] and flat_idx[r] == v:
+                                seen.add(r)
+                                comp.append(r)
+                                stack.append(r)
+                                if len(comp) > size:
+                                    big = True
+                                    break
+                done |= seen
+                if not big:
+                    comps.append(sorted(comp))
+            comps.sort(key=lambda c: c[0])
+            for comp in comps:
+                ring = set()
+                for q in comp:
+                    qy, qx = divmod(q, w)
+                    for ny in (qy - 1, qy, qy + 1):
+                        for nx in (qx - 1, qx, qx + 1):
+                            if 0 <= ny < h and 0 <= nx < w:
+                                ring.add(ny * w + nx)
+                ring.difference_update(comp)
+                around = [a for a in (int(flat_idx[r]) for r in ring if flat_body[r]) if a != v]
+                if not around:
+                    continue
+                best = int(np.bincount(around).argmax())
+                if np.linalg.norm(lab[best] - lab[v]) < delta:
+                    flat_idx[comp] = best
+                    turned.setdefault(best, []).extend(comp)
+                    changed = True
+        if not changed:
+            break
+
+
+def _merge_islands_labelled(idx: np.ndarray, body: np.ndarray, lab: np.ndarray, size: int,
+                            delta: float, passes: int = 2) -> None:
+    """_merge_islands by labelling every colour's patches (any `size`)."""
     h, w = idx.shape
     for _ in range(passes):
         changed = False
@@ -124,9 +204,22 @@ def _merge_islands(idx: np.ndarray, body: np.ndarray, lab: np.ndarray, size: int
 
 def _flatten_spurs(idx: np.ndarray, body: np.ndarray) -> None:
     """One-pixel nubs on a flat body edge (render noise) become outline: the body pixel
-    with one body neighbour, whose base pixel has body on both sides across. In place."""
+    with one body neighbour, whose base pixel has body on both sides across. In place.
+    Decided in raster order on the picture as earlier decisions left it; only pixels with one
+    body neighbour, or next to a pixel just turned, can change, so only those are visited."""
+    import heapq
     h, w = idx.shape
-    for y, x in zip(*np.nonzero(body)):
+    cnt = np.zeros((h, w), np.int32)
+    for dy, dx in _N4:
+        cnt += _shift(body, dy, dx, False)
+    heap = np.flatnonzero((body & (cnt == 1)).reshape(-1)).tolist()   # sorted = a heap
+    done = set()
+    while heap:
+        p = heapq.heappop(heap)
+        if p in done:
+            continue
+        done.add(p)
+        y, x = divmod(p, w)
         nbs = [(y + dy, x + dx, dy, dx) for dy, dx in _N4
                if 0 <= y + dy < h and 0 <= x + dx < w and body[y + dy, x + dx]]
         if len(nbs) != 1:
@@ -141,22 +234,42 @@ def _flatten_spurs(idx: np.ndarray, body: np.ndarray) -> None:
         if ring:
             idx[y, x] = ring[0]
             body[y, x] = False
+            for ny, nx in ((y, x + 1), (y + 1, x - 1), (y + 1, x), (y + 1, x + 1)):
+                if 0 <= ny < h and 0 <= nx < w and body[ny, nx]:    # later pixels it touches
+                    heapq.heappush(heap, ny * w + nx)
 
 
 def _pixel_perfect(idx: np.ndarray, body: np.ndarray) -> np.ndarray:
     """Remove outline pixels no body pixel needs: a corner that only doubles an L (its two
     outline neighbours already touch diagonally) or a stub sticking off the outline.
-    Returns the removed pixels."""
+    Returns the removed pixels. Each pass decides the outline pixels in raster order on the
+    mask as earlier removals left it; only pixels that qualify when the pass starts, or sit
+    next to one just removed, can qualify, so only those are visited."""
+    import heapq
     h, w = idx.shape
     mask = idx >= 0
     removed = np.zeros_like(mask)
+    near_body = np.zeros_like(mask)
+    for dy, dx in _N4:
+        near_body |= _shift(body, dy, dx, False)
 
     def at(y, x, grid):
         return 0 <= y < h and 0 <= x < w and grid[y, x]
     changed = True
     while changed:
         changed = False
-        for y, x in zip(*np.nonzero(mask & ~body)):
+        listed = mask & ~body
+        hz = _shift(mask, 0, -1, False).astype(np.int32) + _shift(mask, 0, 1, False)
+        vt = _shift(mask, -1, 0, False).astype(np.int32) + _shift(mask, 1, 0, False)
+        qualify = listed & ~near_body & (((hz == 1) & (vt == 1)) | (hz + vt == 1))
+        heap = np.flatnonzero(qualify.reshape(-1)).tolist()
+        done = set()
+        while heap:
+            p = heapq.heappop(heap)
+            if p in done:
+                continue
+            done.add(p)
+            y, x = divmod(p, w)
             if any(at(y + dy, x + dx, body) for dy, dx in _N4):
                 continue                              # it keeps a body pixel enclosed
             horiz = [at(y, x + d, mask) for d in (-1, 1)]
@@ -168,6 +281,9 @@ def _pixel_perfect(idx: np.ndarray, body: np.ndarray) -> np.ndarray:
             mask[y, x] = False
             removed[y, x] = True
             changed = True
+            for ny, nx in ((y, x + 1), (y + 1, x)):    # later pixels that see this one
+                if 0 <= ny < h and 0 <= nx < w and listed[ny, nx] and mask[ny, nx]:
+                    heapq.heappush(heap, ny * w + nx)
     idx[removed] = -1
     return removed
 

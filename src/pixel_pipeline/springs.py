@@ -742,6 +742,7 @@ def add_springs(rigged_glb, out_glb=None, *, parts="auto", stiffness: float = 0.
     radii, _ = _radii(verts0, caps)
     spring_nodes = {index[jn] for ch in chains for jn in ch.joints}
     by_name = {c.name: c for c in rig.clips}
+    jobs = []
     for a in doc.get("animations", []):
         # drop old spring channels (rebake)
         keep_ch = [ch for ch in a["channels"] if ch["target"].get("node") not in spring_nodes]
@@ -758,7 +759,11 @@ def add_springs(rigged_glb, out_glb=None, *, parts="auto", stiffness: float = 0.
         times = g0.accessor(t_acc).reshape(-1).astype(np.float64) if t_acc < len(g0.doc["accessors"]) \
             else np.linspace(clip.start, clip.end, 25)
         speed = _clip_speed(a, clip.name, sk.height)
-        keys = simulate(rig, clip, chains, caps, radii, sk.height, params, speed, times)
+        jobs.append((a, clip, t_acc, times, speed))
+    spring_names = {jn for ch in chains for jn in ch.joints}
+    all_keys = simulate_clips(src, rig, [(clip, times, speed) for _, clip, _, times, speed in jobs],
+                              chains, caps, radii, sk.height, params, spring_names)
+    for (a, clip, t_acc, times, speed), keys in zip(jobs, all_keys):
         for ch in chains:
             prot = np.array([qfrom_matrix(rig.worlds(clip, t)[index[ch.parent]][:3, :3]) for t in times])
             rots = chain_rotations(ch, keys[ch.name], prot)
@@ -772,6 +777,78 @@ def add_springs(rigged_glb, out_glb=None, *, parts="auto", stiffness: float = 0.
     tmp = out.with_name(out.name + ".tmp")
     g.save(tmp)
     tmp.replace(out)
+    return out
+
+
+_SIM_RIG: dict = {}
+
+
+def _sim_init(path: str) -> None:
+    from .anim3d import Rig
+    _SIM_RIG["rig"] = Rig(path)
+
+
+def _sim_task(job):
+    clip_name_, chains, caps, radii, H, params, speed, times = job
+    rig = _SIM_RIG["rig"]
+    clip = next(c for c in rig.clips if c.name == clip_name_)
+    return simulate(rig, clip, chains, caps, radii, H, params, speed, times)
+
+
+def _sim_key(rig, clip, chains, caps, radii, H, params, speed, times, spring_names) -> str:
+    """Everything simulate() reads for a clip: the rig's rest pose, hierarchy and skin, the
+    clip's channels (the spring joints' own left out: an earlier bake's swing never moves the
+    body they hang from), the chains, capsules and settings, and the code."""
+    import dataclasses
+
+    from . import cache
+    skip = {i for i, nm in enumerate(rig.names) if nm in spring_names}
+    body = [i for i in range(len(rig.names)) if i not in skip]       # (the springs' own
+    chans = [[c.node, c.path, c.times, c.values, c.interpolation] for c in clip.channels
+             if c.node not in skip]                                  # joints never matter)
+    code = cache.source_of(simulate, _skin_mats, _apply, _seg_dist)
+    skin = None
+    if rig.skins:
+        joints, ibm = rig.skins[0]
+        keep = [k for k, j in enumerate(joints) if int(j) not in skip]
+        skin = [np.asarray(joints)[keep], np.asarray(ibm)[keep]]
+    return cache.digest([[rig.names[i]] + list(rig.rest[i]) for i in body],
+                        [int(rig.parent[i]) for i in body], [i for i in rig.order if i not in skip],
+                        skin, chans, clip.start, clip.end,
+                        clip.loop, [[c.name, c.parent, c.points] for c in chains],
+                        [list(c) for c in caps], radii, H, dataclasses.astuple(params), speed,
+                        times, code, COS_MAX, SIN_MAX, PART_WIND, cache.code_digest("anim3d"))
+
+
+def simulate_clips(src, rig, clips, chains, caps, radii, H: float, params: Params,
+                   spring_names=()) -> list[dict]:
+    """simulate() for each (clip, times, speed): clips simulated before with the same
+    everything come from the cache (cache.py; a rebake after adding clips simulates only the
+    new ones), the rest on worker processes when there are several (the same numbers)."""
+    from . import cache, parallel
+    out: list = [None] * len(clips)
+    keys: list = [None] * len(clips)
+    if cache.enabled():
+        for i, (clip, times, speed) in enumerate(clips):
+            keys[i] = _sim_key(rig, clip, chains, caps, radii, H, params, speed, times,
+                               set(spring_names))
+            hit = cache.load("springs", keys[i])
+            if hit is not None and all(f"c{j}" in hit for j in range(len(chains))):
+                out[i] = {ch.name: hit[f"c{j}"] for j, ch in enumerate(chains)}
+    todo = [i for i in range(len(clips)) if out[i] is None]
+    jobs = [(clips[i][0].name, chains, caps, radii, H, params, clips[i][2], clips[i][1])
+            for i in todo]
+    workers = parallel.worker_count(len(jobs), per_worker_mb=300) if len(jobs) >= 3 else 1
+    if workers > 1:
+        res = parallel.run(_sim_task, jobs, init=_sim_init, init_args=(str(src),),
+                           workers=workers)
+    else:
+        res = [simulate(rig, clips[i][0], chains, caps, radii, H, params, clips[i][2],
+                        clips[i][1]) for i in todo]
+    for i, r in zip(todo, res):
+        out[i] = r
+        if keys[i] is not None:
+            cache.save("springs", keys[i], **{f"c{j}": r[ch.name] for j, ch in enumerate(chains)})
     return out
 
 

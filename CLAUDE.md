@@ -510,6 +510,44 @@ wants terse answers and fixes over polish.
   line per level), painter's order by z_index = (col+row)*8 + layer. GDScript range = path_cost
   (test compares them in Godot). Grid +col faces SE, +row SW. Verified on Godot 4.6.1 with real
   GPU screenshots (`Pictures/PixelPipeline/hd2d_iso_test/shot_*.png`, `shot.gd` makes them).
+- **GPU speed (2026-10-14, Kevin: "quality… just seeing if we can make things faster")**: rule =
+  no visible loss as a default. Measured (4070 laptop): SDXL picture ~15 s of which 25-step
+  sampling ~11 s, ComfyUI overhead ~3-5 s (LoRA patching under dynamic VRAM 1-2 s, a LoRA-stack
+  switch ~6 s, VAE enc+dec 1.4 s at 1584x792); cold ComfyUI start ~80 s (~20 s warm) = the
+  "1.3 min model load" of a drawn character, not a reload; after Hunyuan3D, SDXL reloads from disk
+  (~12 s; 16 GB RAM can't hold both). `--disable-dynamic-vram` reloads every prompt, `--highvram`
+  thrashes (28 s/it): keep the defaults. Defaults now: ComfyUI we start gets `--fast
+  fp16_accumulation` (generate.SPEED_FLAGS, -10-15% SDXL + Hunyuan; same-seed pictures
+  indistinguishable, same shape from the same picture; PIXEL_COMFY_FAST=0 off; not for training
+  flags); `warm_up()` starts ComfyUI when the app opens (PIXEL_WARM=0 off); count>1 queues all
+  prompts at once; picture cache ~/.pixel-pipeline/gen_cache (sha256 of the workflow minus
+  filename_prefix + model file size/date; uploads are content-named; only the default local
+  ComfyUI, PIXEL_GEN_CACHE=0/1, 3 GB). Opt-in only: GenOptions.draft / PIXEL_DRAFT / File ->
+  Draft pictures = SDXL-Lightning 8-step LoRA (euler, sgm_uniform, cfg 1.5; ~2.5x per picture,
+  knight 16 dirs 6.4 vs 12 min) - the A/B showed sprite sheets/noise in items/props/people, muddy
+  drawn keys, harsh portrait expressions; tiles were competitive but missed snow/water colours.
+  Rejected: 16 directions bent from 8 drawn keys (speckle, jumbled capes), candidate score
+  thresholds (later tries won 4/10 times on the knight). Sheets: Pictures/PixelPipeline/speed_ab_*.
+- **CPU speed + less waste (2026-10-14, same ask)**: outputs bit-identical to before (sheets,
+  _n, json, aseprite, rigs, springs: sha1-compared on Neo16 knight-v3 copies; tests/test_speed.py
+  pins every fast path to its plain version). Exact rewrites: pixelclean islands/spurs/
+  pixel-perfect (visit only candidates, same raster order), selout (one shade per colour),
+  downscale median (sort uint8), `_splat` (pose columns + buffers, box-sized post-process),
+  drawn bend (float64 weights once per drawing, KD tree once), uvbake pack (one summed-area
+  table per chart), LOD bakes on threads. `parallel.py`: spawned worker pool (BELOW_NORMAL,
+  1 BLAS/cv2 thread each, count = min(cpus*3/8+1, 8, (free RAM-1.5 GB)/per-worker), PIXEL_WORKERS=1
+  off; falls back in-process; gui/cli_main call freeze_support). Drawn bending = one task per
+  direction (arrays memory-mapped); 3D sheets = staged A pose stats / B splats / C convert / D
+  finish (main process 4.4 GB -> 0.55 GB; in one process only when RAM is short). `cache.py`
+  (~/.pixel-pipeline/cache, PIXEL_CACHE=off|dir, PIXEL_CACHE_MB 2048, LRU): keys = input bytes +
+  settings + source of the computing code: drawn drawing->frame (skips the cut-out model),
+  bent rows per (direction, clip), 3D converter per view, spring sims per clip, auto-rig by
+  model bytes; model_game info.json cache_key = "up to date" skip. gamemesh: fast-simplification
+  (MIT, `3d` extra, spec hidden import) agg 3, LODs chained, numpy QEM fallback; A/B (4 models):
+  closer (mean/p99 distance, normals, silhouette) at every LOD, bake colour error equal +-0.1,
+  more slivers (0.1-2.6%) - Pictures/PixelPipeline/decimate_ab.png. Knight: drawn render 121 ->
+  55 s (cold) / 14 s (warm), Add animation 133 -> 21 s; 3D render 329 -> 105 s, Add animation
+  390 -> 70 s; game model 84 -> 40 s, again 0 s.
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

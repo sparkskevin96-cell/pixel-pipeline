@@ -58,8 +58,13 @@ def qt_app():
 def _own_library(tmp_path_factory, monkeypatch):
     """Tests never touch the real Character Library."""
     monkeypatch.setenv("PIXEL_LIBRARY", str(tmp_path_factory.mktemp("library")))
+    monkeypatch.setenv("PIXEL_DRAFT", "0")       # full-quality sampling whatever the app's switch says
     monkeypatch.setenv("PIXEL_HOME", str(tmp_path_factory.mktemp("home")))
     monkeypatch.setenv("PIXEL_DRAWN", "0")       # library characters: 3D render unless asked
+    # CPU caches (cache.py) per test: a test never gets another test's results (some tests
+    # swap functions out), and the real ~/.pixel-pipeline/cache is never touched
+    monkeypatch.setenv("PIXEL_CACHE", str(tmp_path_factory.mktemp("cache")))
+    monkeypatch.setenv("PIXEL_WORKERS", "1")     # in-process (tests/test_speed.py tries workers)
 
 
 _EXIT = [0]

@@ -718,7 +718,7 @@ class AnimatedSet:
 def _render_framed(poses, frame_poses, colours, directions, elevation, size, yaw, light,
                    normals):
     """turnaround.render_points, but framed (scale, ground row) by frame_poses only."""
-    from .turnaround import _splat
+    from .turnaround import splat_views
     names = direction_names(directions)
     e = math.radians(elevation)
     ce, se = math.cos(e), math.sin(e)
@@ -731,18 +731,8 @@ def _render_framed(poses, frame_poses, colours, directions, elevation, size, yaw
     light_dir = np.array([-0.45, 0.6, 0.66])
     light_dir /= np.linalg.norm(light_dir)
     base = colours.astype(np.float32)
-    views, nviews = [], []
-    for k in range(len(names)):
-        t = math.radians(90.0 - k * 360.0 / len(names) + yaw)
-        ct, st = math.cos(t), math.sin(t)
-        row = [_splat(pts, nrm, base, ct, st, ce, se, scale, ox, oy, size, light, light_dir,
-                      normals) for pts, nrm in poses]
-        if normals:
-            views.append([r[0] for r in row])
-            nviews.append([r[1] for r in row])
-        else:
-            views.append(row)
-    return (views, nviews) if normals else views
+    return splat_views(poses, base, len(names), ce, se, scale, ox, oy, size, yaw, light,
+                       light_dir, normals)
 
 
 def _crop_box(views, margin, threshold):
@@ -762,7 +752,8 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
                         size: int | None = None, points: int | None = None,
                         seed: int = 0, colours_from=None,
                         normals: bool = False, clean: bool | dict = False,
-                        frame_with: list[str] | None = None) -> tuple[AnimatedSet, str]:
+                        frame_with: list[str] | None = None,
+                        workers: int | None = None) -> tuple[AnimatedSet, str]:
     """Rigged + animated glTF file(s) -> AnimatedSet and a description of what was read.
     colours_from: the original coloured model, when rigging (Mixamo) dropped its colours.
     normals: also give every sprite a normal map (sprite.normal, see normals.py).
@@ -770,7 +761,9 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
     pixel-perfect outline); a dict = clean_sprites options (e.g. {"palette": "pico8"}).
     frame_with: clip names that alone set the scale, crop and palette (None = all clips).
     Adding clips to a character with frame_with=<its old clips> leaves the old clips'
-    sprites exactly as they were; a new clip that reaches further out is cut at the frame."""
+    sprites exactly as they were; a new clip that reaches further out is cut at the frame.
+    workers: processes to spread the work over (parallel.py; None = as many as the PC has room
+    for, 1 = this process only); the sprites are the same either way."""
     rig = load_rig(paths)
     clips = select_clips(rig, animations)
     names = direction_names(directions)
@@ -781,7 +774,45 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
         if missing:
             raise ValueError(f"frame_with: no animation {', '.join(missing)}")
         keep = [i for i, c in enumerate(clips) if c.name in frame_with]
-    poses, colours = animated_poses(rig, clips, frames, points or 6 * size * size, seed, in_place,
+    npts = points or 6 * size * size
+    staged = False
+    if workers is None:                 # big jobs only: starting workers takes a few seconds
+        from .parallel import free_ram_mb, worker_count
+        n_views = len(clips) * frames * len(names)
+        big = n_views >= 192 and npts >= 200_000
+        workers = worker_count(len(clips) * frames, per_worker_mb=150 + npts * 2.8e-4) if big else 1
+        # in one process every pose and view is held at once (~4 GB for 6 clips x 16
+        # directions); when that doesn't fit in free RAM, go stage by stage here instead
+        here_mb = (len(clips) * frames * npts * 24 + n_views * size * size * 8) / 2 ** 20
+        staged = big and workers <= 1 and here_mb > free_ram_mb() * 0.8
+    if workers > 1 or staged:
+        sprites = _staged_turnaround(rig, paths, animations, clips, settings, names, frames,
+                                     elevation=elevation, yaw=yaw, light=light,
+                                     in_place=in_place, size=size, npts=npts, seed=seed,
+                                     colours_from=colours_from, normals=normals, clean=clean,
+                                     keep=keep, frame_with=frame_with, workers=workers)
+    else:
+        sprites = _turnaround_here(rig, clips, settings, names, frames, elevation=elevation,
+                                   yaw=yaw, light=light, in_place=in_place, size=size,
+                                   npts=npts, seed=seed, colours_from=colours_from,
+                                   normals=normals, clean=clean, keep=keep,
+                                   frame_with=frame_with)
+    per = len(names) * frames
+    nested = [[sprites[a * per + d * frames: a * per + (d + 1) * frames] for d in range(len(names))]
+              for a in range(len(clips))]
+    actions = [Action(c.name, c.loop, max(16, int(round(1000 * c.duration
+                                                         / max(1, frames if c.loop else frames - 1)))))
+               for c in clips]
+    what = (f"{Path(paths[0]).name}: {', '.join(c.name for c in clips)} "
+            f"({frames} frames each) rendered at {elevation:g} degrees")
+    return AnimatedSet(actions, names, nested), what
+
+
+def _turnaround_here(rig, clips, settings, names, frames, *, elevation, yaw, light, in_place,
+                     size, npts, seed, colours_from, normals, clean, keep, frame_with):
+    """animated_turnaround's sprites (sheet order) made in this process."""
+    directions = len(names)
+    poses, colours = animated_poses(rig, clips, frames, npts, seed, in_place,
                                     colours_from, ground_from=keep if frame_with else None)
     flat = [p for row in poses for p in row]
     if frame_with:
@@ -808,26 +839,264 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
     else:
         cropped = union_crop(cropped, settings.margin, settings.alpha_threshold)
     del views
-    if frame_with:
-        sprites = _sprites_palette_from(cropped, settings, nviews,
-                                        [i // frames in keep for _, i in order])
-    else:
-        sprites = turnaround_sprites(cropped, settings, nviews)
-    if clean:
-        from .pixelclean import clean_sprites, outline_style
-        opts = dict(clean) if isinstance(clean, dict) else {}
-        if settings.dither != "none":
-            opts.setdefault("islands", 0)          # dither patterns are meant to be "noisy"
-        sprites = clean_sprites(sprites, opts.pop("outline", outline_style(settings)), **opts)
-    per = len(names) * frames
-    nested = [[sprites[a * per + d * frames: a * per + (d + 1) * frames] for d in range(len(names))]
-              for a in range(len(clips))]
-    actions = [Action(c.name, c.loop, max(16, int(round(1000 * c.duration
-                                                         / max(1, frames if c.loop else frames - 1)))))
-               for c in clips]
-    what = (f"{Path(paths[0]).name}: {', '.join(c.name for c in clips)} "
-            f"({frames} frames each) rendered at {elevation:g} degrees")
-    return AnimatedSet(actions, names, nested), what
+    use = [i // frames in keep for _, i in order] if frame_with else [True] * len(order)
+    return _sprites_from_views(cropped, nviews if normals else None, settings, use, clean)
+
+
+PREP_CODE = ("pipeline", "pixelize", "color", "settings", "systems", "normals")
+
+
+def _prep_cached(view: np.ndarray, nview, s: Settings):
+    """(pipeline.prepare(view, s), normals.normal_blocks(nview, s) or None), remembered by the
+    views' content (cache.py): a clip rendered again exactly as before (adding animations,
+    exporting again) skips the converter, the slowest step of a 3D sheet."""
+    from . import cache
+    from .normals import normal_blocks
+    from .pipeline import Prepared, prepare
+    key = None
+    if cache.enabled():
+        key = cache.digest(view, nview, s.to_dict(), cache.code_digest(*PREP_CODE))
+        hit = cache.load("prep3d", key)
+        if hit is not None:
+            nb = (hit["vec"], hit["have"]) if "vec" in hit else None
+            return Prepared(hit["rgb"], hit["mask"]), nb
+    prep = prepare(view, s)
+    nb = normal_blocks(nview, s) if nview is not None else None
+    if key is not None:
+        extra = {"vec": nb[0], "have": nb[1]} if nb is not None else {}
+        cache.save("prep3d", key, rgb=prep.rgb, mask=prep.mask, **extra)
+    return prep, nb
+
+
+def _clean_options(settings: Settings, clean):
+    """(outline, options) for pixelclean.clean_sprites, as animated_turnaround cleans."""
+    from .pixelclean import outline_style
+    opts = dict(clean) if isinstance(clean, dict) else {}
+    if settings.dither != "none":
+        opts.setdefault("islands", 0)          # dither patterns are meant to be "noisy"
+    return opts.pop("outline", outline_style(settings)), opts
+
+
+def _finish_all(items, s: Settings, palette, clean):
+    """Prepared views (+ normal blocks) -> finished, normal-mapped, cleaned sprites."""
+    from .normals import normal_from_blocks
+    from .pipeline import finish
+    sprites = []
+    for prep, nb in items:
+        sp = finish(prep, s, palette)
+        if nb is not None:
+            sp.normal = normal_from_blocks(nb[0], nb[1], sp)
+        sprites.append(sp)
+    if clean is not None:
+        from .pixelclean import clean_sprites
+        sprites = clean_sprites(sprites, clean[0], **clean[1])
+    return sprites
+
+
+def _sprites_from_views(views, nviews, settings: Settings, use, clean):
+    """Framed, cropped views -> sprites on one palette (made from the views marked `use`),
+    with normal maps and clean-up: turnaround_sprites / _sprites_palette_from + clean_sprites,
+    the converter step remembered per view."""
+    from .pipeline import _map, resolve_palette
+    s = Settings(**{**settings.to_dict(), "crop_to_subject": False})
+    prepared = _map(lambda i: _prep_cached(views[i], None if nviews is None else nviews[i], s),
+                    list(range(len(views))))
+    chosen = [p for (p, _), u in zip(prepared, use) if u] or [p for p, _ in prepared]
+    pixels = np.concatenate([p.rgb[p.mask] if p.mask.any() else p.rgb.reshape(-1, 3)
+                             for p in chosen])
+    palette = resolve_palette(s, pixels)
+    cl = _clean_options(settings, clean) if clean else None
+    return _finish_all(prepared, s, palette, cl)
+
+
+# --------------------------------------------------------------------------- on worker processes
+# animated_turnaround's work split into stages that run on worker processes (parallel.py),
+# each piece computed by the same operations as the one-process path, so the sprites come
+# out bit for bit the same:
+#   A  every pose (one per task): its height range and radius (-> ground, scale, framing)
+#   B  every pose again: grounded, splatted from every direction; each view's crop box and
+#      the view itself (its own box, compressed)
+#   C  views (in chunks): cropped to the shared box, prepared (pixelized) + normal blocks
+#   D  the same chunks: finished on the shared palette, normal maps, pixel clean-up
+# Poses are made again in each stage that needs them instead of being kept (49 poses of a
+# million points would hold ~1 GB); a worker keeps only the rig and its surface points.
+
+_STAGE: dict = {}
+STAGE_SECONDS: dict = {}            # the last worker run's time per stage (for reports)
+
+
+def _stage_init(paths, animations, npts, seed, base) -> None:
+    rig = load_rig(paths)
+    _STAGE.update(rig=rig, clips=select_clips(rig, animations),
+                  surface=sample_surface(rig, npts, seed), base=base)
+
+
+def _stage_pose(a: int, t: float, centre, drift):
+    """animated_poses' pose a at time t, before the ground is taken off."""
+    rig, clip, surface = _STAGE["rig"], _STAGE["clips"][a], _STAGE["surface"]
+    pts, nrm = surface_pose(rig, surface, rig.worlds(clip, t))
+    return ((pts - centre - drift * (t - clip.start)).astype(np.float32),
+            nrm.astype(np.float32))
+
+
+def _stage_stats(job):
+    a, t, centre, drift = job
+    p, _ = _stage_pose(a, t, centre, drift)
+    return (float(p[:, 1].min()), float(p[:, 1].max()),
+            float(np.sqrt(p[:, 0] ** 2 + p[:, 2] ** 2).max()))
+
+
+def _stage_views(job):
+    """Stage B for one pose -> per direction (threshold box or None, (y0, x0, h, w, colour
+    bytes, normal bytes) of the view's own box, compressed; None when empty)."""
+    import zlib
+
+    from .turnaround import splat_views
+    a, t, centre, drift, ground, r = job
+    p, n = _stage_pose(a, t, centre, drift)
+    p = p - np.float32([0.0, ground, 0.0])
+    out = splat_views([(p, n)], _STAGE["base"], r["directions"], r["ce"], r["se"], r["scale"],
+                      r["ox"], r["oy"], r["size"], r["yaw"], r["light"], r["light_dir"],
+                      r["normals"])
+    views, nviews = out if r["normals"] else (out, None)
+    res = []
+    for k in range(r["directions"]):
+        v = views[k][0]
+        m = v[..., 3] >= r["threshold"]
+        ys, xs = np.nonzero(m)
+        thr = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())) if len(xs) else None
+        ys, xs = np.nonzero(v[..., 3] > 0)
+        if not len(xs):
+            res.append((thr, None))
+            continue
+        y0, y1, x0, x1 = int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
+        c = zlib.compress(np.ascontiguousarray(v[y0:y1, x0:x1]).tobytes(), 1)
+        nb = None
+        if nviews is not None:
+            nb = zlib.compress(np.ascontiguousarray(nviews[k][0][y0:y1, x0:x1]).tobytes(), 1)
+        res.append((thr, (y0, x0, y1 - y0, x1 - x0, c, nb)))
+    return res
+
+
+def _stage_unpack(item, size: int, normal: bool) -> np.ndarray:
+    """A stage-B view back on its whole canvas: empty colour pixels are 0, empty normal
+    pixels (128, 128, 128, 0), exactly what _splat leaves there."""
+    import zlib
+    out = np.zeros((size, size, 4), np.uint8)
+    if normal:
+        out[..., :3] = 128
+    if item is not None:
+        y0, x0, h, w, c, nb = item
+        data = nb if normal else c
+        out[y0:y0 + h, x0:x0 + w] = np.frombuffer(zlib.decompress(data), np.uint8).reshape(h, w, 4)
+    return out
+
+
+def _stage_prepare(job):
+    """Stage C: views cropped to the shared box -> (Prepared, normal blocks or None)."""
+    from .video import _crop_pad
+    items, box, size, normals, s = job
+    return [_prep_cached(_crop_pad(_stage_unpack(item, size, False), *box),
+                         _crop_pad(_stage_unpack(item, size, True), *box) if normals else None, s)
+            for item in items]
+
+
+def _stage_finish(job):
+    """Stage D: finished on the shared palette, normal maps, clean-up (clean_sprites' way)."""
+    items, s, palette, clean = job
+    return _finish_all(items, s, palette, clean)
+
+
+def _staged_turnaround(rig, paths, animations, clips, settings, names, frames, *, elevation,
+                       yaw, light, in_place, size, npts, seed, colours_from, normals, clean,
+                       keep, frame_with, workers):
+    """animated_turnaround's work on `workers` processes (see the stages above)."""
+    from . import parallel
+    surface = sample_surface(rig, npts, seed)
+    rest_pts, _ = surface_pose(rig, surface, rig.worlds())
+    if colours_from is not None:
+        from .turnaround import load_model_points
+        src, src_cols, _ = load_model_points(colours_from, max(200_000, npts // 2), seed=seed)
+        surface.colours = transfer_colours(rest_pts, src, src_cols)
+    lo, hi = rest_pts.min(0), rest_pts.max(0)
+    centre = np.array([(lo[0] + hi[0]) / 2, 0.0, (lo[2] + hi[2]) / 2])
+    del rest_pts
+    jobs = []                                        # (clip, time, centre, drift) per pose
+    for a, clip in enumerate(clips):
+        drift = np.zeros(3)
+        if in_place and clip.duration > 0:
+            moved = rig.centroid(clip, clip.end) - rig.centroid(clip, clip.start)
+            drift = moved * np.array([1.0, 0.0, 1.0]) / clip.duration
+        jobs += [(a, t, centre, drift) for t in clip_times(clip, frames)]
+    base = surface.colours.astype(np.float32)
+    del surface
+    import time
+    secs = STAGE_SECONDS
+    secs.clear()
+    t0 = time.time()
+    pool = parallel.Pool(workers, init=_stage_init,
+                         init_args=(list(paths), animations, npts, seed, base))
+    secs["workers"] = pool.workers
+    try:
+        stats = pool.map(_stage_stats, jobs)
+        secs["A poses"], t0 = time.time() - t0, time.time()
+        framing = [i for i, j in enumerate(jobs) if j[0] in keep] if frame_with else None
+        rows = framing if framing is not None else range(len(jobs))
+        ground = min(stats[i][0] for i in rows)
+        g32 = np.float32(ground)
+        radius = max(stats[i][2] for i in rows)
+        e = math.radians(elevation)
+        ce, se = math.cos(e), math.sin(e)
+        top = max(float(np.float32(stats[i][1]) - g32) for i in rows) * ce + radius * se
+        bottom = min(float(np.float32(stats[i][0]) - g32) for i in rows) * ce - radius * se
+        scale = size * 0.94 / max(2 * radius, top - bottom, 1e-9)
+        oy = (size - (top - bottom) * scale) / 2 + top * scale
+        light_dir = np.array([-0.45, 0.6, 0.66])
+        light_dir /= np.linalg.norm(light_dir)
+        r = dict(directions=len(names), ce=ce, se=se, scale=scale, ox=size / 2, oy=oy,
+                 size=size, yaw=yaw, light=light, light_dir=light_dir, normals=normals,
+                 threshold=settings.alpha_threshold)
+        packed = pool.map(_stage_views, [j + (ground, r) for j in jobs])   # [pose][dir]
+        secs["B views"], t0 = time.time() - t0, time.time()
+        secs["B MB"] = round(sum(len(x[1][4]) + len(x[1][5] or b"") for row in packed
+                                 for x in row if x[1] is not None) / 2 ** 20, 1)
+        # sheet order: clip, direction, frame
+        order = [(d, a * frames + f) for a in range(len(clips)) for d in range(len(names))
+                 for f in range(frames)]
+        use = [i // frames in keep for _, i in order] if frame_with else [True] * len(order)
+        boxes = [packed[i][d][0] for (d, i), u in zip(order, use) if u]
+        boxes = [b for b in boxes if b is not None]
+        if boxes:
+            x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+            x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+            m = int(round(max(x1 - x0, y1 - y0) * settings.margin))
+            box = (x0 - m, y0 - m, x1 + 1 + m, y1 + 1 + m)
+        else:
+            box = (0, 0, size, size)
+        s = Settings(**{**settings.to_dict(), "crop_to_subject": False})
+        items = [packed[i][d][1] for d, i in order]
+        del packed
+        step = max(1, frames)
+        chunks = [items[i:i + step] for i in range(0, len(items), step)]
+        prepared = [x for part in pool.map(_stage_prepare, [(c, box, size, normals, s)
+                                                            for c in chunks]) for x in part]
+        del items, chunks
+        secs["C prepare"], t0 = time.time() - t0, time.time()
+        from .pipeline import resolve_palette
+        chosen = [p for (p, _), u in zip(prepared, use) if u] or [p for p, _ in prepared]
+        pixels = np.concatenate([p.rgb[p.mask] if p.mask.any() else p.rgb.reshape(-1, 3)
+                                 for p in chosen])
+        palette = resolve_palette(s, pixels)
+        cl = _clean_options(settings, clean) if clean else None
+        secs["palette"], t0 = time.time() - t0, time.time()
+        parts = [prepared[i:i + step] for i in range(0, len(prepared), step)]
+        sprites = [sp for part in pool.map(_stage_finish, [(c, s, palette, cl) for c in parts])
+                   for sp in part]
+        secs["D finish"] = time.time() - t0
+    finally:
+        pool.close()
+        _STAGE.clear()                  # when it ran here: drop the rig and surface points
+    return sprites
 
 
 # --------------------------------------------------------------------------- files

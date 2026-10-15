@@ -52,17 +52,26 @@ def selout_colors(idx: np.ndarray, ring: np.ndarray, palette: np.ndarray,
     nb = _neighbors(idx, _N4)
     out = np.full(idx.shape, -1, np.int16)
     darkest = int(np.argmin(lab[:, 0]))
-    for y, x in zip(*np.nonzero(ring)):
-        vals = nb[y, x][nb[y, x] >= 0]
-        if not len(vals):
-            out[y, x] = darkest
-            continue
-        src = lab[np.bincount(vals).argmax()]
+    ys, xs = np.nonzero(ring)
+    if not len(ys):
+        return out
+    # the most common 4-neighbour colour of every ring pixel (ties: the lowest index, as
+    # bincount().argmax() picks), then one shade per distinct colour
+    v = nb[ys, xs].astype(np.int64)                                     # (n, 4)
+    ok = v >= 0
+    count = ((v[:, :, None] == v[:, None, :]) & ok[:, None, :]).sum(-1)
+    key = np.where(ok, count * (1 << 32) - v, np.iinfo(np.int64).min)
+    src_i = v[np.arange(len(v)), key.argmax(1)]
+    shade: dict[int, int] = {}
+    for s_i in np.unique(src_i[ok.any(1)]).tolist():
+        src = lab[s_i]
         target = np.array([src[0] * darken, src[1] * 0.85, src[2] * 0.85])
         darker = np.nonzero(lab[:, 0] < src[0] - 4)[0]
         if not len(darker):
-            out[y, x] = darkest
+            shade[s_i] = darkest
             continue
         d = ((lab[darker] - target) ** 2).sum(1)
-        out[y, x] = darker[d.argmin()]
+        shade[s_i] = int(darker[d.argmin()])
+    out[ys, xs] = [shade[int(s_i)] if any_ else darkest
+                   for s_i, any_ in zip(src_i.tolist(), ok.any(1).tolist())]
     return out

@@ -740,3 +740,70 @@ def test_template_preview_image_output(comfy, tmp_path):
     path.write_text(json.dumps(wf))
     (_, raw, _), = generate_sprite("a key", settings_for("object"), client=client, template=str(path))
     assert raw.size == (512, 512)
+
+
+# --------------------------------------------------------------------------- speed (2026-10-14)
+
+def test_draft_mode_uses_lightning(comfy, monkeypatch):
+    from pixel_pipeline.generate import DEFAULT_LIGHTNING_LORA
+    fake, client = comfy
+    fake.models["loras"].append(DEFAULT_LIGHTNING_LORA)
+    monkeypatch.setenv("PIXEL_DRAFT", "1")             # the app-wide switch
+    generate_images("a fox", "", client=client, seed=1, aspect=1.0, style_lora="")
+    wf = fake.prompts[-1]
+    k = ksampler(wf)
+    assert (k["steps"], k["cfg"], k["sampler_name"], k["scheduler"]) == (8, 1.5, "euler", "sgm_uniform")
+    names = [n["inputs"]["lora_name"] for _, n in by_class(wf, "LoraLoader")]
+    assert names == [DEFAULT_LORA, DEFAULT_LIGHTNING_LORA]          # pixel LoRA, then Lightning
+    assert not by_class(wf, "ModelSamplingDiscrete")
+    assert wf[k["model"][0]]["inputs"]["lora_name"] == DEFAULT_LIGHTNING_LORA
+    # an explicit draft=False wins over the switch; the default is today's 25 steps
+    generate_images("a fox", "", client=client, seed=1, aspect=1.0, style_lora="", draft=False)
+    assert ksampler(fake.prompts[-1])["steps"] == 25
+    monkeypatch.setenv("PIXEL_DRAFT", "0")
+    generate_images("a fox", "", client=client, seed=2, aspect=1.0, style_lora="")
+    assert ksampler(fake.prompts[-1])["steps"] == 25
+
+
+def test_picture_cache_and_queue_ahead(comfy, monkeypatch, tmp_path):
+    fake, client = comfy
+    monkeypatch.setenv("PIXEL_GEN_CACHE", "1")
+    monkeypatch.setenv("PIXEL_GEN_CACHE_DIR", str(tmp_path / "cache"))
+    first = generate_images("a fox", "", client=client, seed=5, count=3, aspect=1.0, style_lora="")
+    assert len(fake.prompts) == 3                        # all three queued
+    again = generate_images("a fox", "", client=client, seed=5, count=3, aspect=1.0, style_lora="",
+                            filename_prefix="other")    # output names don't matter
+    assert len(fake.prompts) == 3                        # nothing new queued: cached
+    assert [s for _, s in again] == [s for _, s in first]
+    assert all(np.array_equal(np.asarray(a), np.asarray(b)) for (a, _), (b, _) in zip(first, again))
+    generate_images("a fox", "", client=client, seed=9, count=1, aspect=1.0, style_lora="")
+    assert len(fake.prompts) == 4                        # a new seed is drawn
+    monkeypatch.setenv("PIXEL_GEN_CACHE", "0")
+    generate_images("a fox", "", client=client, seed=5, count=1, aspect=1.0, style_lora="")
+    assert len(fake.prompts) == 5                        # off: always drawn
+    monkeypatch.delenv("PIXEL_GEN_CACHE")
+    generate_images("a fox", "", client=client, seed=5, count=1, aspect=1.0, style_lora="")
+    assert len(fake.prompts) == 6                        # default: off for a non-default address
+
+
+def test_started_comfyui_gets_speed_flags_but_not_for_training(tmp_path, monkeypatch):
+    import subprocess
+    import pixel_pipeline.generate as g
+    seen = []
+
+    class FakeProc:
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(g, "COMFYUI_LOG", tmp_path / "comfyui.log")
+    monkeypatch.setattr(g, "comfyui_command", lambda folder: ["python", "main.py"])
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: seen.append(cmd) or FakeProc())
+    monkeypatch.delenv("PIXEL_COMFY_FAST", raising=False)
+    g.start_comfyui(tmp_path)
+    g.start_comfyui(tmp_path, ("--disable-dynamic-vram",))
+    monkeypatch.setenv("PIXEL_COMFY_FAST", "0")
+    g.start_comfyui(tmp_path)
+    g._started.clear()
+    assert seen[0] == ["python", "main.py", "--fast", "fp16_accumulation"]
+    assert seen[1] == ["python", "main.py", "--disable-dynamic-vram"]
+    assert seen[2] == ["python", "main.py"]

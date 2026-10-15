@@ -73,6 +73,8 @@ def update_test(zip_path: str) -> int:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()   # worker processes (parallel.py) start this exe too
     seconds = os.environ.get("PIXEL_PIPELINE_SMOKE_TEST")
     update_zip = os.environ.get("PIXEL_PIPELINE_UPDATE_TEST")
     sys.exit(update_test(update_zip) if update_zip else

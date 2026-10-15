@@ -545,6 +545,16 @@ def make_game_model(model, out_dir=None, *, kind: str = "character", name: str |
     out = Path(out_dir) if out_dir else model.parent / FOLDER
     out.mkdir(parents=True, exist_ok=True)
     name = name or model.parent.name
+    from . import cache
+    key = cache.digest(model, kind, name, budget, look, texture, normal_map, symmetry,
+                       None if palette is None else (np.asarray(palette) if not isinstance(
+                           palette, (str, Path)) else str(palette)),
+                       colours, voxels, lods, unity, gm.fast_available(),
+                       cache.code_digest("gamemesh", "uvbake", "gamemodel", "render3d", "anim3d"))
+    done = _unchanged(out, key)
+    if done is not None:                  # same model, same options, same code: nothing to do
+        say("The game model is up to date (same model and options).")
+        return done
     times = {}
     t0 = time.perf_counter()
     say("Reading the model…")
@@ -563,13 +573,14 @@ def make_game_model(model, out_dir=None, *, kind: str = "character", name: str |
     say("Baking textures…")
     surface = gm.Surface(src.v, src.f)
     high_surface = gm.Surface(meshes.high.v, meshes.high.f)
-    out_lods = []
-    for i, low in enumerate(meshes.lods):
-        size = max(64, texture >> i)
-        lod = make_lod(i, low, src, surface, high_surface if normal_map and i < 2 else None,
-                       size=size, look=look, normal_map=normal_map and i < 2, palette=palette,
-                       colours=colours)
-        out_lods.append(lod)
+    def one(i):
+        return make_lod(i, meshes.lods[i], src, surface,
+                        high_surface if normal_map and i < 2 else None,
+                        size=max(64, texture >> i), look=look, normal_map=normal_map and i < 2,
+                        palette=palette, colours=colours)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max(1, len(meshes.lods))) as ex:   # LODs side by side (the same
+        out_lods = list(ex.map(one, range(len(meshes.lods))))  # bakes, ~25% sooner)
     times["bake"] = time.perf_counter() - t
     t = time.perf_counter()
     say("Writing files…")
@@ -603,10 +614,25 @@ def make_game_model(model, out_dir=None, *, kind: str = "character", name: str |
             "bones": len(src.doc["skins"][0]["joints"]) if src.skinned else 0,
             "symmetrized": round(meshes.symmetric, 3), "notes": meshes.notes,
             "timings": {k: round(v, 2) for k, v in times.items()}, "created": time.time()}
+    info["cache_key"] = key
+    info["files"] = sorted({f.name for f in files} | {"info.json"})
     (out / "info.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
     files.append(out / "info.json")
     log.info("game model %s: %s in %.0fs", name, [l.tris for l in out_lods], times["total"])
     return GameModel(out, out_lods, info, files)
+
+
+def _unchanged(out: Path, key: str) -> "GameModel | None":
+    """The model_game in `out` when it was built from exactly these inputs (cache key in its
+    info.json) and every file it wrote is still there."""
+    try:
+        info = json.loads((out / "info.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    names = info.get("files") or []
+    if info.get("cache_key") != key or not names or not all((out / n).exists() for n in names):
+        return None
+    return GameModel(out, [], info, [out / n for n in names])
 
 
 # --------------------------------------------------------------------------- library assets
