@@ -1,4 +1,4 @@
-"""One GPU job at a time across processes/agents: `with gpu_lock("what"):` waits for C:\AI\gpu.lock.
+r"""One GPU job at a time across processes/agents: `with gpu_lock("what"):` waits for C:\AI\gpu.lock.
 Stale locks (owner pid gone, or older than 2 h) are taken over."""
 import json
 import os
