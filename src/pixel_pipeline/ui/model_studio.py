@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from ..settings import settings_for
 from ..turnaround import (direction_names, render_model, turnaround_sprites, union_crop,
                           write_preview, write_turnaround)
+from ..progress import Stage, character_plan, model_plan, wrap
 from .common import checkerboard, to_pixmap
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp)"
@@ -340,6 +341,9 @@ class ModelStudio(QMainWindow):
         lay.addLayout(top)
         lay.addWidget(self.paint_box)
         lay.addWidget(self.stack, 1)
+        from .common import ProgressPanel
+        self.progress_panel = ProgressPanel()     # bars + about how long is left + Stop
+        lay.addWidget(self.progress_panel)
         lay.addLayout(keep)
         lay.addWidget(self.more)
         split = QSplitter()
@@ -479,7 +483,8 @@ class ModelStudio(QMainWindow):
                 from ..library import add_mocap
                 return add_mocap(ch, [name[len(MOCAP):]], progress=say)
             return add_character_animations(ch, [name], progress=say)
-        self._run(job, self.open_character)
+        self._run(job, self.open_character, f"Adding {name} to {ch.name}…", estimate=90,
+                  title=f"Adding {name}")
 
     def add_to_library(self):
         """Rig + animate + render the current model at the library scale, then keep it."""
@@ -509,7 +514,10 @@ class ModelStudio(QMainWindow):
             self.library_changed.emit()
             self.open_character(ch)
             self.show_notice(ch)
-        self._run(job, done)
+        n = self._library_directions()
+        plan = character_plan(model=False, drawn=drawn, preview=preview, directions=n)
+        self._run(job, done, f"Adding {name} to the library…", plan=plan,
+                  title=f"Adding {name}" + (" (front first)" if preview else ""))
 
     # ---- the front drawing, for the OK ------------------------------------------
     def show_review(self, ch):
@@ -620,7 +628,10 @@ class ModelStudio(QMainWindow):
 
         def job(say):
             return finish_drawing(ch, progress=say, cancel=cancel)
-        self._run(job, self.open_character)
+        self._run(job, self.open_character, f"Finishing {ch.name}'s drawings…",
+                  plan=character_plan(model=False, drawn=True, approve=True,
+                                      directions=_drawn_directions(ch)),
+                  title=f"Finishing {ch.name}")
 
     def redraw_direction(self, ch, directions=None):
         """Draw a drawn library character's direction(s) again with new seeds (None = all) and
@@ -631,36 +642,55 @@ class ModelStudio(QMainWindow):
 
         def job(say):
             return redraw(ch, directions, progress=say, cancel=cancel)
-        self._run(job, self.open_character)
+        n = len(directions) if directions else _drawn_directions(ch)
+        self._run(job, self.open_character, f"Redrawing {ch.name}…",
+                  plan=character_plan(model=False, drawn=True, approve=True, directions=n + 1)
+                  if directions else character_plan(model=False, drawn=True, directions=n),
+                  title=f"Redrawing {ch.name}")
 
     # ---- jobs -----------------------------------------------------------------
-    def _run(self, job, on_done):
-        """Run job(progress) off the UI thread; on_done(result) back on it."""
-        self._busy(True)
+    def _run(self, job, on_done, what: str = "", *, plan=None, estimate=None, title: str = ""):
+        """Run job(progress) off the UI thread; on_done(result) back on it. progress is a
+        progress.Tracker (text like before, (step, text), (done, total)); the progress panel
+        under the pictures shows the bars, about how long is left and Stop. plan: the job's
+        progress.Stage list; estimate: seconds."""
+        from .common import JobRunner
+        if what:
+            self.statusBar().showMessage(what)
+        runner = JobRunner(self, self.progress_panel, self.statusBar().showMessage, self._failed,
+                           self._stopped)
+        self._runner = runner
+        title = title or (what.rstrip("…. ") if what else "") or "Working"
         if self.sync:
+            self._busy(True)
             try:
-                on_done(job(self.statusBar().showMessage))
+                runner.start(job, on_done, sync=True, plan=plan, estimate=estimate, title=title,
+                             on_stop=self.stop)
             except Exception as e:  # noqa: BLE001
                 self._failed(str(e))
             finally:
                 self._busy(False)
             return
-        thread, worker = QThread(self), _Worker(job)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(self.statusBar().showMessage)
-        worker.done.connect(on_done)
-        worker.failed.connect(self._failed)
-        for sig in (worker.done, worker.failed):
-            sig.connect(thread.quit)
-        thread.finished.connect(lambda: self._busy(False))
-        thread.finished.connect(worker.deleteLater)
-        self._thread, self._worker = thread, worker
-        thread.start()
+        self._busy(True)
+        runner.busy = None
+        runner.start(job, on_done, plan=plan, estimate=estimate, title=title, on_stop=self.stop)
+        runner.thread.finished.connect(lambda: self._busy(False))
+        self._thread, self._worker = runner.thread, runner.worker
+
+    def _stopped(self, message: str):
+        first = (message or "Stopped").splitlines()[0]
+        self._failed(first if first.startswith("Stopped") else "Stopped: " + first)
+
+    def _library_directions(self) -> int:
+        try:
+            from ..library import style
+            return int(style().directions or 16)
+        except Exception:  # noqa: BLE001 - no project: the library default
+            return 16
 
     def _busy(self, busy: bool):
         if hasattr(self, "stop_btn"):
-            self.stop_btn.setVisible(busy and self._cancel is not None)
+            self.stop_btn.setVisible(False)          # the progress panel's Stop does it
             if not busy:
                 self._cancel = None
         self.make_btn.setEnabled(not busy)
@@ -707,10 +737,19 @@ class ModelStudio(QMainWindow):
         def job(say):
             res = prompt_to_model(prompt, out, subject=subject, picture=picture, shape=shape,
                                   client=self.client, seed=seed,
-                                  progress=lambda step, text: say(text), **paint)
+                                  progress=wrap(say), **paint)
             say("Rendering the model from every side…")
             return res, *self._sprite_job_body(res.model, say)
         return job
+
+    def _model_plan(self, picture: bool = False) -> list:
+        """Stages of words/picture -> model -> sprites (for the progress bars)."""
+        plan = model_plan(views=self.views.currentText() != "front")
+        if picture:
+            plan = [s for s in plan if s.key != "picture"]
+        n = int(self.directions.currentText())
+        return plan + [Stage("sprites", f"Sprites from {n} directions", 0.3 + 0.5 * self.animate.isChecked(),
+                             r"rendering the model|playing \d+ animations|skeleton")]
 
     def _sprite_job_body(self, model: Path, say=lambda text: None):
         n = int(self.directions.currentText())
@@ -825,7 +864,8 @@ class ModelStudio(QMainWindow):
         path = self.work / "picture.edited.png"
         Image.fromarray(rgba).save(path)
         self._run(self._model_job(prompt=self.prompt.text().strip() or None, picture=path),
-                  self._show)
+                  self._show, "Building the model from the picture…",
+                  plan=self._model_plan(picture=True), title="Model from a picture")
         return True
 
     def make(self):
@@ -834,7 +874,8 @@ class ModelStudio(QMainWindow):
         if not prompt:
             self.statusBar().showMessage("Type what you want first.")
             return
-        self._run(self._model_job(prompt=prompt), self._show)
+        self._run(self._model_job(prompt=prompt), self._show, f"Making “{prompt}”…",
+                  plan=self._model_plan(), title=f"Making “{prompt[:40]}”")
 
     def from_picture(self, path: str | None = None, edit: bool = True):
         """A photo or drawing -> cut out -> clean up (rub out a leash…) -> model."""
@@ -845,7 +886,8 @@ class ModelStudio(QMainWindow):
         self.character = None
         if not edit:
             self._run(self._model_job(prompt=self.prompt.text().strip() or None, picture=path),
-                      self._show)
+                      self._show, "Building the model from the picture…",
+                      plan=self._model_plan(picture=True), title="Model from a picture")
             return
         from ..model3d import cut_out
 

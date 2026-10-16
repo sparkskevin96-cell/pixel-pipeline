@@ -747,12 +747,14 @@ def restyle(project: Project | None = None, kinds=("character", "item", "prop"),
     are drawn again in the new style on the GPU: library.redraw), items (icons
     from the saved pictures + world sprite), props (3D: render_prop; drawn: the chosen drawing
     re-converted). Returns what was done / skipped, one line each."""
-    say = progress or (lambda t: None)
+    from .progress import Stopped, Tracker
+    top = progress or (lambda t: None)
     proj = project or current_project()
     done = []
-    for a in list_assets(project=proj):
-        if a.kind not in kinds or not _restyle_how(a):
-            continue
+    todo = [a for a in list_assets(project=proj) if a.kind in kinds and _restyle_how(a)]
+    for k, a in enumerate(todo):
+        # progress bars: asset k of N, each asset's own steps on the second bar
+        say = top.child(k, len(todo), title=a.name) if isinstance(top, Tracker) else top
         try:
             if a.kind == "character":
                 from . import library
@@ -784,6 +786,8 @@ def restyle(project: Project | None = None, kinds=("character", "item", "prop"),
                 else:
                     objects.render_prop(prop, project=proj)
             done.append(f"{a.name}: restyled")
+        except Stopped:
+            raise
         except Exception as e:  # noqa: BLE001 - one bad asset mustn't stop the rest
             done.append(f"{a.name}: failed ({e})")
     return done

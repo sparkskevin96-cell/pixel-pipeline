@@ -49,6 +49,23 @@ def _front_files(ch):
 FULL = 3 * len(dr.CANDIDATES) + len(dr.BACK_CANDIDATES)
 
 
+def _back_picture(wf):
+    return any("seen from behind, the same" in t for t in _texts([wf]))
+
+
+def _rest_drawn(ch, new):
+    """Approving drew every other direction once beside S (+ the back picture, + retries of a
+    muddled back view), as many as keys.json says."""
+    meta = json.loads((ch.folder / "keys" / "keys.json").read_text())
+    assert len(new) == meta["drawings"]
+    assert FULL - len(dr.CANDIDATES) + 1 <= len(new) <= (FULL - len(dr.CANDIDATES)
+                                                          + dr.BACK_PICTURE_TRIES
+                                                          + len(dr.BACK_RETRY))
+    assert all(_inpaint(wf) or _back_picture(wf) for wf in new)   # paired to the S drawing
+    assert 1 <= sum(_back_picture(wf) for wf in new) <= dr.BACK_PICTURE_TRIES
+    return True
+
+
 def test_preview_stops_after_the_front_and_approving_keeps_it(robot_lib):
     from pixel_pipeline import library
     fake, model = robot_lib
@@ -78,9 +95,7 @@ def test_preview_stops_after_the_front_and_approving_keeps_it(robot_lib):
         library.add_character_animations(again, ["jump"])      # no 3D-rendered half-sheets
     # Looks good: the rest is drawn beside this S, which is NOT drawn again
     ch = library.approve_preview(again)
-    new = fake.prompts[front:]
-    assert len(new) == FULL - len(dr.CANDIDATES)               # every other direction once
-    assert all(_inpaint(wf) for wf in new)                     # all paired to the S drawing
+    assert _rest_drawn(ch, fake.prompts[front:])               # every other direction once
     assert _front_files(ch) == before                          # byte-identical
     assert library.is_drawn(ch) and not ch.waiting and ch.sheet.exists()
     assert ch in library.ready_characters()
@@ -119,7 +134,7 @@ def test_redraw_changes_only_the_front_and_older_tries_can_be_picked(robot_lib, 
     assert library.get("Bot").prompt == "a robot"
     n2 = len(fake.prompts)
     ch = library.approve_preview(library.get("Bot"))
-    assert _front_files(ch) == first and len(fake.prompts) - n2 == FULL - len(dr.CANDIDATES)
+    assert _front_files(ch) == first and _rest_drawn(ch, fake.prompts[n2:])
     with pytest.raises(ValueError):
         library.pick_preview(ch, 1)                            # not a draft any more
 
@@ -247,7 +262,7 @@ def test_characters_page_review_flow(robot_lib, app, tmp_path):
     n = len(fake.prompts)
     win.review.approve()
     assert library.is_drawn(library.get("Bot")) and not win.review.last_error
-    assert len(fake.prompts) - n == FULL - len(dr.CANDIDATES)
+    assert _rest_drawn(library.get("Bot"), fake.prompts[n:])
     assert _front_files(ch) == first
     assert win.stack.currentWidget() is win.panels_page and win.anim is not None
     assert "waiting" not in win.library.item(0).text()

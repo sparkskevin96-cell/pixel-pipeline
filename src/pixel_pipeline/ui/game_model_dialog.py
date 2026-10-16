@@ -145,6 +145,8 @@ def build_and_export(asset, opts: dict, engines, folder, rebuild: bool = True, s
         g = gamemodel.game_model_for(asset, progress=say, **opts)
         files += g.files
     for e in engines:
+        if say is not None:
+            say(f"Exporting for {e}…")
         out = Path(folder) / e if len(engines) > 1 else Path(folder)
         files += exports.export_asset(asset, f"{e}-3d-model", out)
     return files

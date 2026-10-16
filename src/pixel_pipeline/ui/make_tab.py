@@ -382,8 +382,10 @@ class MakeTab(ToolTab):
         project, client, makers = self.project(), self.client, self.makers
         self.made = None
         self._show_picks([])
+        stages, estimate = M.progress_plan(plan)
         self.run(lambda say: M.run_plan(plan, project, say, client=client, makers=makers),
-                 self._made, f"Making {plan.label.lower()} “{plan.name}”…")
+                 self._made, f"Making {plan.label.lower()} “{plan.name}”…", plan=stages,
+                 estimate=estimate, title=f"{plan.label} “{plan.name}”")
 
     def _made(self, made: M.Made):
         self.made = made
@@ -459,9 +461,9 @@ class MakeTab(ToolTab):
             self.open_result(self.made)
 
     # ------------------------------------------------------------------ front first, then OK
-    def _review_run(self, job, on_done):
+    def _review_run(self, job, on_done, **progress):
         self.review.sync = self.sync
-        self.run(job, on_done, "Working on the drawing…")
+        self.run(job, on_done, "Working on the drawing…", **progress)
 
     def review_character(self, ch):
         """Show a draft character's front drawing for the OK (here, beside the plan)."""
@@ -556,15 +558,35 @@ class MakeTab(ToolTab):
         makers, pause, stop = self.makers, float(self.rest.value()), self._stop
         stop.clear()
 
+        from .. import progress
+        total = sum(max(1, int(getattr(j, "variations", 1) or 1)) for j in jobs)
+        count = [0]
+
         def worker(name, prompt, options, proj):
-            return M.queue_worker(name, prompt, options, proj, makers=makers)
+            # job k of N on the batch bar; this job's own stages on the second bar
+            batch = progress.current()
+            if batch is None:
+                return M.queue_worker(name, prompt, options, proj, makers=makers)
+            p = M.Plan.from_dict(options["plan"]) if "plan" in options else M.route(prompt or name)
+            stages, estimate = M.progress_plan(p)
+            child = batch.child(min(count[0], total - 1), total, stages, estimate=estimate,
+                                title=name or p.name)
+            count[0] += 1
+            with progress.using(child):
+                made = M.queue_worker(name, prompt, options, proj, makers=makers)
+            child.finish()
+            return made
 
         def job(say):
             return jobqueue.run_queue(project, {"make": worker}, pause, stop, queue=q, job_ids=ids,
                                       on_update=lambda j: say(j.summary()))
+        self.on_stop = stop.set            # the panel's Stop: after the current one, like the button
         self.stop_btn.setEnabled(True)
         self.report.setPlainText(f"Queued {len(jobs)}; working through them…")
-        self.run(job, self._batch_done, f"Making {len(jobs)} things, one at a time…")
+        gpu = sum(p.gpu_minutes() + M.cpu_minutes(p) for p in plans) * 60 + pause * max(0, len(plans) - 1)
+        self.run(job, self._batch_done, f"Making {len(jobs)} things, one at a time…",
+                 plan=[progress.Stage("batch", f"{len(jobs)} things", max(0.1, gpu / 60))],
+                 title=f"Batch of {len(jobs)}", stop_raises=False)
 
     def stop_batch(self):
         self._stop.set()
@@ -572,6 +594,7 @@ class MakeTab(ToolTab):
 
     def _batch_done(self, jobs):
         from ..library import from_folder
+        self.on_stop = None
         self.stop_btn.setEnabled(False)
         text = M.batch_summary(self.batch_jobs or jobs)
         self.report.setPlainText(text)

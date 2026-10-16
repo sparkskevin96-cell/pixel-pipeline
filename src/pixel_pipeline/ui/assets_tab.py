@@ -509,6 +509,33 @@ class ReskinDialog(QDialog):
 
 # --------------------------------------------------------------------------- queue thread
 
+class _Relay(QObject):
+    """A queue job changed (from the queue's thread) -> the page, on the UI thread."""
+    job = Signal(object)
+
+
+def tracked_workers(workers: dict, total: int) -> dict:
+    """jobqueue worker fns that report as child k of `total` of the running batch's tracker
+    (progress.current()): the batch bar = job k of N, the second bar = this job."""
+    from .. import progress
+    count = [0]
+
+    def wrap(kind, fn):
+        def run(name, prompt, options, project):
+            batch = progress.current()
+            if batch is None:
+                return fn(name, prompt, options, project)
+            child = batch.child(min(count[0], max(0, total - 1)), max(1, total),
+                                title=f"{kind}: {name}")
+            count[0] += 1
+            with progress.using(child):
+                out = fn(name, prompt, options, project)
+            child.finish()
+            return out
+        return run
+    return {k: wrap(k, fn) for k, fn in workers.items()}
+
+
 class _QueueWorker(QObject):
     update = Signal(object)
     finished = Signal()
@@ -729,6 +756,9 @@ class AssetsTab(ToolTab):
         ql.addLayout(add_row)
         ql.addWidget(self.job_list)
         ql.addLayout(run_row)
+        from .common import ProgressPanel
+        self.queue_panel = ProgressPanel()           # job k of N + the current job's bar
+        ql.addWidget(self.queue_panel)
         qb = QVBoxLayout(self.queue_box)
         qb.addWidget(self.queue_toggle)
         qb.addWidget(self.queue_inner)
@@ -1048,8 +1078,11 @@ class AssetsTab(ToolTab):
             from .. import gamemodel
             gpu = (" Its 3D shape is built from the drawing first: this needs the GPU (~1.5 min)."
                    if gamemodel.needs_shape(a) else "")
+            from ..progress import game_model_plan
             self.run(lambda say: build_and_export(a, opts, engines, folder, rebuild, say),
-                     self._model_built, f"Making a game-ready 3D model of {a.name}…{gpu}")
+                     self._model_built, f"Making a game-ready 3D model of {a.name}…{gpu}",
+                     plan=game_model_plan(shape=bool(gpu), engines=len(engines or [])),
+                     title=f"3D model of {a.name}")
 
     def _model_built(self, files):
         from .game_model_dialog import turntable_frames
@@ -1193,23 +1226,35 @@ class AssetsTab(ToolTab):
         if self.queue_running() or not self.queue.pending():
             return
         self._stop.clear()
-        workers = self.worker_fns
+        from .. import progress
+        from .common import JobRunner
+        workers = self.worker_fns if self.worker_fns is not None else jobqueue.default_workers()
+        pending = self.queue.pending()
+        total = sum(max(1, int(getattr(j, "variations", 1) or 1)) for j in pending)
+        workers = tracked_workers(workers, total)
+        if getattr(self, "_relay", None) is None:
+            self._relay = _Relay()
+            self._relay.job.connect(self._job_updated)
+        relay, project, queue, pause, stop = self._relay, self.project, self.queue,             self.pause.value(), self._stop
+        est = sum(max(1, int(getattr(j, "variations", 1) or 1)) * 0.5 for j in pending)             + pause / 60 * max(0, total - 1)
+
+        def job(tracker):
+            return jobqueue.run_queue(project, workers, pause, stop, on_update=relay.job.emit,
+                                      queue=queue)
+        runner = JobRunner(self, self.queue_panel, self.say, self._queue_failed,
+                           self._queue_failed)
+        self._qrunner = runner
+        plan = [progress.Stage("queue", f"{total} generation{'s' if total != 1 else ''}",
+                               max(0.1, est))]
         if self.sync:
-            jobqueue.run_queue(self.project, workers, self.pause.value(), self._stop,
-                               on_update=self._job_updated, queue=self.queue)
+            runner.start(job, lambda _r: None, sync=True, plan=plan, title="Queue",
+                         on_stop=stop.set, stop_raises=False)
             self._queue_finished()
             return
-        thread, worker = QThread(self), _QueueWorker(self.project, self.queue, workers,
-                                                     self.pause.value(), self._stop)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.update.connect(self._job_updated)
-        worker.failed.connect(self._queue_failed)
-        worker.finished.connect(thread.quit)
-        thread.finished.connect(self._queue_finished)
-        thread.finished.connect(worker.deleteLater)
-        self._qthread, self._qworker = thread, worker
-        thread.start()
+        runner.start(job, lambda _r: None, plan=plan, title="Queue", on_stop=stop.set,
+                     stop_raises=False)
+        runner.thread.finished.connect(self._queue_finished)
+        self._qthread, self._qworker = runner.thread, runner.worker
         self.say("Queue started.")
         self.refresh_queue()
 

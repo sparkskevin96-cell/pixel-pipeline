@@ -348,7 +348,22 @@ class ObjectsTab(ToolTab):
         if not prompt:
             self.say("Type what you want first.")
             return
-        self.run(self._job(prompt=prompt), self._made, f"Making “{prompt}”…")
+        stages, estimate = self._progress_plan(prompt)
+        self.run(self._job(prompt=prompt), self._made, f"Making “{prompt}”…", plan=stages,
+                 estimate=estimate, title=f"Making “{prompt[:40]}”")
+
+    def _progress_plan(self, prompt: str):
+        """Stages for the progress bars (makeany's measured GPU minutes per variation)."""
+        from .. import makeany as M
+        try:
+            if self.kind == "item":
+                params = {"variations": 3, "world": self.world.isChecked(),
+                          "category": self.category.currentText()}
+            else:
+                params = {"variations": 3, "look": "drawn", "directions": self._directions()}
+            return M.progress_plan(M.Plan(self.kind, prompt[:30], prompt, params))
+        except Exception:  # noqa: BLE001 - bars without stages then
+            return None, None
 
     def from_picture(self, path=None):
         if path is None:

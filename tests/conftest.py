@@ -92,3 +92,14 @@ def pytest_unconfigure(config):
             k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
             k32.TerminateProcess(k32.GetCurrentProcess(), _EXIT[0])
         os._exit(_EXIT[0])
+
+
+@pytest.fixture(autouse=True)
+def _collect_garbage_on_the_main_thread():
+    """Widgets a test made and dropped (pages in reference cycles) are freed right after it, on
+    this thread. Left to Python's garbage collector they can be freed on whichever thread runs
+    it next, e.g. a fake ComfyUI server's, and Qt aborts deleting widgets there (seen in
+    test_portraits once the import order shifted the collector's timing)."""
+    yield
+    import gc
+    gc.collect()

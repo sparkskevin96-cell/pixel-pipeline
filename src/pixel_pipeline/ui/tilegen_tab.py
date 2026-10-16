@@ -105,7 +105,10 @@ class TilegenTab(ToolTab):
             from ..tilegen import make_swatches
             return make_swatches(terrain, words, count=count, camera=camera, client=client,
                                  style=style, inpaint_seams=seams, say=say)
-        self.run(job, self._made, "Drawing textures on the GPU…")
+        from .. import makeany as M
+        stages, _ = M.progress_plan(M.Plan("tileset", terrain, words, {"count": count}))
+        self.run(job, self._made, "Drawing textures on the GPU…", plan=stages,
+                 title=f"{count} {terrain} textures")
 
     def quick(self):
         from ..tilegen import builtin_swatch

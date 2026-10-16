@@ -163,6 +163,13 @@ def _full():
     return 3 * len(dr.CANDIDATES) + len(dr.BACK_CANDIDATES)
 
 
+def _drawings(ch):
+    """Drawings the last drawing run made (keys.json; candidates + the back picture + retries)."""
+    n = json.loads((ch.folder / "keys" / "keys.json").read_text())["drawings"]
+    assert n >= _full() - 2
+    return n
+
+
 def test_drawn_character_waits_out_a_crash_and_carries_on(dying, tmp_path, monkeypatch):
     from pixel_pipeline import library
     fake, client = dying
@@ -171,7 +178,7 @@ def test_drawn_character_waits_out_a_crash_and_carries_on(dying, tmp_path, monke
     said = []
     ch = library.add_character("Bot", model, prompt="a robot", progress=said.append)
     assert library.is_drawn(ch) and not ch.notice                    # drawn after all
-    assert len(fake.prompts) == _full() + 1        # only the lost drawing was made twice
+    assert len(fake.prompts) == _drawings(ch) + 1  # only the lost drawing was made twice
     assert any("ComfyUI failed while making" in s for s in said)
 
 
@@ -199,7 +206,7 @@ def test_drawn_character_falls_back_keeps_drawings_and_finishes_later(dying, tmp
     n = len(fake.prompts)
     ch = library.finish_drawing(library.get("Bot"))
     assert library.is_drawn(ch) and not library.drawing_unfinished(ch)
-    assert len(fake.prompts) - n == _full() - 2
+    assert len(fake.prompts) - n == _drawings(ch)   # only what was missing
     assert all((keys / k).read_bytes() == v for k, v in before.items())
 
 

@@ -238,6 +238,7 @@ class CharacterReview(QWidget):
             n = int(((_keys_meta(ch) or {}).get("camera") or {}).get("directions") or 16)
         except (TypeError, ValueError):
             pass
+        self.directions = n
         self.approve_btn.setText(f"Looks good — make all {n} directions")
         self.tries.clear()
         for a in info["attempts"]:
@@ -261,7 +262,7 @@ class CharacterReview(QWidget):
         if not busy:
             self._cancel = None
 
-    def _go(self, job, on_done, cancellable: bool = False):
+    def _go(self, job, on_done, cancellable: bool = False, **progress):
         """job(say) on the host's runner; errors come back here (the buttons work again, the
         message is shown; Stop isn't an error)."""
         self._busy(True, cancellable)
@@ -276,16 +277,21 @@ class CharacterReview(QWidget):
             self._busy(False)
             if isinstance(result, _Failed):
                 from ..drawnrig import Cancelled
+                from ..progress import Stopped
                 text = str(result.error) or type(result.error).__name__
                 self.last_error = text
-                self._say("Stopped: " + text.splitlines()[0])
-                if not self.sync and not isinstance(result.error, Cancelled):
+                self._say(text.splitlines()[0] if text.startswith("Stopped") else
+                          "Stopped: " + text.splitlines()[0])
+                if not self.sync and not isinstance(result.error, (Cancelled, Stopped)):
                     QMessageBox.warning(self, "Couldn't draw it", text)
                 if self.character is not None:
                     self.set_character(self.character)
                 return
             on_done(result)
-        self._run(safe, done)
+        if progress:                     # the host's runner shows the bars (plan / title)
+            self._run(safe, done, **progress)
+        else:
+            self._run(safe, done)
 
     def _new_cancel(self):
         self._cancel = threading.Event()
@@ -308,7 +314,11 @@ class CharacterReview(QWidget):
 
         def job(say):
             return approve_preview(ch, progress=say, cancel=cancel)
-        self._go(job, self._approved, cancellable=True)
+        from ..progress import character_plan
+        n = int(getattr(self, "directions", 16) or 16)
+        self._go(job, self._approved, cancellable=True,
+                 plan=character_plan(model=False, drawn=True, approve=True, directions=n),
+                 title=f"Drawing {ch.name}: every direction")
 
     def _approved(self, ch):
         self.character = None
@@ -323,7 +333,9 @@ class CharacterReview(QWidget):
 
         def job(say):
             return redraw_preview(ch, seed=seed, progress=say)
-        self._go(job, self._changed)
+        from ..progress import character_plan
+        self._go(job, self._changed, plan=character_plan(model=False, drawn=True, preview=True),
+                 title=f"Redrawing {ch.name}'s front")
 
     def change_words(self, words: str, new_model: bool = False, style_words: str | None = None):
         """Redraw the front with new words (the same 3D model unless new_model). style_words:
@@ -337,7 +349,10 @@ class CharacterReview(QWidget):
 
         def job(say):
             return redraw_preview(ch, words=words, new_model=new_model, progress=say)
-        self._go(job, self._changed)
+        from ..progress import character_plan
+        self._go(job, self._changed,
+                 plan=character_plan(model=new_model, drawn=True, preview=True),
+                 title=f"Redrawing {ch.name}'s front")
 
     def _set_style_words(self, words: str):
         import dataclasses

@@ -98,18 +98,29 @@ def test_drawn_animation_with_the_fake_comfyui(comfy, tmp_path):  # noqa: F811
                                     animations=["wave", "fall"], seed=7, style=Style(),
                                     client=client, folder=keys, points=40_000, retries=0)
     per_dir = 3 * len(dr.CANDIDATES) + len(dr.BACK_CANDIDATES)   # N: one more try
-    assert len(fake.prompts) == per_dir                # candidates per direction
+    back = info["parts"]["back_picture"]
+    assert len(fake.prompts) == info["drawings"]       # candidates + back picture + retries
+    assert per_dir + 1 <= info["drawings"] <= (per_dir + dr.BACK_PICTURE_TRIES
+                                               + len(dr.BACK_RETRY))
+    assert info["parts"]["parts"] >= 1 and back["painted"] > 0
+    pictures = [wf for wf in fake.prompts if is_back_picture(wf)]
+    assert 1 <= len(pictures) <= dr.BACK_PICTURE_TRIES   # painted, not pixel art: no LoRA
+    assert all(not any(n["class_type"] == "LoadImageMask" for n in wf.values()) for wf in pictures)
+    assert all(not any(n["class_type"] == "LoraLoader" for n in wf.values()) for wf in pictures)
+    assert (keys / "back_N_t0.png").exists()
     ks = [n for n in fake.prompts[0].values() if n["class_type"] == "KSampler"][0]["inputs"]
     assert ks["seed"] == 7 and 0 < ks["denoise"] < 1   # img2img over the model's render
     first = fake.prompts[0]                            # S, the reference: plain img2img
     assert not any(n["class_type"] == "LoadImageMask" for n in first.values())
     for wf in fake.prompts[len(dr.CANDIDATES):]:       # the rest: inpaint beside the reference
+        if is_back_picture(wf):
+            continue
         assert any(n["class_type"] == "LoadImageMask" for n in wf.values())
         img = next(n for n in wf.values() if n["class_type"] == "LoadImage")["inputs"]["image"]
         w, h = fake.uploads[img].size
         assert w in (2 * h, 3 * h)                     # [reference(s) | this view]
     assert set(info["keys_report"]) == {"E", "S", "W", "N"}
-    assert info["keys_report"]["N"]["refs"] == ["S", "E"]   # back view: front + side
+    assert info["keys_report"]["N"]["refs"] == ["S", "BACK"]   # back view: front + back picture
     texts = [n["inputs"]["text"] for wf in fake.prompts for n in wf.values()
              if n["class_type"] == "CLIPTextEncode" and n.get("_meta", {}).get("title") == "Prompt"]
     assert any("facing right" in t for t in texts) and any("back view" in t for t in texts)
@@ -135,7 +146,7 @@ def test_drawn_animation_with_the_fake_comfyui(comfy, tmp_path):  # noqa: F811
     again, _ = dr.drawn_animation(rigged, "a robot", s, directions=4, frames=3,
                                   animations=["wave", "fall"], seed=7, style=Style(),
                                   client=client, folder=keys, points=40_000, retries=0)
-    assert len(fake.prompts) == per_dir                # drawings reused: no GPU
+    assert len(fake.prompts) == info["drawings"]       # drawings reused: no GPU
     assert np.array_equal(again.sprites[0][1][0].rgba, anim.sprites[0][1][0].rgba)
 
 
@@ -301,6 +312,11 @@ def test_recolour_palette_and_absent_words(robot):
     assert "collar" not in dr.auto_absent("a dog with a red collar", "animal", body, rest)
 
 
+def is_back_picture(wf):
+    return any("seen from behind, the same" in n["inputs"].get("text", "") for n in wf.values()
+               if n["class_type"] == "CLIPTextEncode")
+
+
 def test_cancel_resume_and_redraw_one_direction(comfy, tmp_path, monkeypatch):  # noqa: F811
     from contextlib import contextmanager
 
@@ -324,9 +340,10 @@ def test_cancel_resume_and_redraw_one_direction(comfy, tmp_path, monkeypatch):  
     assert len(fake.prompts) == 3 and len(held) == 3   # every drawing inside the GPU guard
     assert json.loads((keys / "keys.json").read_text())["partial"]   # same scale on resume
     assert any("min left" in c for c in calls)         # an ETA once one drawing is timed
-    dr.drawn_sheets(rigged, "a robot", keys_folder=keys, frames=2, client=client,
-                    out_png=tmp_path / "sheet.png")
-    full = 3 * len(dr.CANDIDATES) + len(dr.BACK_CANDIDATES)
+    _, info, _ = dr.drawn_sheets(rigged, "a robot", keys_folder=keys, frames=2, client=client,
+                                 out_png=tmp_path / "sheet.png")
+    full = 3 + info["drawings"]
+    assert full >= 3 * len(dr.CANDIDATES) + len(dr.BACK_CANDIDATES) + 1   # + the back picture
     assert len(fake.prompts) == full                   # carried on, nothing drawn twice
     seeds = json.loads((keys / "keys.json").read_text())["seeds"]
     before = np.asarray(Image.open(keys / "key_S.png")).copy()
@@ -422,3 +439,87 @@ def test_animals_are_drawn_from_the_side():
     assert dr.view_refs("N", 270.0, {"E", "W"}, "E") == ["E", "W"]
     assert dr.view_refs("NW", 225.0, {"E", "W", "N"}, "S") == ["N", "W"]
     assert dr.REFERENCES["animal"] == "E"
+
+
+# --------------------------------------------------------------------------- parts: one colour each
+
+def test_reference_parts_colour_the_whole_model_like_the_reference(robot):
+    rig, body, rest, poses, cams = robot
+    pts, nrm = body.pose(rest.worlds)
+    view = dr.rest_view(body, cams[1], rest, pts, nrm)          # S
+    pos = view.pos
+    arm_px = view.weights[..., 1] > 0.5
+    ref = np.zeros((H, W, 3), np.uint8)                        # the drawing: other colours
+    ref[view.mask & (pos[..., 1] > 0.6)] = (230, 200, 40)      # yellow top (model: red)
+    ref[view.mask & (pos[..., 1] <= 0.6)] = (120, 60, 160)     # purple bottom (model: blue)
+    ref[view.mask & arm_px] = (30, 30, 30)                     # dark arm (model: green)
+    labels, cols = dr.reference_parts(body, view, ref, view.mask, pts, clusters=3)
+    arm = body.weights.argmax(1) == 1
+    back = (nrm @ cams[1].axes()[2]) < -0.5                    # the far side S never sees
+    top, low = (~arm) & (pts[:, 1] > 0.75), (~arm) & (pts[:, 1] < 0.45)
+    for part, colour in ((top, (230, 200, 40)), (low, (120, 60, 160)), (arm, (30, 30, 30))):
+        assert np.abs(np.median(cols[part & back], 0) - colour).max() < 12   # the back too
+        assert np.bincount(labels[part]).max() > 0.9 * part.sum()           # one part each
+    assert len({np.bincount(labels[p]).argmax() for p in (top, low, arm)}) == 3
+    pm = dr.view_parts(view, labels)
+    assert set(np.unique(pm)) - {-1} <= set(np.unique(labels))
+    target = dr.part_colours(ref, view.mask, pm)
+    painted = top & back
+    moved = cols.copy()
+    moved[painted] = (200, 40, 40)                             # a red back picture on the top
+    lab2 = dr.relabel_by_colour(labels, moved, painted, target, clusters=3)
+    assert (lab2[~painted] == labels[~painted]).all()
+    assert (lab2[painted] == np.bincount(labels[top]).argmax()).mean() > 0.9  # still the top
+
+
+def test_match_part_colours_recolours_a_wrong_part_and_keeps_its_shading():
+    from pixel_pipeline.color import rgb_to_lab
+    H_, W_ = 20, 20
+    parts = np.full((H_, W_), -1, np.int32)
+    parts[2:18, 2:10], parts[2:18, 10:18] = 0, 1       # 0 = hair, 1 = cape
+    mask = parts >= 0
+    ref = np.zeros((H_, W_, 3), np.uint8)
+    shade = np.linspace(0.6, 1.0, 16)[:, None]
+    ref[2:18, 2:10] = (np.array([170, 50, 30]) * shade[:, :, None]).astype(np.uint8)  # red ramp
+    ref[2:18, 10:18] = (np.array([40, 140, 60]) * shade[:, :, None]).astype(np.uint8)  # green
+    target = dr.part_colours(ref, mask, parts)
+    assert set(target.lut) == {0, 1}
+    draw = ref.copy()
+    draw[2:18, 2:10] = (np.array([235, 235, 235]) * shade[:, :, None]).astype(np.uint8)  # white
+    draw[8:11, 12:15] = 128                            # a grey blob on the green cape
+    out, stats = dr.match_drawing(draw, mask, parts, target)
+    lab = rgb_to_lab(out.astype(np.float32))
+    hair = lab[2:18, 2:10]
+    assert np.median(hair[..., 1]) > 25                # white hair -> red
+    col = hair[:, 3, 0]
+    assert (np.diff(col) >= -1e-3).all() and col[-1] > col[0] + 5   # shading order kept
+    assert np.hypot(*lab[9, 13, 1:]) > 15              # the grey blob takes the cape's green
+    assert (out[2:8, 10:18] == ref[2:8, 10:18]).all()  # the rest of the cape stays as drawn
+    assert stats["miss"] == pytest.approx(0.5, abs=0.01) and stats["changed"] > 0.5
+    _, same = dr.match_drawing(ref, mask, parts, target)
+    assert same["miss"] == 0 and same["changed"] == 0  # the reference matches itself
+
+
+def test_back_views_are_painted_beside_the_back_picture():
+    assert dr.view_refs("N", 270.0, {"S": 1, "E": 1, "W": 1, "BACK": 1}) == ["S", "BACK"]
+    assert dr.view_refs("N", 270.0, {"S": 1, "E": 1, "W": 1}) == ["S", "E"]
+    assert dr.view_refs("NE", 315.0, {"S": 1, "E": 1, "N": 1, "BACK": 1}) == ["N", "E"]
+    names = ["E", "S", "W", "N"]
+    cams = [dr.Camera(k * 90.0, 30.0, 1.0, 0, 0, 8, 8) for k in range(4)]
+    assert dr.back_index(names, cams) == 3
+    order = dr.draw_order(names, cams)
+    assert order[0] == 1 and order.index(3) > order.index(0)   # S first, the back after the sides
+
+
+def test_paint_points_only_colours_what_the_picture_sees(robot):
+    rig, body, rest, poses, cams = robot
+    pts, nrm = body.pose(rest.worlds)
+    big = cams[3].region(0, 0, W, 4 * W)               # N, blown up 4x
+    rgba = np.zeros((4 * W, 4 * W, 4), np.uint8)
+    rgba[..., :3], rgba[..., 3] = (250, 200, 0), 255
+    vis, cols = dr.paint_points(pts, nrm, big, rgba, rest.shift)
+    toward = big.axes()[2]
+    facing = nrm @ toward
+    assert vis.any() and (facing[vis] > 0).all()       # only the side facing the camera
+    assert vis.sum() < 0.6 * len(pts)
+    assert (cols[vis] == [250, 200, 0]).all()

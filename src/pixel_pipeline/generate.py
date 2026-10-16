@@ -45,6 +45,7 @@ from typing import Any, NamedTuple
 import numpy as np
 from PIL import Image
 
+from . import progress as _progress
 from .pipeline import ImageSource, Sprite, convert, load_image
 from .settings import SUBJECTS, Settings
 
@@ -455,6 +456,7 @@ class ComfyClient:
     def queue(self, workflow: dict) -> str:
         """POST /prompt. Returns the prompt id; a rejected workflow raises a readable error."""
         body = json.dumps({"prompt": workflow, "client_id": self.client_id}).encode("utf-8")
+        self._watch_progress()
         try:
             data = _json(self._request("POST", "/prompt", body,
                                        {"Content-Type": "application/json"}), "/prompt")
@@ -469,6 +471,38 @@ class ComfyClient:
         if not pid:
             raise ComfyUIWorkflowError(f"ComfyUI didn't queue the workflow: {_short(data)}")
         return str(pid)
+
+    def _watch_progress(self):
+        """Progress bars (progress.py): open ComfyUI's websocket for this client's sampler steps
+        when a tracked job is running on this thread (comfyws.py; nothing otherwise)."""
+        from . import progress
+        if progress.current() is not None:
+            from . import comfyws
+            comfyws.watch(self.base_url, self.client_id)
+
+    def _report_progress(self, prompt_id: str) -> None:
+        """While waiting: the picture's sampler step to the job's progress bar; Stop interrupts."""
+        from . import progress
+        if progress.current() is None:
+            return
+        from . import comfyws
+        ws = comfyws.current(self.base_url, self.client_id)
+        got = ws.progress(prompt_id) if ws is not None else None
+        progress.gpu_sampling(*(got or (None, None)))
+        if progress.stop_requested():
+            self.interrupt(prompt_id)
+            progress.check_stop()
+
+    def interrupt(self, prompt_id: str | None = None) -> None:
+        """Best effort: stop the prompt ComfyUI is running (Stop), and drop it from the queue."""
+        body = json.dumps({"prompt_id": prompt_id} if prompt_id else {}).encode("utf-8")
+        try:
+            self._request("POST", "/interrupt", body, {"Content-Type": "application/json"},
+                          timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+        if prompt_id:
+            self.unqueue([prompt_id])
 
     def unqueue(self, prompt_ids) -> None:
         """Best effort: drop prompts still waiting in ComfyUI's queue (after a failure)."""
@@ -538,6 +572,7 @@ class ComfyClient:
                 if status.get("status_str") == "error":
                     raise _execution_error(status)
                 return entry
+            self._report_progress(prompt_id)
             if time.monotonic() >= deadline:
                 raise ComfyUIError(f"ComfyUI didn't finish within {timeout:.0f} s (prompt {prompt_id}). "
                                    "It may still be busy (the first run loads the models from disk): "
@@ -1374,6 +1409,7 @@ def _generate_once(prompt, negative, client, seed, count, init_image, denoise, a
         for i, job in enumerate(jobs):
             s, key, images, pid = job
             if images is None:
+                _progress.gpu_pictures(i, len(jobs))
                 entry = client.wait(pid, opts.timeout)
                 images = client.fetch_images(pid, entry)
                 cache_put(key, images)

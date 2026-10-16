@@ -84,7 +84,7 @@ PAIR_NEGATIVE = ("different characters, different outfit, different colours, mis
                  "cropped, out of frame, cut off, busy background, scenery, cast shadow, ground, "
                  "frame, border, text, watermark, 3d render, photo, blurry, smooth gradient")
 PANEL_WORDS = {"S": "front view", "E": "side view facing right", "W": "side view facing left",
-               "N": "back view"}
+               "N": "back view", "BACK": "back view"}
 SAME_WORDS = {"person": "same outfit and armour", "animal": "same fur and markings"}
 # what the image model likes to add whatever the model holds: kept out unless the model has it
 SHIELD_WORDS = ("shield", "buckler")
@@ -928,6 +928,7 @@ class KeySet:
     seeds: list[int]
     mirrored: list[bool]
     report: dict = field(default_factory=dict)   # per direction: chosen candidate + scores
+    extra: dict = field(default_factory=dict)    # parts / back picture: what was done
 
 
 REFERENCE = "S"                    # drawn first; every other direction copies its design
@@ -945,6 +946,17 @@ GOOD = {("person", "front"): (0.88, 0.36, 0.85), ("person", "back"): (0.88, 0.30
 # at sprite size is a blob; its profile carries the design)
 REFERENCES = {"person": "S", "animal": "E"}
 SHARP_WEIGHT = 0.8                 # score = IoU + w * sharpness vs reference - colour - off-model
+# back views: the model's far side is a blurred projection of the front picture (mush), so after
+# the reference is drawn a BACK PICTURE is painted over the model seen from behind (img2img of
+# the part-recoloured model, no pixel LoRA, single-subject + part-colour checked); it repaints the
+# model's back (better inits for every back view) and is N's reference panel ([S | back | N]).
+BACK_PICTURE_TRIES = 2
+BACK_PICTURE_DENOISE = 0.62
+# back views still failing the checks after BACK_CANDIDATES (part colours off, grey mush, soft)
+# get these tries before the best is kept
+BACK_RETRY = (("k", 0.6, 2), ("o", 0.66, 3))
+PART_WEIGHT = 1.0                  # score -= w * (share of whole parts recoloured + grey share)
+BACK_OK = {"miss": 0.15, "grey": 0.10, "sharp": 0.6}   # a back view passing these is kept
 
 
 class Cancelled(Exception):
@@ -1060,6 +1072,338 @@ def neutral_tint(rgb: np.ndarray, mask: np.ndarray, view: RestView, *, chroma: f
     return out, (float(tint[0]), float(tint[1]))
 
 
+# --------------------------------------------------------------------------- parts: one colour each
+# Every direction is repainted from its own init, so a part the model has in one colour and the
+# reference drawing (S) in another (the elf: white hair on the model, red in S) came out white in
+# some views and red in others (Kevin: "a lump on her forehead"). The model is cut into the
+# reference's parts (bone group x the drawing's colour clusters, projected onto the model and
+# spread to the hidden side within each bone group) and coloured like it; every later drawing's
+# parts are matched to the reference's colours for them, keeping their own shading order
+# (lightness rank -> the reference's colour at that rank).
+
+PART_GROUPS = (("tail", ("tail",)), ("foot", ("foot", "paw", "toe")),
+               ("hand", ("forearm", "hand", "wrist", "finger")),
+               ("arm", ("upper_arm", "shoulder", "clavicle")),
+               ("leg", ("thigh", "shin", "calf", "_upper", "_lower", "leg")),
+               ("head", ("head", "neck", "jaw", "ear")),
+               ("torso", ("chest", "spine", "hips", "pelvis", "torso", "root")))
+PART_CLUSTERS = 8        # colour clusters of the reference drawing
+PART_MISS = 18.0         # a part's median colour this far from the reference's: recolour it
+PART_OUTLIER = 24.0      # a pixel this far from its part's AND every reference colour is recoloured
+PART_LEAST = 12          # reference pixels a part needs before its colours count
+PART_QUANTILES = 16
+
+
+def _part_group(name: str) -> str:
+    n = name.lower()
+    for group, keys in PART_GROUPS:
+        if any(k in n for k in keys):
+            return group
+    return n or "other"
+
+
+def _lab_w(lab: np.ndarray) -> np.ndarray:
+    """Lab with lightness counting half: the same part is lit differently from each side."""
+    return np.asarray(lab, np.float32) * np.array([0.5, 1.0, 1.0], np.float32)
+
+
+def _kmeans(x: np.ndarray, k: int, iters: int = 12, seed: int = 0) -> np.ndarray:
+    """Deterministic k-means (k-means++ start on a sample) -> a cluster per row."""
+    rng = np.random.default_rng(seed)
+    sample = x[rng.choice(len(x), min(len(x), 20_000), replace=False)]
+    cent = [sample[rng.integers(len(sample))]]
+    for _ in range(1, k):
+        d = np.min(((sample[:, None] - np.array(cent)[None]) ** 2).sum(-1), 1)
+        if d.sum() <= 0:
+            break
+        cent.append(sample[rng.choice(len(sample), p=d / d.sum())])
+    cent = np.array(cent, np.float32)
+    for _ in range(iters):
+        lab = np.argmin(((sample[:, None] - cent[None]) ** 2).sum(-1), 1)
+        for j in range(len(cent)):
+            if (lab == j).any():
+                cent[j] = sample[lab == j].mean(0)
+    out = np.empty(len(x), np.int32)
+    for i in range(0, len(x), 100_000):
+        out[i:i + 100_000] = np.argmin(((x[i:i + 100_000, None] - cent[None]) ** 2).sum(-1), 1)
+    return out
+
+
+def part_groups(body: Body) -> np.ndarray:
+    """The bone group (PART_GROUPS index, sorted names) of every body point."""
+    names = bone_names(body)
+    groups = sorted({_part_group(n) for n in names})
+    gid = np.array([groups.index(_part_group(n)) for n in names], np.int64)
+    return gid[body.weights.argmax(1)]
+
+
+def reference_parts(body: Body, view: RestView, rgb: np.ndarray, mask: np.ndarray, pts=None,
+                    clusters: int = PART_CLUSTERS, near: int = 24):
+    """The model cut into the reference drawing's parts and coloured like it: the drawing's
+    colours are clustered (k-means in Lab, lightness counting half); every body point the
+    reference sees takes its pixel's cluster and colour, every other point the part of the
+    seen point of its own bone group, among the `near` nearest, whose MODEL colour is most like
+    its own (the back of white hair is the hair the reference drew red, not the green collar
+    beside it), and that part's colours by its own lightness rank. A part = bone group x colour
+    cluster. (Tried on the GPU and dropped: leaving edge-on / outline-ring points unseen, and
+    nearest-only or up-facing-only parts for the far side: the dwarf's back views drew a face,
+    the elf's head went bald.) Returns (labels (P,), colours (P, 3) uint8)."""
+    from scipy.spatial import cKDTree
+    from .color import lab_to_rgb, rgb_to_lab
+    P = len(body.bind)
+    on = mask & view.mask
+    if on.sum() < 4 * clusters:
+        return np.full(P, -1, np.int32), body.colours.copy()
+    if pts is None:
+        pts = body.bind
+    lab_img = rgb_to_lab(rgb.astype(np.float32))
+    cl_px = np.full(mask.shape, -1, np.int64)
+    cl_px[on] = _kmeans(_lab_w(lab_img[on]), clusters)
+    g = part_groups(body)
+    model_lab = _lab_w(rgb_to_lab(body.colours.astype(np.float32)))
+    ok = view.point_front & (view.point_pix >= 0)
+    lbl = np.full(P, -1, np.int64)
+    lbl[ok] = cl_px.reshape(-1)[view.point_pix[ok]]
+    seen = lbl >= 0
+    cols = body.colours.copy()
+    cols[seen] = rgb.reshape(-1, 3)[view.point_pix[seen]]
+    for gi in np.unique(g):
+        need = (g == gi) & ~seen
+        if not need.any():
+            continue
+        have = (g == gi) & seen
+        if not have.any():
+            have = seen
+        hi, ni = np.nonzero(have)[0], np.nonzero(need)[0]
+        kk = min(near, len(hi))
+        _, nn = cKDTree(pts[hi]).query(pts[ni], k=kk)
+        nn = nn.reshape(len(ni), kk)
+        best = np.empty(len(ni), np.int64)
+        for c0 in range(0, len(ni), 50_000):
+            sl = slice(c0, c0 + 50_000)
+            d = ((model_lab[hi[nn[sl]]] - model_lab[ni[sl], None]) ** 2).sum(-1)
+            best[sl] = nn[sl][np.arange(len(d)), d.argmin(1)]
+        lbl[ni] = lbl[hi[best]]
+    labels = (g * clusters + lbl).astype(np.int32)
+    target = part_colours(rgb, mask, view_parts(view, labels), least=1)
+    lab = rgb_to_lab(body.colours.astype(np.float32))
+    hidden = ~seen
+    for p in np.unique(labels[hidden]):
+        lut = target.lut.get(int(p))
+        if lut is None:
+            continue
+        idx = np.nonzero(hidden & (labels == p))[0]
+        rank = np.argsort(np.argsort(lab[idx, 0], kind="stable"), kind="stable")
+        pos = np.rint(rank / max(1, len(idx) - 1) * (len(lut) - 1)).astype(int)
+        cols[idx] = lab_to_rgb(lut[pos])
+    return labels, cols
+
+
+def relabel_by_colour(labels: np.ndarray, colours: np.ndarray, which: np.ndarray,
+                      target: "PartColours", clusters: int = PART_CLUSTERS) -> np.ndarray:
+    """Points `which` (repainted, e.g. by the back picture) take the part of their bone group
+    whose reference colour is nearest theirs."""
+    from .color import rgb_to_lab
+    out = labels.copy()
+    if not which.any() or not target.centre:
+        return out
+    keys = np.array(sorted(target.centre), np.int64)
+    cent = _lab_w(np.array([target.centre[int(k)] for k in keys]))
+    lab = _lab_w(rgb_to_lab(np.asarray(colours, np.float32)))
+    grp = labels // clusters
+    for gi in np.unique(grp[which]):
+        mine = keys // clusters == gi
+        if not mine.any():
+            continue
+        idx = np.nonzero(which & (grp == gi))[0]
+        d = ((lab[idx, None] - cent[mine][None]) ** 2).sum(-1)
+        out[idx] = keys[mine][d.argmin(1)]
+    return out
+
+
+def view_parts(view: RestView, labels: np.ndarray) -> np.ndarray:
+    """The part under every pixel of a rest view (majority of its front points); -1 = empty."""
+    H, W = view.mask.shape
+    ok = view.point_front & (view.point_pix >= 0)
+    nl = int(labels.max()) + 1 if len(labels) else 1
+    cnt = np.bincount(view.point_pix[ok].astype(np.int64) * nl + labels[ok],
+                      minlength=H * W * nl).reshape(H * W, nl)
+    out = cnt.argmax(1).astype(np.int32)
+    out[cnt.sum(1) == 0] = -1
+    out = out.reshape(H, W)
+    out[~view.mask] = -1
+    return out
+
+
+@dataclass
+class PartColours:
+    """The reference drawing's colours per part (Lab)."""
+    lut: dict            # part -> (Q, 3) colour at each lightness quantile
+    palette: dict        # part -> (M, 3) its distinct colours
+    chroma: dict         # part -> median chroma
+    every: np.ndarray    # (M, 3) all the reference's colours
+    centre: dict = field(default_factory=dict)   # part -> median colour
+
+
+def _distinct(lab: np.ndarray, most: int = 48) -> np.ndarray:
+    q = np.round(lab / 3.0)
+    uniq, inv, cnt = np.unique(q, axis=0, return_inverse=True, return_counts=True)
+    keep = np.argsort(-cnt)[:most]
+    inv = inv.reshape(-1)
+    return np.array([np.median(lab[inv == i], 0) for i in keep], np.float32)
+
+
+def part_colours(rgb: np.ndarray, mask: np.ndarray, parts: np.ndarray, least: int = PART_LEAST,
+                 quantiles: int = PART_QUANTILES) -> PartColours:
+    """PartColours of a drawing (the reference) from its part map (view_parts of its view).
+    The silhouette ring is left out (outline and edge pixels belong to no part)."""
+    import cv2
+    from .color import rgb_to_lab
+    lab = rgb_to_lab(rgb.astype(np.float32))
+    inner = mask & (cv2.erode(mask.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+    lut, pal, chroma, centre = {}, {}, {}, {}
+    for p in np.unique(parts[inner & (parts >= 0)]):
+        v = lab[inner & (parts == p)]
+        if len(v) < least:
+            continue
+        v = v[np.argsort(v[:, 0], kind="stable")]
+        nq = min(quantiles, len(v))
+        edges = np.linspace(0, len(v), nq + 1).astype(int)
+        lut[int(p)] = np.array([np.median(v[a:b], 0) for a, b in zip(edges[:-1], edges[1:])],
+                               np.float32)
+        pal[int(p)] = _distinct(v)
+        chroma[int(p)] = float(np.median(np.hypot(v[:, 1], v[:, 2])))
+        centre[int(p)] = np.median(v, 0).astype(np.float32)
+    every = _distinct(lab[mask], 96) if mask.any() else np.zeros((1, 3), np.float32)
+    return PartColours(lut, pal, chroma, every, centre)
+
+
+def _nearest_dist(a: np.ndarray, b: np.ndarray, chunk: int = 50_000) -> np.ndarray:
+    out = np.empty(len(a), np.float32)
+    for i in range(0, len(a), chunk):
+        d = ((a[i:i + chunk, None] - b[None]) ** 2).sum(-1)
+        out[i:i + chunk] = np.sqrt(d.min(1))
+    return out
+
+
+def match_part_colours(lab: np.ndarray, labels: np.ndarray, target: PartColours, *,
+                       miss: float = PART_MISS, outlier: float = PART_OUTLIER, core=None):
+    """Colours (N, 3 Lab) with their parts (N,; -1 = none) -> (colours, stats). A part whose
+    median colour is over `miss` from the reference's median for it (white hair where the
+    reference drew red; lightness counts half) takes the reference's colours entirely, by lightness rank (its
+    shading order stays); otherwise only pixels far from the part's AND every reference colour
+    (a grey blob on a green cape) are recoloured the same way. stats: miss = share recoloured
+    as whole parts, grey = share near-grey where the reference's part is coloured (unpainted
+    mush), changed = share recoloured, parts = median distance per part. core: the pixels the
+    medians are taken over (the drawing's inside, like the reference's; None = all)."""
+    out = np.array(lab, np.float32, copy=True)
+    labels = np.asarray(labels)
+    total = max(1, int((labels >= 0).sum()))
+    every = _lab_w(target.every)
+    whole = grey = changed = 0
+    per = {}
+    for p in np.unique(labels[labels >= 0]):
+        p = int(p)
+        if p not in target.lut:
+            continue
+        idx = np.nonzero(labels == p)[0]
+        v = out[idx]
+        wv = _lab_w(v)
+        d_own = _nearest_dist(wv, _lab_w(target.palette[p]))
+        cv = v[core[idx]] if core is not None and core[idx].sum() >= 6 else v
+        med = float(np.linalg.norm(_lab_w(np.median(cv, 0) - target.centre[p])))
+        per[p] = round(med, 1)
+        if target.chroma[p] > 16:
+            grey += int(((np.hypot(v[:, 1], v[:, 2]) < 8) & (v[:, 0] > 30)).sum())
+        if med > miss and len(idx) >= 6:
+            pick = np.ones(len(idx), bool)
+            whole += len(idx)
+        else:
+            pick = (d_own > outlier) & (_nearest_dist(wv, every) > outlier)
+        if pick.any():
+            lut = target.lut[p]
+            rank = np.argsort(np.argsort(v[:, 0], kind="stable"), kind="stable")
+            pos = np.rint(rank / max(1, len(v) - 1) * (len(lut) - 1)).astype(int)
+            out[idx[pick]] = lut[pos[pick]]
+            changed += int(pick.sum())
+    return out, {"miss": whole / total, "grey": grey / total, "changed": changed / total,
+                 "parts": per}
+
+
+def match_drawing(rgb: np.ndarray, mask: np.ndarray, parts: np.ndarray, target: PartColours):
+    """match_part_colours on a drawing on the frame grid (parts = view_parts of its view; drawn
+    pixels off the model take the nearest model pixel's part). Returns (rgb, stats)."""
+    from scipy.ndimage import distance_transform_edt
+    from .color import lab_to_rgb, rgb_to_lab
+    if not mask.any() or not (parts >= 0).any():
+        return rgb, {"miss": 0.0, "grey": 0.0, "changed": 0.0, "parts": {}}
+    lbl = parts
+    if (mask & (parts < 0)).any():
+        _, (ny, nx) = distance_transform_edt(parts < 0, return_indices=True)
+        lbl = parts[ny, nx]
+    import cv2
+    inner = cv2.erode(mask.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    lab, stats = match_part_colours(rgb_to_lab(rgb[mask].astype(np.float32)), lbl[mask], target,
+                                    core=inner[mask])
+    out = rgb.copy()
+    out[mask] = lab_to_rgb(lab)
+    return out, stats
+
+
+def match_points(colours: np.ndarray, labels: np.ndarray, target: PartColours):
+    """match_part_colours on the model's point colours (uint8 RGB). Returns (colours, stats)."""
+    from .color import lab_to_rgb, rgb_to_lab
+    lab, stats = match_part_colours(rgb_to_lab(np.asarray(colours, np.float32)), labels, target)
+    return lab_to_rgb(lab), stats
+
+
+def _refresh_view_colours(views, body: Body, old: np.ndarray) -> None:
+    """The rest views' model colours after body.colours changed from `old`: each pixel moves by
+    the change of its front points' mean (unchanged parts stay bit-identical)."""
+    new = body.colours.astype(np.float64)
+    was = np.asarray(old, np.float64)
+    for v in views:
+        if v is None or v.colour is None:
+            continue
+        H, W = v.mask.shape
+        ok = v.point_front & (v.point_pix >= 0)
+        pix = v.point_pix[ok]
+        cnt = np.bincount(pix, minlength=H * W).astype(np.float64)
+        diff = new[ok] - was[ok]
+        if not np.abs(diff).any():
+            continue
+        delta = np.stack([np.bincount(pix, diff[:, j], H * W) for j in range(3)], -1)
+        delta /= np.maximum(cnt, 1)[:, None]
+        v.colour = (v.colour.reshape(-1, 3) + delta).reshape(H, W, 3)
+
+
+def paint_points(pts: np.ndarray, nrm: np.ndarray, cam: Camera, rgba: np.ndarray, shift,
+                 cell: int = 4, eps: float = 8.0, facing: float = 0.05):
+    """Points (posed, world) seen by `cam` (a region camera at the picture's size) that the
+    picture covers: (which, colours). Hidden points (a z-buffer on cell x cell px) and points
+    turned away keep theirs."""
+    H, W = rgba.shape[:2]
+    sx, sy, depth = cam.project(pts - shift)
+    ix, iy = np.floor(sx).astype(np.int64), np.floor(sy).astype(np.int64)
+    ok = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
+    gw, gh = (W + cell - 1) // cell, (H + cell - 1) // cell
+    lin = np.where(ok, (iy // cell) * gw + ix // cell, 0)
+    zmin = np.full(gw * gh, np.inf)
+    np.minimum.at(zmin, lin[ok], depth[ok])
+    toward = cam.axes()[2]
+    vis = ok & (depth <= zmin[lin] + eps) & (nrm @ toward > facing)
+    vis[ok] &= rgba[iy[ok], ix[ok], 3] >= 128
+    cols = np.zeros((len(pts), 3), np.uint8)
+    cols[vis] = rgba[iy[vis], ix[vis], :3]
+    return vis, cols
+
+
+def back_index(names: list[str], cams: list[Camera]) -> int | None:
+    """The straight-back direction (N: angle 270)."""
+    best = min(range(len(cams)), key=lambda k: abs(((cams[k].angle - 270.0 + 180) % 360) - 180))
+    return best if _is_back(cams[best].angle) else None
+
+
 def _gen_name(d: str, cand) -> str:
     tag, den = cand[0], cand[1]
     off = cand[2] if len(cand) > 2 else 0
@@ -1090,6 +1434,8 @@ def view_refs(d: str, angle: float, done, reference: str = REFERENCE) -> list[st
         return []
     if not _is_back(angle):
         return [reference]
+    if d == "N" and "BACK" in done:           # the back picture, drawn after the reference
+        return [reference, "BACK"]
     refs = ["N" if d != "N" and "N" in done else reference]
     side = _side_reference(angle)
     if side in refs:                          # the reference is that side: the other one
@@ -1106,7 +1452,8 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
                      drop_held: bool = True, absent=(), kind: str = "person",
                      seeds: dict | None = None, mirror: bool | None = None, never_mirror=(),
                      tint: bool = True, palette=None, cancel=None, gpu=None, only=None,
-                     progress=None) -> KeySet:
+                     parts: bool = True, back_picture: bool = True,
+                     back_tries: int = BACK_PICTURE_TRIES, progress=None) -> KeySet:
     """Key drawings that agree with each other: the reference direction (S) is drawn first over
     the model (img2img on the frame grid); every other direction is painted on a canvas
     [reference(s) | this direction's model render] where only the right panel is repainted
@@ -1123,7 +1470,14 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
     around each drawing (e.g. a lock shared with other GPU users). palette: keep this one (a
     redrawn direction is snapped to the palette the others were made with, so they stay as
     they were). only: draw just these directions (the preview: the reference alone); the
-    KeySet then holds only them, on a palette of their own pixels."""
+    KeySet then holds only them, on a palette of their own pixels.
+    parts: one colour per part (reference_parts): once the reference is drawn, the model's parts take
+    its colours (so every init agrees with it) and so does every drawing after it (match_drawing;
+    a direction whose parts were off is scored down). back_picture: then a back picture is
+    painted over the model seen from behind (back_tries tries, files back_<N>_t<i>.png reused),
+    repaints the model's back and is N's reference panel. Back views failing BACK_OK get
+    BACK_RETRY tries. NOTE: body.colours and the views' colours are changed in place (the
+    recoloured model), so the bending after this uses them too."""
     from contextlib import nullcontext
 
     from .assets import project_style, with_style
@@ -1164,6 +1518,159 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
     left = sum(1 for k in order for c in cands(k)
                if not (folder and reuse and (folder / _gen_name(names[k], c)).exists()))
     made, took = 0, []                 # seconds per drawing (median: the first loads models)
+    extra: dict = {}
+    # parts state: labels per body point, the reference's colours, part maps per view, which body
+    # points were recoloured (the init cloud follows them)
+    ps: dict = {"on": False, "changed": np.zeros(len(body.colours), bool)}
+    n_other = sum(1 for k in order if names[k] != ref)
+
+    def missing(k, cs=None):
+        return [c for c in (cs if cs is not None else cands(k))
+                if not (folder and reuse and (folder / _gen_name(names[k], c)).exists())]
+
+    def recolour_cloud():
+        nonlocal cloud
+        if cloud is None or not ps["changed"].any():
+            return
+        if "near" not in ps:
+            from scipy.spatial import cKDTree
+            if "pts" not in ps:
+                ps["pts"], ps["nrm"] = body.pose(rest.worlds)
+            ps["near"] = cKDTree(ps["pts"]).query(cloud[0])[1]
+            ps["cloud_base"] = cloud[2]
+        near = ps["near"]
+        cols = np.where(ps["changed"][near][:, None], body.colours[near], ps["cloud_base"])
+        cloud = (cloud[0], cloud[1], cols.astype(np.uint8))
+
+    def get_cloud():
+        nonlocal cloud
+        if cloud is None:
+            cloud = surface_cloud(rig, rest)
+            recolour_cloud()
+        return cloud
+
+    def set_colours(new) -> float:
+        new = np.asarray(new, np.uint8)
+        changed = np.any(new != body.colours, 1)
+        if not changed.any():
+            return 0.0
+        old = body.colours
+        body.colours = new
+        ps["changed"] |= changed
+        _refresh_view_colours(views, body, old)
+        recolour_cloud()
+        return float(changed.mean())
+
+    def draw_back(kb: int, labels, pc: PartColours):
+        """The back picture (see BACK_PICTURE_TRIES): the best try's {cam, rgba, prep, report}."""
+        nonlocal made
+        from .model3d import cut_out, view_prompt
+        from .subjectcheck import assess
+        d = names[kb]
+        region, kpx = grid_region(views[kb], 1024)
+        P = region[2] * kpx
+        pm = view_parts(views[kb], labels)
+        may_draw = bool(missing(kb))         # a back view will be drawn: worth the GPU
+        text, neg = view_prompt(words, "back", kind if kind in ("person", "animal") else "person",
+                                st)
+        if absent:
+            neg = f"{neg}, {', '.join(absent)}"
+        s_b = int(seeds.get(d, seed))
+        ref_sharp = sharpness(preps[ref].rgb, preps[ref].mask)
+        best, init = None, None
+        for t in range(max(0, int(back_tries))):
+            path = folder / f"back_{d}_t{t}.png" if folder else None
+            if path is not None and reuse and path.exists():
+                pic = Image.open(path).convert("RGB")
+            elif may_draw:
+                if cancel is not None and cancel():
+                    raise Cancelled(f"Stopped before painting the back; {len(preps)} directions "
+                                    "done (they are kept: drawing again carries on from here)")
+                if init is None:
+                    init = init_picture(rig, cams[kb], region, rest, out=P, blocky=False,
+                                        cloud=get_cloud(), view=views[kb])
+                    if folder:
+                        init.save(folder / f"init_back_{d}.png")
+                if client is None:
+                    pace(say=say)
+                say(f"Painting the back of it on your GPU (try {t + 1})…")
+                t1 = time.time()
+                with gpu(f"hybrid: back picture {t + 1}"):
+                    (pic, _), = generate_images(text, neg, client=client, seed=s_b + 104729 * t,
+                                                count=1, init_image=init,
+                                                denoise=BACK_PICTURE_DENOISE, width=P, height=P,
+                                                lora="none")
+                took.append(time.time() - t1)
+                made += 1
+                extra["back_drawn"] = extra.get("back_drawn", 0) + 1
+                pic = pic.convert("RGB")
+                if pic.size != (P, P):
+                    pic = pic.resize((P, P), Image.LANCZOS)
+                if path is not None:
+                    pic.save(path)
+            else:
+                break
+            verdict = assess(pic)
+            prep = drawing_to_frame(pic, region, (W, H), settings, kpx)
+            prep, off = trim_outside(prep, views[kb].mask)
+            if tint:
+                prep.rgb, _ = neutral_tint(prep.rgb, prep.mask, views[kb])
+            _, stp = match_drawing(prep.rgb, prep.mask, pm, pc)
+            sharp = sharpness(prep.rgb, prep.mask)
+            sc_iou = iou(prep.mask, views[kb].mask)
+            score = ((1.0 if verdict.ok else 0.0) + 0.3 * verdict.score + sc_iou
+                     + 0.5 * min(sharp / max(ref_sharp, 1e-6), 1.2)
+                     - PART_WEIGHT * (stp["miss"] + stp["grey"]) - 2 * off)
+            rep = {"try": t, "one_subject": bool(verdict.ok), "why": verdict.reason(),
+                   "iou": round(sc_iou, 3), "sharp": round(sharp, 2),
+                   "part_miss": round(stp["miss"], 3), "grey": round(stp["grey"], 3),
+                   "score": round(float(score), 3)}
+            say(f"back picture try {t + 1}: {verdict.reason()}, IoU {sc_iou:.2f}, sharp "
+                f"{sharp:.1f}, parts off {stp['miss']:.0%}, grey {stp['grey']:.0%} -> {score:.2f}")
+            if best is None or score > best[0]:
+                best = (score, pic, prep, rep)
+            if verdict.ok and stp["miss"] <= BACK_OK["miss"] and stp["grey"] <= BACK_OK["grey"]:
+                break
+        if best is None:
+            return None
+        _, pic, prep, rep = best
+        return {"cam": cams[kb].region(*region, P), "rgba": cut_out(pic), "prep": prep,
+                "report": rep}
+
+    def setup_parts():
+        """After the reference: the model in its parts and colours; then the back picture."""
+        kr = names.index(ref)
+        if "pts" not in ps:
+            ps["pts"], ps["nrm"] = body.pose(rest.worlds)
+        labels, new = reference_parts(body, views[kr], preps[ref].rgb, preps[ref].mask,
+                                      ps["pts"])
+        if (labels < 0).all():
+            return
+        info = {"model_recoloured": round(set_colours(new), 4)}
+        pc = part_colours(preps[ref].rgb, preps[ref].mask, view_parts(views[kr], labels))
+        info["parts"] = len(pc.lut)
+        say(f"Colours per part from {ref}: {len(pc.lut)} parts, "
+            f"{info['model_recoloured']:.0%} of the model recoloured to match")
+        kb = back_index(names, cams)
+        if back_picture and kb is not None and kb != kr and kb in order:
+            got = draw_back(kb, labels, pc)
+            if got is not None:
+                vis, cols = paint_points(ps["pts"], ps["nrm"], got["cam"], got["rgba"], rest.shift)
+                new = body.colours.copy()
+                new[vis] = cols[vis]
+                labels = relabel_by_colour(labels, new, vis, pc)   # hair painted on the back
+                new, st2 = match_points(new, labels, pc)
+                set_colours(new)
+                prep_b = got["prep"]
+                prep_b.rgb, _ = match_drawing(prep_b.rgb, prep_b.mask,
+                                              view_parts(views[kb], labels), pc)
+                preps["BACK"] = prep_b
+                keyrgba["BACK"] = clean_sprite(finish(prep_b, s_plain, None), outline_style).rgba
+                info["back_picture"] = {**got["report"], "painted": round(float(vis.mean()), 4),
+                                        "parts_off_after": round(st2["miss"], 4)}
+        ps.update(on=True, labels=labels, pc=pc, maps={})
+        extra["parts"] = info
+
     for k in order:
         d = names[k]
         a = cams[k].angle
@@ -1208,7 +1715,10 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
         good = GOOD[(kind if kind in ("animal",) else "person",
                      "back" if _is_back(a) else "front")]
         best = None
-        for cand in cands(k):
+        queue, qi, retried = list(cands(k)), 0, False
+        while qi < len(queue):
+            cand = queue[qi]
+            qi += 1
             tag, den = cand[0], cand[1]
             s_c = s_d + (cand[2] if len(cand) > 2 else 0)
             path = folder / _gen_name(d, cand) if folder else None
@@ -1218,9 +1728,7 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
                 if cancel is not None and cancel():
                     raise Cancelled(f"Stopped before drawing {d}; {len(preps)} directions done "
                                     "(they are kept: drawing again carries on from here)")
-                if cloud is None:
-                    cloud = surface_cloud(rig, rest)
-                init = init_picture(rig, cams[k], region, rest, out=P, blocky=True, cloud=cloud,
+                init = init_picture(rig, cams[k], region, rest, out=P, blocky=True, cloud=get_cloud(),
                                     view=views[k], outline=tag in ("o", "k"),
                                     crisp=0.8 if tag == "k" else 0.0)
                 canvas = Image.new("RGB", (P * panels, P), "white")
@@ -1257,6 +1765,11 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
             cast = (0.0, 0.0)
             if tint:
                 prep.rgb, cast = neutral_tint(prep.rgb, prep.mask, views[k])
+            pst = {"miss": 0.0, "grey": 0.0, "changed": 0.0}
+            if ps["on"]:                     # every part in the reference's colours
+                if k not in ps["maps"]:
+                    ps["maps"][k] = view_parts(views[k], ps["labels"])
+                prep.rgb, pst = match_drawing(prep.rgb, prep.mask, ps["maps"][k], ps["pc"])
             sc_iou = iou(prep.mask, views[k].mask)
             thin = thin_cover(prep.mask, views[k].mask)
             sharp = sharpness(prep.rgb, prep.mask)
@@ -1264,25 +1777,43 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
                     if cref in preps else 0.0)
             ref_sharp = sharpness(preps[ref].rgb, preps[ref].mask) if ref in preps else sharp
             score = (sc_iou + SHARP_WEIGHT * min(sharp / max(ref_sharp, 1e-6), 1.2) - dist
-                     - 2 * off - (1.0 - thin))
+                     - 2 * off - (1.0 - thin) - PART_WEIGHT * (pst["miss"] + pst["grey"]))
             say(f"{d} {tag}{den}: IoU {sc_iou:.2f}, sharp {sharp:.1f}, colour distance "
-                f"{dist:.2f}, off-model {off:.1%}, thin parts {thin:.0%} -> {score:.2f}")
+                f"{dist:.2f}, off-model {off:.1%}, thin parts {thin:.0%}"
+                + (f", parts off {pst['miss']:.0%}, grey {pst['grey']:.0%}" if ps["on"] else "")
+                + f" -> {score:.2f}")
             if best is None or score > best[0]:
                 best = (score, prep, dict(candidate=f"{tag}{den}" + (f"+{cand[2]}" if len(cand) > 2
                                                                      else ""),
                                           iou=sc_iou, sharp=sharp, colour_distance=dist,
                                           thin=thin,
                                           off_model=off, score=score, refs=refs, seed=s_d,
-                                          tint=[round(cast[0], 2), round(cast[1], 2)]))
+                                          tint=[round(cast[0], 2), round(cast[1], 2)],
+                                          part_miss=round(pst["miss"], 4),
+                                          grey=round(pst["grey"], 4),
+                                          recoloured=round(pst["changed"], 4)))
+            parts_ok = pst["miss"] <= BACK_OK["miss"] and pst["grey"] <= BACK_OK["grey"]
             if (sc_iou >= good[0] and dist <= good[1] and sharp >= good[2] * ref_sharp
-                    and off < 0.02 and thin >= 0.7 and cand is not cands(k)[-1]):
-                say(f"{d}: {tag}{den} is good, keeping it")
-                left -= sum(1 for c in cands(k)[cands(k).index(cand) + 1:]
-                            if not (folder and reuse and (folder / _gen_name(d, c)).exists()))
+                    and off < 0.02 and thin >= 0.7 and parts_ok):
+                if qi < len(queue):
+                    say(f"{d}: {tag}{den} is good, keeping it")
+                    left -= len(missing(k, queue[qi:]))
                 break
+            if qi == len(queue) and ps["on"] and _is_back(a) and not retried and BACK_RETRY:
+                b = best[2]                  # a back view still off: a few more tries
+                if (b["part_miss"] > BACK_OK["miss"] or b["grey"] > BACK_OK["grey"]
+                        or b["sharp"] < BACK_OK["sharp"] * ref_sharp):
+                    retried = True
+                    queue.extend(BACK_RETRY)
+                    left += len(missing(k, BACK_RETRY))
+                    say(f"{d}: still muddled (parts off {b['part_miss']:.0%}, grey "
+                        f"{b['grey']:.0%}, sharp {b['sharp']:.1f}): trying again")
         preps[d] = best[1]
         report[d] = best[2]
         keyrgba[d] = clean_sprite(finish(preps[d], s_plain, None), outline_style).rgba
+        if parts and d == ref and n_other and not ps["on"]:
+            setup_parts()
+    extra["drawings"] = made
     order_n = [d for d in names if d in preps]
     if palette is None:
         pixels = np.concatenate([preps[d].rgb[preps[d].mask] for d in order_n
@@ -1296,7 +1827,7 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
             sp.rgba[..., :3], sp.indices >= 0, refsp.rgba[..., :3], refsp.indices >= 0)
     return KeySet(order_n, sprites, [report[d]["iou"] for d in order_n],
                   [int(report[d].get("seed", seed)) for d in order_n],
-                  [bool(report[d].get("mirrored")) for d in order_n], report)
+                  [bool(report[d].get("mirrored")) for d in order_n], report, extra)
 
 
 def draw_keys(rig: Rig, body: Body, cams: list[Camera], views: list[RestView], rest: Pose,
@@ -1961,6 +2492,9 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
             "absent": list(absent or ()), "camera": camera, "palette": drawn_palette}
     if recolour:
         info["recolour"] = recolour
+    info["drawings"] = keys.extra.get("drawings", 0)
+    if keys.extra.get("parts"):
+        info["parts"] = keys.extra["parts"]
     return AnimatedSet(actions, names, sprites), info
 
 
@@ -2135,6 +2669,9 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
             bin_.mkdir(exist_ok=True)
             for f in keys_folder.glob(f"drawn_{d}_*.png" if d else "drawn_*.png"):
                 f.replace(bin_ / f.name)
+            if not d or d == "N":            # the back picture goes with the back view
+                for f in keys_folder.glob("back_*.png"):
+                    f.replace(bin_ / f.name)
     s = drawn_settings(kind, size, st)
     anim, info = drawn_animation(rigged, prompt, s, directions=directions or st.directions,
                                  frames=frames, animations=clips, elevation=st.elevation,
@@ -2143,7 +2680,11 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
                                  candidates=candidates, back_candidates=back_candidates,
                                  absent=absent, kind=kind, seeds=seeds, never_mirror=tuple(redraw),
                                  recolour=old.get("recolour"), cancel=cancel, gpu=gpu,
-                                 palette=_hex_palette(old.get("palette")) if redraw else None,
+                                 # a few redrawn: snapped to the old palette so the rest stay
+                                 # as they were; most redrawn: a new one over all of them
+                                 palette=_hex_palette(old.get("palette"))
+                                 if redraw and 2 * len(set(redraw)) < (directions or st.directions)
+                                 else None,
                                  progress=progress)
     written = write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
     meta = {k: v for k, v in info.items() if k != "keys"}

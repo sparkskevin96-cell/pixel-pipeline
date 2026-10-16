@@ -222,6 +222,13 @@ class StyleTrainDialog(QDialog):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.status.setText("Starting…")
+        from .. import progress
+        from .common import hub
+        self.tracker = progress.Tracker(title=f"Training style ({self.project.name})",
+                                        stop_raises=False)
+        self.tracker.on_stop = self.stop                 # the main window's ■ stops it too
+        self._hub_id = id(self.tracker)
+        hub().job_update(self._hub_id, self.tracker.snapshot(), self.tracker)
         self._launch(lambda: self.trainer.run(samples), self._trained)
 
     def stop(self):
@@ -261,6 +268,17 @@ class StyleTrainDialog(QDialog):
         if p.total:
             self.bar.setRange(0, p.total)
             self.bar.setValue(min(p.step, p.total))
+            self.bar.setFormat(f"%p% · step %v of %m")
+        tracker = getattr(self, "tracker", None)
+        if tracker is not None:                          # the main window's bar
+            from .common import hub
+            if p.total:
+                tracker.step(p.step, p.total, p.message or None)
+            if p.eta is not None:
+                tracker.hint(p.eta)
+            if p.phase in ("done", "stopped", "error"):
+                tracker.finish()
+            hub().job_update(self._hub_id, tracker.snapshot(), tracker)
         self.temp.setText(f"GPU {p.temp:.0f} °C" if p.temp is not None else "GPU –")
         bits = [p.message] if p.message else []
         if p.loss is not None:
@@ -287,6 +305,10 @@ class StyleTrainDialog(QDialog):
 
     @Slot()
     def _idle(self):
+        if getattr(self, "tracker", None) is not None:
+            from .common import hub
+            hub().job_end(self._hub_id)
+            self.tracker = None
         self._thread = self._job = None
         self.stop_btn.setEnabled(False)
         self.update_estimate()

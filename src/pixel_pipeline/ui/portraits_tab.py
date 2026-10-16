@@ -142,8 +142,17 @@ class PortraitsTab(ToolTab):
         from ..portraits import make_portraits
         exprs, style, size, client = self.expressions(), self.style.currentData(), \
             self.size_.value(), self.client
+        from ..makeany import GPU
+        from ..progress import Stage
+        n = max(1, len(exprs))
+        plan = [Stage("crop", "Head and shoulders", 0.03, r"cropping"),
+                Stage("neutral", "Painting (neutral)", 0.5, r"\(neutral\)", pictures=1),
+                Stage("expr", f"{n - 1} expressions", max(0.05, GPU["inpaint"] * (n - 1)),
+                      r"painting .*\((?!neutral)|no face found", pictures=max(1, n - 1)),
+                Stage("write", "Sheets", 0.05, r"writing the sheets")]
         self.run(lambda say: make_portraits(ch, exprs, style, size, client=client, progress=say),
-                 self._made, f"Painting portraits of {ch.name}…")
+                 self._made, f"Painting portraits of {ch.name}…", plan=plan,
+                 title=f"Portraits of {ch.name}")
 
     def _made(self, asset):
         self.refresh()

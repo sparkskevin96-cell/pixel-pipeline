@@ -943,6 +943,38 @@ def cpu_minutes(plan: Plan) -> float:
     return 0.0
 
 
+def progress_plan(plan: Plan) -> tuple[list | None, float | None]:
+    """(progress.Stage list or None, estimate in seconds or None) for a plan's progress bars:
+    stages from the measured GPU table, so the bar and "about X min left" match summary()."""
+    from . import progress as P
+    p = plan.params
+    k = plan.kind
+    if k == "character":
+        return P.character_plan(drawn=bool(p.get("drawn")), preview=bool(p.get("review")),
+                                directions=int(p.get("directions", 16))), None
+    if k == "item":
+        n = max(1, int(p.get("variations", 3)))
+        stages = P.variations_plan(n, GPU["icon"], "icon")
+        if p.get("world") and p.get("category") in ("potion", "food", "armour"):
+            stages.insert(2, P.Stage("model", "3D model of the icon", GPU["item3d"],
+                                     r"3d model|hunyuan|icon from the model"))
+        stages.append(P.Stage("world", "World sprite", 0.2, r"rendering .* in the world|done\."))
+        return stages, None
+    if k == "prop":
+        if p.get("look", "drawn") == "drawn" and int(p.get("directions", 1)) <= 1:
+            n = max(1, int(p.get("variations", 3)))
+            return P.variations_plan(n, GPU["prop_drawing"], "drawing") + [
+                P.Stage("corner", "Drawn from the corner", GPU["model3d"] * 0.5 + GPU["sdxl"],
+                        r"3d shape from the drawing|from the corner")], None
+        return None, max(10.0, (gpu_minutes(plan) + cpu_minutes(plan)) * 60)
+    if k == "tileset":
+        n = max(1, int(p.get("count", 3)))
+        return [P.Stage("draw", f"Drawing {n} textures", GPU["tile"] * n, r"drawing .* texture"),
+                P.Stage("seamless", "Seamless + checks", 0.05 * n, r"seamless|came out|calm drawn")], None
+    m = gpu_minutes(plan) + cpu_minutes(plan)
+    return None, (max(5.0, m * 60) if m > 0 else None)
+
+
 def _minutes(m: float) -> str:
     if m < 0.75:
         return "under a minute"
@@ -1084,6 +1116,12 @@ def _say(progress):
     return progress or (lambda text: None)
 
 
+def _wrap_progress(say):
+    """say(text) -> a (step, text) callback; a progress.Tracker takes both as they are."""
+    from .progress import wrap
+    return wrap(say)
+
+
 def _project(project):
     if project is not None:
         return project
@@ -1100,7 +1138,7 @@ def _make_character(plan: Plan, project, say, client=None) -> Made:
         out = Path(tmp) / "model.glb"
         say(f"Making the {body} model of “{plan.prompt}” on your GPU…")
         res = prompt_to_model(plan.prompt or plan.name, out, subject=body, client=client,
-                              seed=p.get("seed"), progress=lambda step, text: say(text))
+                              seed=p.get("seed"), progress=_wrap_progress(say))
         picture = getattr(res, "picture", None)
         picture = picture if picture and Path(picture).suffix.lower() == ".png" and \
             Path(picture).exists() else None
@@ -1341,7 +1379,8 @@ def queue_worker(name: str, prompt: str, options: dict, project, makers: dict | 
     (its .name / .folder go in the job's results)."""
     plan = Plan.from_dict(options["plan"]) if "plan" in options else route(prompt or name)
     plan.name = name or plan.name
-    made = run_plan(plan, project, makers=makers)
+    from .progress import current
+    made = run_plan(plan, project, current(), makers=makers)   # the batch's bar, if any
     if not made.saved:
         keep(made, 1)
     return made

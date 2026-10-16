@@ -101,6 +101,9 @@ class MainWindow(QMainWindow):
         self.version_label = QLabel(self.version[0].upper() + self.version[1:])
         self.version_label.setToolTip(build.label if build else "Running from source")
         self.version_label.setStyleSheet("padding:0 6px;font-weight:600;")
+        from .common import GlobalProgress
+        self.job_progress = GlobalProgress(self)     # any tab's running job, % in the title
+        self.statusBar().addPermanentWidget(self.job_progress)
         self.statusBar().addPermanentWidget(self.version_label)
         self.tabs.currentChanged.connect(lambda *_: self._hint())
         self.tabs.setCurrentWidget(self.make_tab)

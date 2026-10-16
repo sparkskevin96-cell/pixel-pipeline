@@ -344,8 +344,10 @@ class CardsTab(ToolTab):
             return
         asset = self.save()
         style, client = self.art_style.currentData(), self.client
+        from ..makeany import GPU
         self.run(lambda say: C.make_art(asset, style=style, client=client, progress=say),
-                 self._art_made, f"Making art for {asset.name} on your GPU…")
+                 self._art_made, f"Making art for {asset.name} on your GPU…",
+                 estimate=GPU["card_art"] * C.VARIATIONS * 60 + 10, title=f"Card art for {asset.name}")
 
     def _art_made(self, asset):
         self.asset = asset

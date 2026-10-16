@@ -643,6 +643,63 @@ wants terse answers and fixes over polish.
   knight-v3 copy, no GPU). GPU e2e (QA 2026-10-15, dwarf-front-first, gpu_lock): model 3.2 min, front + idle 49 s,
   redraw 37 s, pick try 1, approve 13.9 min (25 drawings 11.6 min + bending 1.8 min; S files sha1-identical);
   shot character_review_ui_gpu.png (two tries).
+- **Backs + one colour per part (2026-10-15, Kevin: "their backs seem muddled and the green girl has a
+  lump on her forehead")** (drawnrig.py, all drawn characters, runs after the reference S is drawn, so
+  it fits "Front first, then OK"): cause = the Hunyuan model's far side is the front picture blurred
+  through (mush), and every direction is repainted from ITS init, so a part the model has white (elf
+  hair, sash) but S drew red came out white in some views (the "lump") and grey blobs on the back.
+  (1) `reference_parts`: S's colours k-means'd (8, Lab, L half weight) and projected on the model; every
+  point S sees takes its pixel's part + colour, unseen points the part of one of the 24 nearest seen
+  points of their bone group (PART_GROUPS head/torso/arm/hand/leg/foot/tail) with the most similar
+  MODEL colour, coloured from that part's S colours by lightness rank; part = group x cluster. The
+  recoloured model (body.colours, the views' colours, the init cloud via nearest body point) makes
+  every init agree with S. (2) BACK PICTURE (`draw_back`, files keys/back_N_t<i>.png, init_back_N.png):
+  img2img 0.62 of the recoloured model seen from N at ~1024 px, model3d.view_prompt "back" (no pixel
+  LoRA), up to BACK_PICTURE_TRIES=2 seeds, checked with subjectcheck.assess + part colours vs S
+  (miss/grey) + IoU + sharpness; cut out, `paint_points` (z-buffer, facing) repaints the model's back,
+  `relabel_by_colour` puts the painted points in their nearest S part, `match_points` evens them; on
+  the frame grid it is N's reference panel: N painted beside [S | BACK] (view_refs), back diagonals
+  beside [N | side] as before. Only drawn when a back view needs drawing (else a kept file is used).
+  (3) every later drawing: `match_drawing` (part map = view_parts of its rest view): a part whose median
+  colour is > PART_MISS 18 from S's median for it is recoloured whole by lightness rank to S's colours
+  (shading kept), else only pixels > 24 from its part's AND every S colour; score -= miss + grey share
+  (near-grey L>30 where S's part is coloured); GOOD also needs miss <= 0.15, grey <= 0.10. (4) back
+  views still off (BACK_OK miss/grey/sharpness 0.6 x S) get BACK_RETRY (k0.6+2, o0.66+3) before the
+  best is kept. drawn_sheets: redraw of >= half the directions makes a new palette (was: the old
+  one, full of the white/grey it was fixing); back_*.png go to keys/old with N / a full redraw.
+  info/keys.json: "drawings" (count this run), "parts" {model_recoloured, parts, back_picture{...}}.
+  Tests (fake ComfyUI): test_drawnrig parts/back tests + updated counts (test_preview, test_robust use
+  keys.json "drawings"). GPU (QA 2026-10-15, redraw of all but the approved S, gpu_lock per drawing):
+  elf-archer 18.9 min (44 drawings incl. 1 back picture + retries, bending 94 s), dwarf-front-first
+  12.1 min (26) and again 18.3 min (42, 5 back views retried). Shots Pictures/PixelPipeline/
+  backs_fix_elf.png, backs_fix_2.png (dwarf, the 18.3 min run; backs_fix_2_v1.png the first), before
+  over after, 16 idle + walk N|S. Result: backs read as a cloaked figure from behind in S's colours (elf:
+  green hood + dark cloak instead of grey/white/green mush; dwarf: hood + cloak instead of his face and
+  beard drawn on the back), no white hair. Tried and dropped (GPU): treating edge-on/outline points as
+  unseen + nearest-only/up-facing parts for the far side (dwarf back views drew a face, elf bald),
+  shot backs_fix_2_v2_rejected.png. Still weak: the elf's S itself is odd (brown hair + green top, a
+  grey floating sash beside the head -> a grey puff by the head in SE/SSE, consistent with S but
+  still a lump); dwarf NNW still drew a front (face) in the 2nd run, NE/ENE a pale beard edge
+  (redraw one direction fixes such); dwarf backs dark-ish; the elf model's giant ribbon arcs.
+  Side pictures (left/right) not made (E/W beside S were fine).
+- **Progress bars (2026-10-15, Kevin: "can I get progress bars whenever doing this")** (`progress.py`,
+  `comfyws.py`, ui/common.py ProgressPanel / GlobalProgress / JobRunner / hub()): one `progress.Tracker`
+  per job IS the job's callback: text (as before; stage words by regex, "n of N", "about X min left"
+  read), (step, text) (model3d), (done, total), a fraction; `child(k, n)` = batch job k of N. Plans =
+  `Stage` lists in makeany.GPU minutes (`character_plan`, `model_plan`, `variations_plan`,
+  `game_model_plan`, `makeany.progress_plan(plan)`); the first stage counts only if it happened;
+  skipped stages drop out; bars never go back; ETA = plan x measured speed of finished stages, live
+  "n of N" rate, hints. GPU steps: ComfyClient opens ComfyUI's /ws?clientId= (stdlib socket thread,
+  only while a tracked job runs on the thread: `progress.using`; PySide's QtWebSockets is excluded by
+  the spec) and wait() reports the prompt's sampler value/max (`gpu_sampling`, `gpu_pictures` i of n
+  per call); no websocket = time-based. Stop: tracker.stop() -> the next say raises `progress.Stopped`,
+  GPU waits POST /interrupt (stop_raises=False for batches: "after this one"). UI: ToolTab.run(...,
+  plan=, estimate=, title=) puts a panel (overall bar + stage, stage/current-job bar + GPU step, about X
+  min left, Stop) at the bottom of every page (attach_panel), ModelStudio/CharacterReview/MakeTab/
+  objects/tiles/portraits/cards/Library export + restyle + queue pass plans; the main window's status
+  bar shows the running job from any tab and the window title gets "NN% · ". Style training feeds the
+  same hub. Tests tests/test_progress.py (fake clock, fake ComfyUI websocket); shot
+  tools/progress_shot.py -> Pictures/PixelPipeline/progress_ui.png.
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 
