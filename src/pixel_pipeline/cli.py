@@ -948,10 +948,15 @@ def main(argv: list[str] | None = None) -> int:
     _add_sheet(sub)
     _add_tileset(sub)
     sub.add_parser("palettes", help="list built-in palettes").set_defaults(func=_cmd_palettes)
+    from .cli_agent import add_parsers as _add_studio      # make / character / jobs / library /
+    _add_studio(sub)                                        # project / export (asset studio)
     args = parser.parse_args(argv)
     try:
         return args.func(args)
     except (CutoutUnavailable, ComfyUIError, ModelUnavailable, ValueError, FileNotFoundError) as e:
+        if getattr(args, "json", False):
+            import json
+            print(json.dumps({"error": str(e)}))
         print(f"error: {e}", file=sys.stderr)
         return 2
 

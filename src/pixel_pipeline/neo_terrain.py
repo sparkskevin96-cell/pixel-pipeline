@@ -598,8 +598,42 @@ class BoardTex:
     side_normal: np.ndarray | None = None
 
 
-RELIEF = {"cobble": 1.6, "stone": 1.2, "planks": 1.0, "dirt": 0.9, "grass": 0.7, "sand": 0.6,
-          "snow": 0.5, "water": 0.2}
+RELIEF = {"cobble": 1.6, "stone": 1.2, "planks": 1.0, "dirt": 0.9, "grass": 0.7, "sand": 1.3,
+          "snow": 1.5, "water": 0.2}
+# Bright tops on the lit board (2026-10-16, Kevin: snow read near-plain white and sand pale at
+# noon): their albedo is capped (Lab L of the 98th percentile) and their drawn steps spread, the
+# darker steps leaning cool (hue-shifted shadows), so noon light + tonemapping keep the shapes.
+ALBEDO_CAP = {"snow": 83.0, "sand": 76.0}
+ALBEDO_CAP_DEFAULT = 88.0
+BOARD_CONTRAST = {"snow": 1.6, "sand": 1.75}
+SHADE_SHIFT = {"snow": (1.5, -9.0), "sand": (3.0, -6.0)}          # Lab (a, b) at the darkest step
+BOARD_RELIEF = {"snow": 1.6, "sand": 1.4}                         # the shader's normal depth
+
+
+def board_albedo(tex: np.ndarray, name: str) -> np.ndarray:
+    """A top texture as the board shows it: L spread x BOARD_CONTRAST about its mean, the 98th
+    percentile capped at ALBEDO_CAP (Lab L), darker-than-mean pixels shifted toward SHADE_SHIFT.
+    Other terrains only get the default cap (most never reach it)."""
+    from .color import lab_to_rgb, rgb_to_lab
+    rgb = np.asarray(tex)[..., :3]
+    lab = rgb_to_lab(rgb.astype(np.float32)).astype(np.float64)
+    L = lab[..., 0]
+    m = float(L.mean())
+    g = BOARD_CONTRAST.get(name, 1.0)
+    L2 = m + (L - m) * g
+    over = float(np.percentile(L2, 98)) - ALBEDO_CAP.get(name, ALBEDO_CAP_DEFAULT)
+    if over > 0:
+        L2 = L2 - over
+    if g == 1.0 and over <= 0:
+        return np.asarray(tex).copy()
+    lab[..., 0] = np.clip(L2, 0, 100)
+    da, db = SHADE_SHIFT.get(name, (0.0, 0.0))
+    k = np.clip((m - (L2 + max(over, 0))) / 25.0, 0, 1)            # 0 at the mean, 1 well below
+    lab[..., 1] += da * k
+    lab[..., 2] += db * k
+    out = np.asarray(tex).copy()
+    out[..., :3] = np.clip(np.rint(lab_to_rgb(lab.astype(np.float32))), 0, 255).astype(np.uint8)
+    return out
 
 
 def _sets_texture(look, key) -> np.ndarray | None:
@@ -647,6 +681,7 @@ def board_textures(names, t: int = 32, seed: int = 0, look=None, variants: int =
                 weights.append(1.0)
         else:
             heights = [None] * len(tops)
+        tops = [board_albedo(x, name) for x in tops]             # bright tops capped (noon)
         top_ramp = ramp_of(tops[0])
         if name == "planks":
             side, sh = planks(t, seed + 3, ramp_of(wood) if wood is not None else None, vertical=True)
@@ -655,10 +690,12 @@ def board_textures(names, t: int = 32, seed: int = 0, look=None, variants: int =
                                  bricks=True, seams=(0,))
         elif name == "water":
             side, sh = paint_side("water", t, seed)
-        else:
+        else:                     # natural walls: the cliff set's boulder faces (tiles v3)
+            from .tilepaint import boulder_face, stone_tints
             moss = ramp_of(tops[0], 5) if name == "grass" else None
-            side, sh = rock_face(t, t, rock_ramp, seed + 7, seams=(0,), moss=moss,
-                                 band=(t / 3, t / 2) if name == "sand" else None)
+            side, sh = boulder_face(t, t, rock_ramp, seed + 7, seams=(0,), moss=moss,
+                                    band=(t / 3, t / 2) if name == "sand" else None,
+                                    tints=stone_tints(rock))
         lip = None if name == "water" else overhang(t, top_ramp if name not in ("stone", "cobble")
                                                     else ramp_of(side), seed, LIP_KIND.get(name, "soil"))
         rel = RELIEF.get(name, 0.8)
@@ -684,7 +721,7 @@ def write_board_textures(names, folder, t: int = 32, seed: int = 0, look=None) -
         Image.fromarray(bt.side).save(folder / f"{name}_side.png")
         Image.fromarray(bt.side_normal).save(folder / f"{name}_side_n.png")
         entry = {"variants": len(bt.tops), "weights": [round(float(w), 3) for w in bt.weights],
-                 "source": bt.source}
+                 "source": bt.source, "relief": BOARD_RELIEF.get(name, 1.0)}
         if bt.lip is not None:
             Image.fromarray(bt.lip).save(folder / f"{name}_lip.png")
             entry["lip"] = f"{name}_lip.png"

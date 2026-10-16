@@ -15,6 +15,8 @@ collections, created, and anything the kind needs in "extra". list_assets() sear
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -500,7 +502,31 @@ def create_project(name: str, style: Style | None = None, type: str | None = Non
     return proj
 
 
+_PROJECT_OVERRIDE: "contextvars.ContextVar[Project | None]" = contextvars.ContextVar(
+    "pixel_project", default=None)
+
+
+@contextlib.contextmanager
+def using_project(project: "Project | str | None"):
+    """Inside the block, current_project() is `project` on THIS thread only (settings.json and
+    the app's current project are not touched). Claude's jobs run in their own project this way
+    (agentjobs.py), whatever is switched meanwhile. None = no change."""
+    if project is None:
+        yield current_project()
+        return
+    if isinstance(project, str):
+        project = Project(project, projects_folder() / project)
+    token = _PROJECT_OVERRIDE.set(project)
+    try:
+        yield project
+    finally:
+        _PROJECT_OVERRIDE.reset(token)
+
+
 def current_project() -> Project:
+    over = _PROJECT_OVERRIDE.get()
+    if over is not None:
+        return over
     _migrate()
     name = _settings().get("project", "Default")
     folder = projects_folder() / name

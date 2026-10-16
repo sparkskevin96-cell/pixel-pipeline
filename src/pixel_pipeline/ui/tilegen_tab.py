@@ -113,7 +113,8 @@ class TilegenTab(ToolTab):
     def quick(self):
         from ..tilegen import builtin_swatch
         st = self._style()
-        self._made([builtin_swatch(self.terrain.currentText(), st.tile, 0, st)])
+        self._made([builtin_swatch(self.terrain.currentText(), st.tile, 0, st,
+                                   words=self.words.text().strip())])
 
     def _made(self, swatches):
         self.swatches = list(swatches)

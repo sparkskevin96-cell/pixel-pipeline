@@ -102,13 +102,23 @@ def _mottle(t: int, rng, cells: int, lo: float, hi: float) -> np.ndarray:
     return _majority(f > hi).astype(int) - _majority(f < lo).astype(int)
 
 
-def grass_idx(t: int, seed: int = 0) -> np.ndarray:
+def _d(d):
+    from .tilewords import PLAIN
+    return PLAIN if d is None else d
+
+
+def grass_idx(t: int, seed: int = 0, d=None) -> np.ndarray:
     """Lawn (6-step ramp): a mid green with small darker / lighter spots and evenly spread blade
-    tufts lit from the upper left (light tips, mid blades, a dark root shadow)."""
+    tufts lit from the upper left (light tips, mid blades, a dark root shadow). d (tilewords.
+    Details): tufts x count, tall = taller blades, cracks = dry bare spots."""
+    d = _d(d)
     rng = _rng("tgrass", t, seed)
     idx = 2 + _mottle(t, rng, max(3, t // 4), 0.2, 0.8)
-    for y, x in scatter(t, max(4, t * t // 56), rng, max(2.5, t / 7)):
-        big = t >= 24 and rng.random() < 0.55
+    many = d.tufts * (1 + 0.3 * d.tall)
+    n = max(4, t * t // 56) if many == 1.0 else max(3, int(t * t / 56 * many))
+    sp = max(2.5, t / 7) if many == 1.0 else max(2.0, t / 7 / np.sqrt(max(many, 0.3)))
+    for y, x in scatter(t, n, rng, sp):
+        big = t >= 24 and rng.random() < 0.55 + 0.4 * d.tall
         b = int(idx[y, x])
         _put(idx, y + 1, x, max(1, b - 1), t)                      # a soft root shadow
         _put(idx, y, x - 1, min(5, b + 1), t)                      # blades
@@ -118,17 +128,32 @@ def grass_idx(t: int, seed: int = 0) -> np.ndarray:
             _put(idx, y, x, min(5, b + 1), t)
             _put(idx, y - 1, x, min(5, b + 2), t)
             _put(idx, y - 2, x, min(5 if rng.random() < 0.2 else 4, b + 3), t)
+            if d.tall > 0 and rng.random() < 0.4 + 0.5 * d.tall:     # tall grass: long blades
+                lean = 1 if rng.random() < 0.5 else -1
+                _put(idx, y - 3, x + (lean if rng.random() < 0.5 else 0), min(5, b + 3), t)
+                if d.tall >= 1 and t >= 32:
+                    _put(idx, y - 4, x + lean, min(5, b + 3), t)
+                _put(idx, y + 1, x - lean, max(0, b - 2), t)          # deeper root shadow
+    if d.cracks > 0:                                                  # dry: a few bare cracks
+        from .tilewords import add_cracks
+        idx = add_cracks(idx, rng, d.cracks * 0.5, dark=1, cell=max(6.0, t / 2.5))
     return idx
 
 
-def dirt_idx(t: int, seed: int = 0) -> np.ndarray:
+def dirt_idx(t: int, seed: int = 0, d=None) -> np.ndarray:
     """Packed earth (6 steps): small worn spots, evenly spread lit pebbles with a shadow on the
-    lower right, a few dark pits and short cracks."""
+    lower right, a few dark pits and short cracks. d: pebbles x count (big_pebbles: up to 3 x 3),
+    cracks = a dried-mud crack network, footprints = a trail of prints."""
+    d = _d(d)
     rng = _rng("tdirt", t, seed)
     idx = 3 + _mottle(t, rng, max(3, t // 4), 0.27, 0.75)
-    for y, x in scatter(t, max(3, t * t // 85), rng, max(3.0, t / 5)):
+    pb = d.pebbles
+    n = max(3, t * t // 85) if pb == 1.0 else max(3, int(t * t / 85 * pb))
+    for y, x in scatter(t, n, rng, max(3.0, t / 5) if pb == 1.0 else max(2.5, t / 5 / np.sqrt(pb))):
         w = 2 if rng.random() < 0.6 else 1
         h = 2 if (w == 2 and rng.random() < 0.5) else 1
+        if d.big_pebbles and rng.random() < 0.5:
+            w, h = 3, int(rng.integers(2, 4))
         for dy in range(h):
             for dx in range(w):
                 _put(idx, y + dy, x + dx, 5 if dy == 0 and dx == 0 else 4, t)
@@ -145,38 +170,69 @@ def dirt_idx(t: int, seed: int = 0) -> np.ndarray:
             _put(idx, y, x, 1, t)
             x += 1
             y += int(rng.integers(-1, 2))
+    if d.cracks > 0:
+        from .tilewords import add_cracks
+        idx = add_cracks(idx, rng, d.cracks, dark=0)
+    if d.footprints:
+        from .tilewords import add_footprints
+        idx = add_footprints(idx, rng, deep=1, rim=4, mid=2)
     return idx
 
 
-def sand_idx(t: int, seed: int = 0) -> np.ndarray:
+def sand_idx(t: int, seed: int = 0, d=None) -> np.ndarray:
     """Fine sand (5 steps): broken, gently curved wind ripples (a lit crest over a soft shadow),
-    faint spots and a few grains."""
+    faint spots and a few grains. d: ripples x count and length (dunes: wide crest bands under
+    them), pebbles x grains, cracks = dried crust, footprints."""
+    d = _d(d)
     rng = _rng("tsand", t, seed)
     idx = 2 + _mottle(t, rng, max(3, t // 4), 0.3, 0.75)
     idx = np.clip(idx, 1, 3)
-    for y, x in scatter(t, max(3, t * t // 120), rng, max(4.0, t / 4.5)):
-        L = int(rng.integers(max(3, t // 8), max(5, t // 4) + 1))
+    if d.dunes:
+        from .tilewords import dune_bands
+        idx = np.clip(idx + dune_bands(t, rng), 1, 3)
+    rip = d.ripples
+    n = max(3, t * t // 120) if rip == 1.0 else max(3, int(t * t / 120 * rip))
+    for y, x in scatter(t, n, rng, max(4.0, t / 4.5) if rip == 1.0 else max(3.0, t / 4.5 / np.sqrt(rip))):
+        if rip == 1.0:
+            L = int(rng.integers(max(3, t // 8), max(5, t // 4) + 1))
+        else:
+            L = min(t - 2, int(rng.integers(max(3, int(t / 8 * rip)), max(5, int(t / 4 * rip)) + 1)))
         yy = y
         for k in range(L):
             if k and rng.random() < 0.25:
                 yy += int(rng.choice((-1, 1)))
             _put(idx, yy, x + k, 3, t)
             _put(idx, yy + 1, x + k, 1, t)
-    for y, x in scatter(t, max(1, t // 12), rng, t / 4):           # grains
+    pb = d.pebbles
+    for y, x in scatter(t, max(1, t // 12) if pb == 1.0 else max(1, int(t / 12 * pb)), rng,
+                        t / 4 if pb == 1.0 else t / 4 / np.sqrt(pb)):           # grains
         _put(idx, y, x, 4 if rng.random() < 0.6 else 1, t)
+    if d.cracks > 0:
+        from .tilewords import add_cracks
+        idx = add_cracks(idx, rng, d.cracks, dark=1, lit=4)
+    if d.footprints:
+        from .tilewords import add_footprints
+        idx = add_footprints(idx, rng, deep=1, rim=4, mid=2)
     return idx
 
 
-def snow_idx(t: int, seed: int = 0) -> np.ndarray:
+def snow_idx(t: int, seed: int = 0, d=None) -> np.ndarray:
     """Fresh snow (5 steps, all light): a white body, small evenly spread drifts (a white crest,
-    a soft blue shadow under it, deeper in its middle), tiny hollows, a few sparkles."""
+    a soft blue shadow under it, deeper in its middle), tiny hollows, a few sparkles. d: fresh =
+    fewer drifts + more sparkle, ripples = windswept (longer, more drifts), footprints."""
+    d = _d(d)
     rng = _rng("tsnow", t, seed)
     body = 3
     idx = np.full((t, t), body)
     sp = _mottle(t, rng, max(3, t // 4), 0.36, 2.0)               # soft shaded hollows
     idx[sp < 0] = 2
-    for y, x in scatter(t, max(3, t * t // 100), rng, max(4.0, t / 5)):
-        L = int(rng.integers(max(3, t // 8), max(5, t // 4) + 1))
+    many = (0.45 if d.fresh else 1.0) * d.ripples ** 0.6
+    n = max(3, t * t // 100) if many == 1.0 else max(2, int(t * t / 100 * many))
+    for y, x in scatter(t, n, rng, max(4.0, t / 5) if many == 1.0 else max(3.5, t / 5 / np.sqrt(many))):
+        if d.ripples == 1.0:
+            L = int(rng.integers(max(3, t // 8), max(5, t // 4) + 1))
+        else:
+            L = min(t - 2, int(rng.integers(max(3, int(t / 8 * d.ripples)), max(5, int(t / 4 * d.ripples)) + 1)))
         for k in range(L):
             end = k in (0, L - 1)
             yy = y + (1 if end else 0)
@@ -184,8 +240,12 @@ def snow_idx(t: int, seed: int = 0) -> np.ndarray:
             _put(idx, yy, x + k, 2 if end else 1, t)               # blue shadow under it
             if not end and L >= 5:
                 _put(idx, yy + 1, x + k, 0 if 1 < k < L - 2 else 2, t)   # deepest in the middle
-    for y, x in scatter(t, max(1, t // 10), rng, t / 5):           # sparkles
+    for y, x in scatter(t, max(1, t // 10) if not d.fresh else max(2, int(t / 4)), rng,
+                        t / 5 if not d.fresh else t / 7.5):          # sparkles
         _put(idx, y, x, 4, t, only=(body,))
+    if d.footprints:
+        from .tilewords import add_footprints
+        idx = add_footprints(idx, rng, deep=0, rim=4, mid=1)
     return idx
 
 
@@ -202,17 +262,23 @@ def neo_idx(fn, t: int, seed: int, n: int = 7, **kw) -> np.ndarray:
     return np.asarray(out[0] if isinstance(out, tuple) else out)[..., 0].astype(int)
 
 
-def _flag_idx(t, seed):
+def _flag_idx(t, seed, d=None):
     from .neo_terrain import flagstones
-    return neo_idx(flagstones, t, seed)
+    idx = neo_idx(flagstones, t, seed)
+    d = _d(d)
+    if d.cracks > 0:
+        from .tilewords import add_cracks
+        idx = add_cracks(idx, _rng("flagcracks", t, seed), d.cracks * 0.6, dark=0,
+                         cell=max(6.0, t / 2.5))
+    return idx
 
 
-def _plank_idx(t, seed):
+def _plank_idx(t, seed, d=None):
     from .neo_terrain import planks
     return neo_idx(planks, t, seed)
 
 
-def _brick_idx(t, seed):
+def _brick_idx(t, seed, d=None):
     from .neo_terrain import rock_face
     code = np.repeat(np.arange(7, dtype=np.uint8)[:, None], 3, 1)
     return rock_face(t, t, code, seed, bricks=True, seams=(0,))[0][..., 0].astype(int)
@@ -591,11 +657,16 @@ def swatch_colour(picture, terrain: str = "water") -> np.ndarray:
 
 
 def drawn_tile(terrain: str, size: int, seed: int = 0, picture=None,
-               palette: np.ndarray | None = None, ramp: np.ndarray | None = None) -> np.ndarray:
+               palette: np.ndarray | None = None, ramp: np.ndarray | None = None,
+               words: str = "") -> np.ndarray:
     """A soft terrain drawn by code (grass, dirt, sand, snow: SOFT painters; water: neo
     ripples) in colours taken from `picture` (SDXL's swatch) or `ramp`, else the hand-built
-    ramp. Same seed + ramp = same tile; other seeds = other layouts in the same colours."""
+    ramp. Same seed + ramp = same tile; other seeds = other layouts in the same colours.
+    words: the user's words also shape it (tilewords: "mossy" -> moss clumps, "cracked" ->
+    cracks, "flower meadow" -> flowers, "rippled dune" -> long ripples ...)."""
     from .neo_terrain import _colour
+    from .tilewords import details, stamp_details
+    d = details(terrain, words)
     if terrain == "water":
         from .tilegen import neo_water_tile
         colour = swatch_colour(picture) if picture is not None else (40, 120, 200)
@@ -606,7 +677,11 @@ def drawn_tile(terrain: str, size: int, seed: int = 0, picture=None,
         fn, _, n = SOFT[terrain]
         if ramp is None:
             ramp = drawn_ramp(terrain, picture)
-        tex = _colour(np.asarray(ramp), fn(size, seed))
+        ramp = np.asarray(ramp)
+        idx = fn(size, seed, d) if not d.plain() else fn(size, seed)
+        tex = _colour(ramp, idx)
+        if not d.plain():
+            tex = stamp_details(tex, np.clip(idx, 0, len(ramp) - 1), terrain, d, seed, ramp)
     if palette is not None and len(palette):
         from .cards import snap_image
         tex = snap_image(tex, palette)
@@ -622,17 +697,18 @@ def texture_ramp(tex: np.ndarray) -> np.ndarray:
 
 
 def drawn_variants(terrain: str, tex: np.ndarray, seed: int, count: int = 3,
-                   ramp: np.ndarray | None = None) -> list[np.ndarray]:
-    """More layouts of a drawn tile (other seeds, the same ramp): variety() sources. ramp None:
-    the tile's own colours, used only when they are a full ramp (else []). Water: none (its
-    ripples vary under variety's rolls)."""
+                   ramp: np.ndarray | None = None, words: str = "") -> list[np.ndarray]:
+    """More layouts of a drawn tile (other seeds, the same ramp and words): variety() sources.
+    ramp None: the tile's own colours, used only when they are a full ramp (else []). Water:
+    none (its ripples vary under variety's rolls)."""
     if terrain not in SOFT:
         return []
     if ramp is None:
         ramp = texture_ramp(tex)
         if len(ramp) != SOFT[terrain][2]:
             return []
-    return [drawn_tile(terrain, tex.shape[0], seed + 101 * (k + 1), ramp=ramp) for k in range(count)]
+    return [drawn_tile(terrain, tex.shape[0], seed + 101 * (k + 1), ramp=ramp, words=words)
+            for k in range(count)]
 
 
 def drawn_ramp(terrain: str, picture=None) -> np.ndarray | None:
@@ -655,6 +731,121 @@ GAP_SHARE = {"road": 0.24, "stone": 0.16, "cliff": 0.26}      # darkest share of
 ROUND = {"road": True, "cliff": True, "stone": False}            # rounded corners
 MARKER_GAP = {"road": 0.09, "cliff": 0.13, "stone": 0.12}     # stone centres apart (x tile)
 STONE_L = {"road": (14.0, 84.0), "stone": (16.0, 86.0), "cliff": (12.0, 80.0)}   # ramp lightness
+# stone shapes (2026-10-16, Kevin: "a few stones merge into odd shapes"): a stone smaller than
+# min px joins the joint, one larger than max x tile area, more elongated than ASPECT_MAX or less
+# convex than SOLIDITY_MIN (an L / T / dumbbell where two painted stones ran together) is split
+# in two along a new 1 px joint, up to SPLIT_PASSES times.
+STONE_AREA = {"road": (5, 0.13), "cliff": (7, 0.18), "stone": (6, 0.2)}
+SPLIT_MIN_SHARE = 0.3                # each half of a split keeps >= this share of the stone
+SOLIDITY_MIN = 0.78
+ASPECT_MAX = 2.6
+SPLIT_PASSES = 3
+
+
+def _unwrap(ys: np.ndarray, xs: np.ndarray, size: int) -> tuple[np.ndarray, np.ndarray]:
+    """A wrapping stone's pixel coordinates made contiguous (a stone cut by the tile edge)."""
+    ys, xs = ys.astype(float), xs.astype(float)
+    for a in (ys, xs):
+        if len(a) and a.min() == 0 and a.max() == size - 1:
+            # the largest empty run of rows / columns is where the stone does not go: cut there
+            occ = np.zeros(size, bool)
+            occ[a.astype(int)] = True
+            if occ.all():
+                continue
+            gaps = np.nonzero(~occ)[0]
+            a[a < gaps[0]] += size
+    return ys, xs
+
+
+def stone_shape(ys: np.ndarray, xs: np.ndarray, size: int) -> tuple[int, float, float]:
+    """(area px, solidity = area / convex hull area, aspect = long / short axis) of one stone."""
+    n = len(ys)
+    if n < 3:
+        return n, 1.0, 1.0
+    y, x = _unwrap(ys, xs, size)
+    pts = np.concatenate([np.stack([y + dy, x + dx], 1) for dy in (0, 1) for dx in (0, 1)])
+    try:
+        from scipy.spatial import ConvexHull
+        hull = ConvexHull(pts).volume
+    except Exception:  # noqa: BLE001 - degenerate (a straight line of pixels)
+        hull = float(n)
+    cov = np.cov(np.stack([y, x])) + np.eye(2) / 12.0
+    ev = np.sort(np.linalg.eigvalsh(cov))
+    return n, float(min(1.0, n / max(hull, 1e-6))), float(np.sqrt(ev[1] / max(ev[0], 1e-6)))
+
+
+def _halves(y: np.ndarray, x: np.ndarray, rng_key: int = 0) -> np.ndarray:
+    """2-means of a stone's pixels (started from its two ends along the long axis): bool, True =
+    the second half."""
+    pts = np.stack([y, x], 1)
+    c = pts.mean(0)
+    w, v = np.linalg.eigh(np.cov(pts.T) + np.eye(2) / 12.0)
+    proj = (pts - c) @ v[:, -1]
+    cent = np.stack([pts[proj.argmin()], pts[proj.argmax()]]).astype(float)
+    side = proj > 0
+    for _ in range(8):
+        d = ((pts[:, None] - cent[None]) ** 2).sum(-1)
+        side = d[:, 1] < d[:, 0]
+        if side.all() or (~side).all():
+            break
+        cent = np.stack([pts[~side].mean(0), pts[side].mean(0)])
+    return side
+
+
+def split_stones(stones: np.ndarray, gap: np.ndarray, size: int, terrain: str = "road",
+                 passes: int = SPLIT_PASSES) -> tuple[np.ndarray, np.ndarray]:
+    """Stones that are too big, too long or not convex (stone_shape) split in two by a 1 px joint
+    (2-means of their pixels); crumbs below the minimum size join the joint. Returns new
+    (stones relabelled 1..n, gap)."""
+    stones, gap = stones.copy(), gap.copy()
+    lo, hi = STONE_AREA.get(terrain, (4, 0.1))
+    big = hi * size * size
+    for _ in range(max(0, passes)):
+        changed = False
+        nxt = int(stones.max()) + 1
+        for v in range(1, int(stones.max()) + 1):
+            on = stones == v
+            if not on.any():
+                continue
+            ys, xs = np.nonzero(on)
+            area, solid, aspect = stone_shape(ys, xs, size)
+            if area < 2 * lo + 2 or (area <= big and solid >= SOLIDITY_MIN and aspect <= ASPECT_MAX):
+                continue
+            y, x = _unwrap(ys, xs, size)
+            side = _halves(y, x)
+            least = max(lo + 2, SPLIT_MIN_SHARE * area)     # no crumbs: two real stones
+            if side.sum() < least or (~side).sum() < least:
+                continue
+            b = np.zeros((size, size), bool)
+            b[ys[side], xs[side]] = True
+            a = on & ~b
+            # the joint: pixels of the smaller half that touch the other half (4-neighbours)
+            small, other = (b, a) if b.sum() <= a.sum() else (a, b)
+            touch = small & (np.roll(other, 1, 0) | np.roll(other, -1, 0) |
+                             np.roll(other, 1, 1) | np.roll(other, -1, 1))
+            if (small & ~touch).sum() < lo:
+                continue
+            gap |= touch
+            stones[touch] = 0
+            stones[b & ~touch] = nxt
+            nxt += 1
+            changed = True
+        if not changed:
+            break
+    # relabel by wrapped connectivity (a split can leave a crumb) and drop crumbs into the joint
+    out = np.zeros_like(stones)
+    count = 0
+    for v in np.unique(stones[stones > 0]):
+        part, k = _wrap_label(stones == v)
+        for j in range(1, k + 1):
+            m = part == j
+            if m.sum() < lo:
+                gap |= m
+                continue
+            count += 1
+            out[m] = count
+    out[gap] = 0
+    return out, gap
 
 
 def _wrap_label(mask: np.ndarray) -> tuple[np.ndarray, int]:
@@ -761,6 +952,8 @@ def stone_tile(picture, size: int, terrain: str = "road", palette: np.ndarray | 
     diff = ((stones != np.roll(stones, -1, 0)) & (np.roll(stones, -1, 0) > 0)) |         ((stones != np.roll(stones, -1, 1)) & (np.roll(stones, -1, 1) > 0))
     gap |= diff & (stones > 0)
     stones[gap] = 0
+    stones, gap = split_stones(stones, gap, size, terrain)
+    count = int(stones.max())
     if ROUND.get(terrain, True):                               # round the stones' corners
         same = lambda dy, dx: np.roll(np.roll(stones, dy, 0), dx, 1) == stones
         area = np.bincount(stones.ravel())[stones]
@@ -871,3 +1064,204 @@ def canvas_tiles(raw: np.ndarray, terrain: str, size: int, palette=None) -> list
     h = raw.shape[0] // 2
     return [stone_tile(raw[i * h:(i + 1) * h, j * h:(j + 1) * h], size, terrain, palette)
             for i in (0, 1) for j in (0, 1)]
+
+
+# --------------------------------------------------------------------------- cliff faces
+
+# Cliff / wall FACES drawn the tiles v3 way (2026-10-16, Kevin: "cliff faces still the old
+# procedural blocks"): a clean boulder-and-strata layout at face scale (strata bands whose joints
+# step, split into boulders by wobbly leaning cuts), each boulder re-drawn like stone_tile's stones
+# (its own tone, one of 3 tints taken from the cliff tile's stones, lit top / left rim, shadow rim
+# bottom / right, a glint, rounded corners, 1 px joints deepest under the stones), moss creeping
+# along joints. Same signature as neo_terrain.rock_face, so CliffArt's strip and the HD-2D side
+# walls call this instead (FACE_STYLE "boulders"; "strata" = the old neo blocks).
+FACE_STYLE = "boulders"
+FACE_BAND = (1 / 3.4, 1 / 2.1)            # strata height (x unit)
+FACE_STONE_W = (0.38, 0.9)                # boulder width (x unit)
+
+
+def stone_tints(tex: np.ndarray | None, k: int = 3) -> np.ndarray:
+    """k (a, b) tint offsets from a stony tile's mid-tone pixels (warm / neutral / cool stones),
+    or small neutral ones without a tile."""
+    if tex is None:
+        return np.array([[1.5, 4.0], [0.0, 0.0], [-0.5, -4.0]])[:k]
+    lab = _lab(np.asarray(tex)[..., :3].reshape(-1, 3)).astype(np.float64)
+    L = lab[:, 0]
+    mid = lab[(L > np.percentile(L, 30)) & (L < np.percentile(L, 85))]
+    if len(mid) < k:
+        mid = lab
+    axis = mid[:, 2] + 0.3 * mid[:, 1]
+    edges = np.quantile(axis, np.linspace(0, 1, k + 1))
+    which = np.clip(np.searchsorted(edges[1:-1], axis), 0, k - 1)
+    base = mid[:, 1:].mean(0)
+    return np.array([(mid[which == c, 1:].mean(0) if (which == c).any() else base) - base
+                     for c in range(k)])
+
+
+def face_layout(w: int, h: int, seed: int = 0, *, seams=(), unit: int | None = None,
+                band: tuple[float, float] | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """(stone id per pixel, joint mask) of a rock face that wraps in x and y: strata bands (their
+    top joints step up / down a pixel, except at `seams` rows, which stay straight so tiles cut
+    there line up), each band split into boulders by cuts that lean and wobble."""
+    from .neo_terrain import _steps
+    rng = _rng("bface", w, h, seed)
+    t = unit or w
+    lo, hi = band or (t * FACE_BAND[0], t * FACE_BAND[1])
+    lo, hi = max(3, int(round(lo))), max(3, int(round(hi)))
+    seam_rows = sorted({int(s) % h for s in seams} | {0})
+    tops, fixed = [], []
+    for i, c0 in enumerate(seam_rows):
+        c1 = seam_rows[i + 1] if i + 1 < len(seam_rows) else h
+        y = c0
+        while y < c1:
+            tops.append(y)
+            fixed.append(y == c0)
+            step = int(rng.integers(lo, hi + 1))
+            if c1 - (y + step) < lo:
+                step = c1 - y
+            y += step
+    nb = len(tops)
+    wob = np.stack([np.zeros(w, int) if f else _steps(w, 1, rng, (3, 8)) for f in fixed])
+    yy, xx = np.mgrid[0:h, 0:w]
+    edges = np.array(tops)[:, None] + wob
+    band_of = (yy[None] >= edges[:, None, :]).sum(0) - 1
+    band_of = np.where(band_of < 0, nb - 1, band_of)
+    start = edges[band_of, xx]
+    start = np.where(yy < start, start - h, start)
+    nxt = np.where(band_of + 1 < nb, edges[np.minimum(band_of + 1, nb - 1), xx], edges[0, xx] + h)
+    row_in = yy - start
+    rows_left = nxt - yy
+    ids = np.zeros((h, w), int)
+    cutmask = np.zeros((h, w), bool)
+    nid = 0
+    for b in range(nb):
+        cuts, x = [], float(rng.uniform(0, t * 0.5))
+        while x < w:
+            cuts.append(int(x))
+            x += float(rng.uniform(t * FACE_STONE_W[0], t * FACE_STONE_W[1]))
+        if len(cuts) > 1 and w - cuts[-1] + cuts[0] < t * FACE_STONE_W[0] * 0.7:
+            cuts.pop()                                              # no sliver across the wrap
+        lean = float(rng.choice((-0.25, -0.12, 0.0, 0.12, 0.25)))
+        m = band_of == b
+        cut_x = np.stack([c + lean * (row_in - hi / 2) + _steps(h, 1, rng, (4, 9))[yy] * 0.6
+                          for c in cuts])
+        rel = (xx[None] - np.rint(cut_x)) % w                       # px right of each cut
+        k_idx = rel.argmin(0)
+        ids[m] = (nid + k_idx)[m]
+        cutmask |= (rel.min(0) < 1.0) & m
+        nid += len(cuts)
+    joint = (rows_left == 1) | cutmask
+    return ids + 1, joint
+
+
+def boulder_face(w: int, h: int, ramp: np.ndarray | None = None, seed: int = 0, *, seams=(),
+                 band: tuple[float, float] | None = None, moss: np.ndarray | None = None,
+                 unit: int | None = None, tints: np.ndarray | None = None, bricks: bool = False):
+    """A rock face (RGBA, height) in the stone_tile look: face_layout's boulders, each one tone
+    of the ramp (+ a shared tint), lit from the upper left, rounded, in dark joints; moss (a
+    ramp) creeps along some joints. Wraps in x and y. bricks=True or FACE_STYLE "strata":
+    neo_terrain.rock_face."""
+    from scipy import ndimage as ndi
+    from .neo_terrain import RAMPS, pnoise, rock_face
+    if bricks or FACE_STYLE != "boulders":
+        return rock_face(w, h, ramp, seed, bricks=bricks, seams=seams, band=band, moss=moss,
+                         unit=unit)
+    ramp = RAMPS["rock"] if ramp is None else np.asarray(ramp)
+    n = len(ramp)
+    rng = _rng("bface-col", w, h, seed)
+    ids, gap = face_layout(w, h, seed, seams=seams, unit=unit, band=band)
+    raw = np.where(gap, 0, ids)
+    stones = np.zeros_like(raw)
+    count = 0
+    for v in np.unique(raw[raw > 0]):                 # split each id where joints cut it
+        part, k = _wrap_label(raw == v)               # (wrapping: a stone across the edge is one)
+        for j in range(1, k + 1):
+            on = part == j
+            if on.sum() < 4:                          # crumbs join the joint
+                gap |= on
+                continue
+            count += 1
+            stones[on] = count
+    stones[gap] = 0
+    # some big boulders split into two rows of smaller stones (mixed sizes, like the tops)
+    from .neo_terrain import _steps
+    for s_ in range(1, count + 1):
+        on = stones == s_
+        ys, xs = np.nonzero(on)
+        if len(ys) < 60 or ys.max() - ys.min() > h // 2 or ys.max() - ys.min() < 9                 or rng.random() > 0.45:
+            continue
+        mid = int(np.median(ys)) + _steps(w, 1, rng, (3, 7))
+        cut = on & (np.arange(h)[:, None] == mid[None, :])
+        if cut.sum() < 4:
+            continue
+        gap |= cut
+        lower = on & (np.arange(h)[:, None] > mid[None, :])
+        count += 1
+        stones[lower] = count
+        stones[cut] = 0
+
+    def same(dy, dx):
+        return np.roll(np.roll(stones, dy, 0), dx, 1) == stones
+    area = np.bincount(stones.ravel())[stones]
+    corner = np.zeros_like(gap)
+    for (ay, ax), (by, bx) in (((1, 0), (0, 1)), ((1, 0), (0, -1)), ((-1, 0), (0, 1)),
+                               ((-1, 0), (0, -1))):
+        corner |= ~same(ay, ax) & ~same(by, bx)
+    corner &= (stones > 0) & (area >= 9)
+    gap |= corner
+    stones[corner] = 0
+    # big boulders: round once more (a 2 px corner reads as a rounded stone, not a slab)
+    area = np.bincount(stones.ravel())[stones]
+    nb4 = sum(same(dy, dx).astype(int) for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+    corner2 = (stones > 0) & (area >= 40) & (nb4 <= 2)
+    gap |= corner2
+    stones[corner2] = 0
+    up_g, left_g = np.roll(gap, 1, 0), np.roll(gap, 1, 1)
+    down_g, right_g = np.roll(gap, -1, 0), np.roll(gap, -1, 1)
+    lit_rim = ~gap & (up_g | left_g)
+    dark_rim = ~gap & (down_g | right_g) & ~lit_rim
+    ramp_lab = _lab(ramp.astype(np.uint8)).astype(np.float64)
+    tints = stone_tints(None) if tints is None else np.asarray(tints, float)
+    span = max(1, n - 5)
+    out_lab = np.zeros((h, w, 3))
+    height = np.zeros((h, w))
+    tone = rng.permutation(count) if count else np.zeros(0, int)
+    dist = ndi.distance_transform_edt(np.tile(~gap, (3, 3)))[h:2 * h, w:2 * w]
+
+    def colour(level, tint):
+        c = ramp_lab[int(np.clip(level, 0, n - 1))].copy()
+        c[1:] += tint
+        return c
+    tone = rng.permutation(count) if count else np.zeros(0, int)
+    # each boulder a dome: lit where it faces the upper left, shaded toward the lower right
+    dome = np.clip(dist / 3.0, 0, 1) ** 0.7
+    face_lit = np.roll(np.roll(dome, -1, 0), -1, 1) - np.roll(np.roll(dome, 1, 0), 1, 1)
+    for s_ in range(1, count + 1):
+        on = stones == s_
+        tint = tints[int(rng.integers(len(tints)))]
+        level = 2 + int(round(span * tone[s_ - 1] / max(1, count - 1)))
+        out_lab[on] = colour(level, tint)
+        out_lab[on & (face_lit > 0.3) & ~lit_rim] = colour(level + 1, tint)
+        out_lab[on & (face_lit < -0.3) & ~dark_rim] = colour(level - 1, tint)
+        out_lab[on & dark_rim] = colour(level - 1, tint)
+        out_lab[on & lit_rim] = colour(level + 1, tint)
+        height[on] = 0.6 + 0.4 * dome[on]
+        if on.sum() >= 14:                            # glint: upper-left inside
+            ys, xs = np.nonzero(on & (dist >= 1.5) & ~lit_rim)
+            if len(ys):
+                j = int(np.argmin(ys + xs))
+                out_lab[ys[j], xs[j]] = colour(level + 2, tint)
+    out_lab[gap] = ramp_lab[1]
+    out_lab[gap & (np.roll(~gap, 1, 0) | np.roll(~gap, 1, 1))] = ramp_lab[0]
+    rgb = np.clip(_lab_to_rgb(out_lab.reshape(-1, 3)), 0, 255).astype(np.uint8).reshape(h, w, 3)
+    out = np.zeros((h, w, 4), np.uint8)
+    out[..., :3] = rgb
+    out[..., 3] = 255
+    if moss is not None and len(moss):
+        m = len(moss)
+        f = pnoise(h, w, max(1, h // 8), max(1, w // 8), rng)
+        mossy = gap & (f > 0.68)
+        grow = mossy | (np.roll(mossy, -1, 0) & (f > 0.76))
+        out[grow, :3] = np.asarray(moss)[np.clip((f[grow] * m).astype(int) - 1, 0, m - 1)]
+        height = np.where(grow, np.maximum(height, 0.5), height)
+    return out, height

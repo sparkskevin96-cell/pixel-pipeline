@@ -745,6 +745,7 @@ class Swatch:
     method: str = "swatch"          # paint | drawn | neo | swatch (METHODS) - how the tile was made
     sources: list = field(default_factory=list)   # other layouts of the same material (variety)
     variants_raw: np.ndarray | None = None        # paint: the painted variant canvas
+    words: str = ""                 # the user's words (drawn tiles: they shape it, tilewords)
 
 
 # How a top-down tile is made (tiles v3, 2026-10-15; tilepaint.py):
@@ -778,15 +779,15 @@ def tile_method(terrain: str, camera: str = "topdown", method: str | None = None
 
 
 def builtin_swatch(terrain: str, size: int = 32, seed: int = 0,
-                   style: assets.Style | None = None, even: bool = True) -> Swatch:
+                   style: assets.Style | None = None, even: bool = True, words: str = "") -> Swatch:
     """No GPU: the terrain drawn by code (tilepaint: drawn soft ground, neo stones; even=False or
     other terrains: the maptiles pattern), snapped to the project palette."""
     from . import tilepaint as tp
     pal = project_palette(style)
     if even and (terrain in tp.SOFT or terrain == "water"):        # tiles v3: drawn by code
-        tex = tp.drawn_tile(terrain, size, seed, palette=pal)
-        src = tp.drawn_variants(terrain, tex, seed, 3, tp.drawn_ramp(terrain)) if pal is None else []
-        return Swatch(terrain, tex, None, seed, "built-in", method="drawn", sources=src)
+        tex = tp.drawn_tile(terrain, size, seed, palette=pal, words=words)
+        src = tp.drawn_variants(terrain, tex, seed, 3, tp.drawn_ramp(terrain), words) if pal is None else []
+        return Swatch(terrain, tex, None, seed, "built-in", method="drawn", sources=src, words=words)
     if even and terrain in tp.PAINTED:
         return Swatch(terrain, tp.neo_tile(terrain, size, seed, pal), None, seed, "built-in",
                       method="neo", sources=[tp.neo_tile(terrain, size, seed + 1 + k, pal)
@@ -895,7 +896,7 @@ def make_swatches(terrain: str, words: str = "", *, count: int = 3, camera: str 
                 break
         if how == "drawn":
             _, s, prompt, cm, _, raw, _, _ = best
-            out.append(_drawn_swatch(terrain, raw, s, prompt, cm, size, st, say))
+            out.append(_drawn_swatch(terrain, raw, s, prompt, cm, size, st, say, words))
             continue
         _, s, prompt, cm, pm, raw, pic, tex = best
         if pic is None:
@@ -909,12 +910,12 @@ def make_swatches(terrain: str, words: str = "", *, count: int = 3, camera: str 
             cm = colour_miss(terrain, tex[..., :3])
             pm = tm                   # drawn by code: no bricks / grid to look for
             prompt += " [neo water ripples]"
-        out.append(Swatch(terrain, tex, pic, s, prompt, raw, cm, pm))
+        out.append(Swatch(terrain, tex, pic, s, prompt, raw, cm, pm, words=words))
     return out
 
 
 def _drawn_swatch(terrain: str, raw: np.ndarray, seed: int, prompt: str, cm: float, size: int,
-                  style, say) -> Swatch:
+                  style, say, words: str = "") -> Swatch:
     """Tiles v3 "drawn": the terrain drawn by code at the tile's scale in the colours of SDXL's
     swatch (a swatch whose colours still miss the terrain gives the hand-built colours)."""
     from . import tilepaint as tp
@@ -922,14 +923,14 @@ def _drawn_swatch(terrain: str, raw: np.ndarray, seed: int, prompt: str, cm: flo
     pic = raw if cm <= 0 else None
     if cm > 0:
         say(f"The GPU's {terrain} colours stay off; drawing it in the built-in colours")
-    tex = tp.drawn_tile(terrain, size, seed, picture=pic, palette=pal)
+    tex = tp.drawn_tile(terrain, size, seed, picture=pic, palette=pal, words=words)
     ramp = tp.drawn_ramp(terrain, pic)
-    src = tp.drawn_variants(terrain, tex, seed, 3, ramp)
+    src = tp.drawn_variants(terrain, tex, seed, 3, ramp, words)
     if pal is not None:
         from .cards import snap_image
         src = [snap_image(x, pal) for x in src]
     return Swatch(terrain, tex, None, seed, prompt + " [drawn]", raw, cm, 0.0, method="drawn",
-                  sources=src)
+                  sources=src, words=words)
 
 
 def _painted_swatches(terrain: str, words: str = "", *, count: int, size: int, client, seed,
@@ -968,13 +969,14 @@ def _painted_swatches(terrain: str, words: str = "", *, count: int, size: int, c
             say(f"Tile {i + 1}: the painting stays off for {terrain}; using the drawn layout")
             out.append(Swatch(terrain, tp.neo_tile(terrain, size, s, pal), None, s2,
                               prompt + " [neo layout]", raw, cm, tm, method="neo",
-                              sources=[tp.neo_tile(terrain, size, s + 1 + j, pal) for j in range(3)]))
+                              sources=[tp.neo_tile(terrain, size, s + 1 + j, pal) for j in range(3)],
+                              words=words))
             continue
         say(f"Painting four more {terrain} layouts for tile {i + 1}…")
         vraw, sources = tp.paint_variants(terrain, words, size=size, client=client, seed=s2,
                                           style=style, palette=pal, **gen_opts)
         out.append(Swatch(terrain, tex, pic, s2, prompt + " [painted]", raw, cm, tm, method="paint",
-                          sources=sources, variants_raw=vraw))
+                          sources=sources, variants_raw=vraw, words=words))
     return out
 
 
@@ -1089,17 +1091,20 @@ class CliffArt:
 
 def cliff_art(t: int, rock: np.ndarray, base: np.ndarray, geo, seed: int = 0,
               overhang: bool = True) -> CliffArt:
-    """The rock of a cliff set in the rock texture's colours (neo_terrain.rock_face: strata,
-    blocks lit from the upper left, cracks; moss from the base's colours in the joints when
-    overhang)."""
-    from .neo_terrain import _steps, neo_ramp, ramp_of, rock_face
+    """The rock of a cliff set in the rock texture's colours (tilepaint.boulder_face: strata of
+    rounded boulders drawn like the cliff tile's stones, lit from the upper left, in its stone
+    tints; moss from the base's colours in the joints when overhang)."""
+    from .neo_terrain import _steps, neo_ramp, ramp_of
+    from .tilepaint import boulder_face, stone_tints
     m, jx, _ = geo
     ms = m[S]
     pad = int(np.ceil(np.abs(jx).max())) + 2
     ramp = neo_ramp(rock, 7)
     moss = ramp_of(base, 5)[1:] if overhang else None
-    strip, _ = rock_face(FACE_PHASES * t, pad + ms + 2 * t, ramp, seed,
-                         seams=(pad + ms, pad + ms + t), moss=moss, unit=t)
+    # tiles v3 faces (2026-10-16): boulders drawn like the cliff tile's stones, in its tints
+    strip, _ = boulder_face(FACE_PHASES * t, pad + ms + 2 * t, ramp, seed,
+                            seams=(pad + ms, pad + ms + t), moss=moss, unit=t,
+                            tints=stone_tints(rock))
     rng = np.random.default_rng(zlib.crc32(f"drips/{t}/{seed}".encode()))
     drips = 1 + np.clip(_steps(t, max(1, t // 8), rng, (1, 4)) + max(1, t // 8) // 2, 0, None)
     if not overhang:
@@ -2045,6 +2050,7 @@ def save_tileset(gs: GenTileset, name: str | None = None, *, project: assets.Pro
     """Store the set as a "tileset" asset in the project."""
     register_kind()
     name = name or f"{gs.terrain.title()} tiles"
+    words = words or (swatch.words if swatch is not None else "")
     a = assets.new_asset(KIND, name, project, terrain=gs.terrain, base=gs.base, camera=gs.camera,
                          set=gs.kind, role=gs.meta.get("role", role_of(gs.terrain)), tile=gs.tile,
                          edge=list(gs.edge), words=words,
@@ -2073,7 +2079,7 @@ def make(terrain: str, words: str = "", *, project: assets.Project | None = None
         sw = make_swatches(terrain, words, count=count, client=client, seed=seed, style=st, **gen_opts)
         chosen = sw[min(pick, len(sw) - 1)]
     else:
-        chosen = builtin_swatch(terrain, st.tile, seed or 0, st)
+        chosen = builtin_swatch(terrain, st.tile, seed or 0, st, words=words)
     gs = build_tileset(terrain, chosen.texture, picture=chosen.picture, base=base, variants=variants,
                        seed=chosen.seed, style=st, project=project, overhang=overhang,
                        sources=chosen.sources)
@@ -2125,6 +2131,7 @@ def rebuild_tileset(asset: assets.Asset, *, save: bool = False, mix: bool = True
     terrain = ex.get("terrain", "grass")
     raw = folder / "swatch.png"
     method = ex.get("method", "swatch")
+    words = ex.get("words", "") or ""
     sources = []
     from . import tilepaint as tp
     pal = project_palette(st)
@@ -2139,12 +2146,12 @@ def rebuild_tileset(asset: assets.Asset, *, save: bool = False, mix: bool = True
                 sources = tp.canvas_tiles(np.asarray(Image.open(vr).convert("RGB")), terrain, t, pal)
         else:
             pic = None
-            tex = tp.drawn_tile(terrain, t, seed, picture=img, palette=pal)
-            sources = tp.drawn_variants(terrain, tex, seed, 3, tp.drawn_ramp(terrain, img))
+            tex = tp.drawn_tile(terrain, t, seed, picture=img, palette=pal, words=words)
+            sources = tp.drawn_variants(terrain, tex, seed, 3, tp.drawn_ramp(terrain, img), words)
         if keep_texture and (folder / "texture.png").exists():
             tex = np.asarray(Image.open(folder / "texture.png").convert("RGBA")).copy()
     elif method in ("drawn", "neo"):
-        sw = builtin_swatch(terrain, t, seed, st, even=True)
+        sw = builtin_swatch(terrain, t, seed, st, even=True, words=words)
         pic, tex, sources = None, sw.texture, sw.sources
     elif raw.exists():
         pic = seamless(np.asarray(Image.open(raw).convert("RGB")))

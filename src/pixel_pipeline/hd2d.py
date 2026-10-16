@@ -245,6 +245,55 @@ void light() {
 }
 """
 
+TERRAIN_SHADER = """shader_type spatial;
+// The board's ground (cell tops and walls): the pixel texture + its per-texel normal map, lit
+// like the sprites - each light's diffuse snapped to `bands` steps, so the light falls in whole
+// texel bands (pixel-art shading) instead of smearing, and the drawn shapes of bright materials
+// (snow, sand) survive noon. Lower bands lean to `shade_tint` (hue-shifted, cool shadows).
+// Bright tops are capped below ~0.85 albedo in Python (neo_terrain.board_albedo).
+render_mode depth_draw_opaque;
+
+uniform sampler2D albedo_tex : source_color, filter_nearest_mipmap;
+uniform sampler2D normal_tex : hint_normal, filter_nearest_mipmap;
+uniform bool has_normals = false;
+uniform float normal_depth = 1.0;
+uniform vec3 tint = vec3(1.0);
+uniform bool use_vcol = false;
+uniform float roughness = 0.95;
+uniform float specular = 0.0;                    // wet ground (weather) gets a little
+uniform float bands = 5.0;                       // diffuse steps per light, 0 = smooth
+uniform float wrap = 0.1;
+uniform vec3 shade_tint = vec3(0.9, 0.93, 1.06);
+
+void fragment() {
+	vec3 c = texture(albedo_tex, UV).rgb * tint;
+	if (use_vcol) {
+		c *= COLOR.rgb;
+	}
+	ALBEDO = c;
+	ROUGHNESS = roughness;
+	SPECULAR = specular;
+	if (has_normals) {
+		NORMAL_MAP = texture(normal_tex, UV).rgb;
+		NORMAL_MAP_DEPTH = normal_depth;
+	}
+}
+
+void light() {
+	float d = clamp((dot(NORMAL, LIGHT) + wrap) / (1.0 + wrap), 0.0, 1.0);
+	if (bands > 0.5) {
+		d = floor(d * bands + 0.5) / bands;      // whole steps per texel (normals are nearest)
+	}
+	float lit = d * ATTENUATION;
+	DIFFUSE_LIGHT += LIGHT_COLOR * lit * mix(shade_tint, vec3(1.0), lit) / PI;
+	if (specular > 0.0) {
+		vec3 h = normalize(LIGHT + VIEW);
+		float sp = pow(clamp(dot(NORMAL, h), 0.0, 1.0), 40.0) * specular * ATTENUATION;
+		SPECULAR_LIGHT += LIGHT_COLOR * (sp > 0.25 ? 0.5 : 0.0) / PI;
+	}
+}
+"""
+
 SHADOW_BLOB_SHADER = """shader_type spatial;
 // A soft dark ellipse under a unit (HD-2D contact shadow), on top of the terrain.
 render_mode unshaded, cull_disabled, depth_draw_never, shadows_disabled;
@@ -456,6 +505,8 @@ var fill: DirectionalLight3D
 var lighting := {}       # preset name -> settings
 var light_name := "sunset"
 var bands := 4.0
+var terrain_bands := 5.0 # the ground's light steps (lighting.json "terrain_bands"; B toggles both)
+var terrain_mats := []   # the ground's ShaderMaterials (terrain.gdshader)
 var flames := []         # flame materials (brighter at night)
 var fire_lights := []    # light_flicker.gd lights of torches, braziers, lanterns, crystals
 var blobs := []          # contact shadow materials
@@ -520,6 +571,7 @@ func _environment() -> void:
 			lighting = j.get("presets", {})
 			light_name = j.get("default", light_name)
 			bands = float(j.get("bands", bands))
+			terrain_bands = float(j.get("terrain_bands", terrain_bands))
 	for a in OS.get_cmdline_user_args():            # --light=night --bands=0 (screenshots, tests)
 		if a.begins_with("--light="):
 			light_name = a.substr(8)
@@ -571,6 +623,7 @@ func apply_lighting(name: String) -> void:
 	env.ambient_light_color = _c(L.get("ambient"), Color(0.45, 0.38, 0.62))
 	env.ambient_light_energy = float(L.get("ambient_energy", 0.55))
 	env.tonemap_exposure = float(L.get("exposure", 1.05))
+	env.tonemap_white = float(L.get("white", 1.0))
 	env.glow_intensity = float(L.get("glow", 0.8)) * (1.0 if mode == "real" else 0.75)
 	env.adjustment_saturation = float(L.get("saturation", 1.15))
 	env.adjustment_contrast = float(L.get("contrast", 1.06))
@@ -598,6 +651,8 @@ func apply_lighting(name: String) -> void:
 		f.set_shader_parameter("level", torch)
 	for b in blobs:
 		b.set_shader_parameter("strength", float(L.get("blob", 0.4)))
+	for m in terrain_mats:
+		m.set_shader_parameter("bands", terrain_bands if bands > 0.5 else 0.0)
 	for u in units:
 		_sprite_lighting(u["mat"])
 	for e in live_effects:
@@ -621,16 +676,28 @@ func _sprite_lighting(mat: ShaderMaterial) -> void:
 
 var tex_info := {}       # res://map/tex/terrain.json: variants, weights, lips per terrain
 
-func _material(albedo: Texture2D, normal: Texture2D, rough: float, vcol: bool) -> StandardMaterial3D:
+func _material(albedo: Texture2D, normal: Texture2D, rough: float, vcol: bool, relief := 1.0) -> ShaderMaterial:
+	# the ground: terrain.gdshader (banded per-texel light, see its header)
+	var m := ShaderMaterial.new()
+	m.shader = load("res://shaders/terrain.gdshader")
+	m.set_shader_parameter("albedo_tex", albedo)
+	m.set_shader_parameter("roughness", rough)
+	if normal != null:
+		m.set_shader_parameter("normal_tex", normal)
+		m.set_shader_parameter("has_normals", true)
+		m.set_shader_parameter("normal_depth", relief)
+	m.set_shader_parameter("use_vcol", vcol)
+	m.set_shader_parameter("bands", terrain_bands)
+	terrain_mats.append(m)
+	return m
+
+func _lip_material(albedo: Texture2D) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_texture = albedo
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS
-	m.roughness = rough
-	if normal != null:
-		m.normal_enabled = true
-		m.normal_texture = normal
-		m.normal_scale = 1.0
-	m.vertex_color_use_as_albedo = vcol
+	m.roughness = 0.95
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	m.alpha_scissor_threshold = 0.3
 	return m
 
 func _materials() -> Dictionary:
@@ -654,15 +721,13 @@ func _materials() -> Dictionary:
 		if top == null:
 			continue
 		tex_info[name] = info
-		var m := _material(top, top_n, 0.95, false)
+		var m := _material(top, top_n, 0.95, false, float(info.get("relief", 1.0)))
 		var s := _material(_tex("res://map/tex/%s_side.png" % name), _tex("res://map/tex/%s_side_n.png" % name), 1.0, true)
 		if not info.has("variants"):
-			s.albedo_color = Color(0.86, 0.84, 0.9)
+			s.set_shader_parameter("tint", Vector3(0.86, 0.84, 0.9))
 		var lip: StandardMaterial3D = null
 		if info.has("lip"):
-			lip = _material(_tex("res://map/tex/" + str(info["lip"])), null, 0.95, false)
-			lip.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-			lip.alpha_scissor_threshold = 0.3
+			lip = _lip_material(_tex("res://map/tex/" + str(info["lip"])))
 		mats[name] = [m, s, lip]
 	return mats
 
@@ -1265,7 +1330,7 @@ func _build_camera() -> void:
 		var attr := CameraAttributesPractical.new()
 		attr.dof_blur_far_enabled = true
 		attr.dof_blur_near_enabled = true
-		attr.dof_blur_amount = 0.16
+		attr.dof_blur_amount = 0.12
 		cam.attributes = attr
 	_place_camera()
 
@@ -1275,11 +1340,12 @@ func _place_camera() -> void:
 	cam.position = Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)) * cam_dist
 	cam.look_at(pivot.global_position, Vector3.UP)
 	if mode == "real" and cam.attributes:
-		# tilt-shift: sharp in a band around the focus, blurred near and far
-		cam.attributes.dof_blur_far_distance = cam_dist + 2.0
-		cam.attributes.dof_blur_far_transition = 6.0
-		cam.attributes.dof_blur_near_distance = cam_dist - 3.0
-		cam.attributes.dof_blur_near_transition = 3.5
+		# tilt-shift: sharp in a band around the focus (wide enough that the near and mid ground
+		# keep their pixel detail), blurred toward the far edge and the very front
+		cam.attributes.dof_blur_far_distance = cam_dist + 5.0
+		cam.attributes.dof_blur_far_transition = 8.0
+		cam.attributes.dof_blur_near_distance = cam_dist - 7.0
+		cam.attributes.dof_blur_near_transition = 4.0
 
 func _process(delta: float) -> void:
 	var pan := Vector3.ZERO
@@ -1713,11 +1779,11 @@ LIGHTING = {
         "saturation": 1.1, "contrast": 1.04,
         "water_deep": [0.08, 0.12, 0.3], "water_shallow": [0.32, 0.36, 0.62], "sparkle": 2.2},
     "noon": {
-        "sun": [1.0, 0.96, 0.88], "sun_energy": 1.75, "sun_angle": [-62, -35],
+        "sun": [1.0, 0.96, 0.88], "sun_energy": 1.6, "sun_angle": [-62, -35],
         "fill": [0.55, 0.68, 1.0], "fill_energy": 0.3, "fill_angle": [-60, 145],
         "ambient": [0.62, 0.7, 0.85], "ambient_energy": 0.6, "background": [0.45, 0.62, 0.85],
         "fog": [0.6, 0.72, 0.9], "fog_density": 0.0015, "volumetric": 0.0,
-        "torches": 0.2, "rim": 0.25, "blob": 0.5, "exposure": 0.95, "glow": 0.55,
+        "torches": 0.2, "rim": 0.25, "blob": 0.5, "exposure": 0.93, "white": 1.6, "glow": 0.55,
         "saturation": 1.12, "contrast": 1.05,
         "water_deep": [0.03, 0.16, 0.36], "water_shallow": [0.1, 0.4, 0.7], "sparkle": 3.0},
     "sunset": {
@@ -1738,6 +1804,7 @@ LIGHTING = {
         "water_deep": [0.01, 0.03, 0.1], "water_shallow": [0.05, 0.1, 0.26], "sparkle": 1.8},
 }
 LIGHTING_NAMES = tuple(LIGHTING)
+TERRAIN_BANDS = 5.0      # the ground's diffuse steps per light (terrain.gdshader)
 
 
 def write_lighting(project, default: str = "sunset", bands: float = 4.0) -> Path:
@@ -1746,7 +1813,8 @@ def write_lighting(project, default: str = "sunset", bands: float = 4.0) -> Path
     if default not in LIGHTING:
         raise ValueError(f"Unknown lighting '{default}' (use {', '.join(LIGHTING)})")
     path = Path(project) / "lighting.json"
-    path.write_text(json.dumps({"default": default, "bands": bands, "presets": LIGHTING}, indent=1),
+    path.write_text(json.dumps({"default": default, "bands": bands, "terrain_bands": TERRAIN_BANDS,
+                                "presets": LIGHTING}, indent=1),
                     encoding="utf-8")
     return path
 
@@ -1902,6 +1970,7 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
         "shaders/water.gdshader": WATER_SHADER_PIXEL if water == "pixel" else WATER_SHADER,
         "shaders/flame.gdshader": FLAME_SHADER, "shaders/ember.gdshader": EMBER_SHADER,
         "shaders/blob.gdshader": SHADOW_BLOB_SHADER, "light_flicker.gd": LIGHT_GD,
+        "shaders/terrain.gdshader": TERRAIN_SHADER,
     }
     for rel, text in files.items():
         p = out / rel

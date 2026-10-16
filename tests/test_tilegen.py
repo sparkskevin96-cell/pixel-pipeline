@@ -152,7 +152,9 @@ def test_cliff_faces_are_real_rock_walls(tmp_path):
     c0, r0 = bare.choices()[255 & ~(tg.S | tg.SE | tg.SW)][0][0]                 # rock to the bottom
     edge0 = bare.atlas[r0 * t:(r0 + 1) * t, c0 * t:(c0 + 1) * t, :3].astype(int)
     assert (np.abs(edge0 - grass[..., :3]).sum(-1) > 30)[-3:, 3:-3].mean() > 0.75
-    assert (np.abs(edge - grass[..., :3]).sum(-1) > 30)[-3:, 3:-3].mean() > 0.5   # drips + moss: some
+    # drips + moss: some (boulder faces, 2026-10-16: more joints, so more moss and dark joint pixels
+    # close to the grass's darkest green)
+    assert (np.abs(edge - grass[..., :3]).sum(-1) > 30)[-3:, 3:-3].mean() > 0.4
     assert (np.abs(mid - grass[..., :3]).sum(-1) > 30).mean() > 0.8                # a full tile of rock
     assert edge[-1].sum(-1).mean() < mid[0].sum(-1).mean()                      # joint, then lit top
     assert (np.abs(base - grass[..., :3]).sum(-1) < 30)[-2:].mean() > 0.5        # ground at its foot

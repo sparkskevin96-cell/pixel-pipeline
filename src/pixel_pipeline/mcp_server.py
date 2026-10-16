@@ -81,7 +81,17 @@ server = MCPServer(
         "palette, colors, detail, dither or outline and re-run -> make_sprite_sheet from the "
         "*.sprite@1x.png frames, or make_tileset for backgrounds. preview_image shows any file.\n"
         "Use absolute paths. Relative paths resolve against the server's working directory "
-        f"({Path.cwd()})."
+        f"({Path.cwd()}).\n"
+        "ASSET STUDIO (building a game): list_projects / create_project (type + engine) -> "
+        "set_house_style -> make / make_character / make_item / make_prop / make_terrain_tiles / "
+        "make_effect / make_atmosphere / make_portrait / make_card / make_ui_kit / make_map "
+        "(plan_asset = dry run with GPU minutes). GPU work runs as background jobs, one at a time: "
+        "poll job_status(job, wait_s=60). Characters stop after the FRONT drawing: look at it "
+        "(character_review), then character_approve or character_redraw_front / "
+        "character_change_words. Always LOOK at the returned previews and quality warnings; "
+        "pick_variation picks another icon/drawing/art/texture. Finally export_to_game(project_path, "
+        "engine) writes the files + pixel_pipeline_manifest.json into the game (verify=true checks "
+        "Godot). Read docs/FOR_CLAUDE.md in the pixel-pipeline repo for timings and gotchas."
     ),
 )
 
@@ -1181,6 +1191,738 @@ def preview_image(
         text += f"\nScale reduced to x{factor} to stay within {PREVIEW_MAX} px."
     shown = f"shrunk to {preview.width}x{preview.height}" if big else f"x{factor}"
     return [text + f"\nPreview: {shown}.", _png(preview)]
+
+
+# =========================================================================== the asset studio
+#
+# Everything the app's Make / Characters / Library pages do, for building games with Claude:
+# projects + house style, makers (as background jobs: one GPU job at a time, resumable),
+# front-first character review, variations, animations, maps, exports into a Godot / Unity
+# project with a manifest. The logic lives in agent.py (also used by the CLI's --json); these
+# wrappers turn its dicts into JSON text + the preview images so Claude can SEE the result.
+
+from . import agent as _A  # noqa: E402
+
+Kind = Literal["character", "item", "prop", "tileset", "effect", "portrait", "card", "ui", "map",
+               "weather", "water", "background"]
+AssetKind = Literal["character", "item", "prop", "map", "portrait", "effect", "card", "tileset",
+                    "ui", "weather", "water", "background"]
+WAIT_DOC = ("Seconds to wait for the job before returning (0 = return the job id at once; poll "
+            "job_status). null = 0 for GPU work, up to 300 s for CPU-only work.")
+REF_DOC = "Asset id from list_assets (e.g. 'character/knight', 'item/rusty-iron-sword'), or its name."
+PROJECT_DOC = "Project name (null = the current project)."
+MAX_IMAGES = 3
+
+
+def _image_block(path: str | Path, small: bool = False) -> ImageBlock | None:
+    p = Path(path)
+    if not p.exists() or p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+        return None
+    try:
+        with Image.open(p) as im:
+            im.load()
+            img = im.convert("RGBA")
+    except (OSError, UnidentifiedImageError):
+        return None
+    if small:
+        img.thumbnail((384, 384), Image.NEAREST)
+    elif max(img.size) < 256:
+        img, _ = _enlarge(img)
+    elif max(img.size) > PREVIEW_MAX:
+        img.thumbnail((PREVIEW_MAX, PREVIEW_MAX), Image.LANCZOS)
+    return _png(_on_checker(img, 8) if img.mode == "RGBA" else img)
+
+
+def _previews_of(d: dict) -> list[str]:
+    """Preview paths inside a result dict (asset summary, job result), best first."""
+    out: list[str] = []
+
+    def add(p):
+        if p and isinstance(p, str) and p not in out:
+            out.append(p)
+
+    def walk(x):
+        if isinstance(x, dict):
+            pv = x.get("previews")
+            if isinstance(pv, dict):
+                for k in ("preview", "animations", "variations", "tries", "icon"):
+                    add(pv.get(k))
+            if isinstance(x.get("variations"), dict):
+                add(x["variations"].get("preview"))
+            for k in ("asset", "result"):
+                if k in x:
+                    walk(x[k])
+    walk(d)
+    return out
+
+
+def _reply(d: dict, images: bool = True, extra: list | None = None) -> ToolOutput:
+    blocks: ToolOutput = [json.dumps(d, indent=1, default=str)]
+    if images:
+        for p in (list(extra or []) + _previews_of(d))[:MAX_IMAGES]:
+            b = _image_block(p)
+            if b is not None:
+                blocks.append(b)
+    return blocks
+
+
+def studio_tool(*, title: str, read_only: bool = False, destructive: bool = False):
+    """Like `tool`, for the studio tools (they may change the project: not idempotent)."""
+    def register(fn):
+        doc = inspect.cleandoc(fn.__doc__ or "")
+        server.add_tool(
+            _guarded(fn), name=fn.__name__, title=title, description=doc, structured_output=False,
+            annotations=ToolAnnotations(read_only_hint=read_only, destructive_hint=destructive,
+                                        idempotent_hint=read_only, open_world_hint=False))
+        return fn
+    return register
+
+
+# --------------------------------------------------------------------------- projects + house style
+
+@studio_tool(title="List projects", read_only=True)
+def list_projects() -> ToolOutput:
+    """Projects in the studio (one per game: its own house style, palette, sizes and assets), which
+    is current, and the project types create_project accepts."""
+    return _reply(_A.projects(), False)
+
+
+@studio_tool(title="Create a project")
+def create_project(
+    name: Annotated[str, Field(description="Project name, usually the game's name.")],
+    type: Annotated[Literal["hd2d", "topdown-rpg", "side-scroller", "isometric", "cards-ui", "custom"], Field(
+        description="Project type: sets camera, directions, sizes, tile size, clips and exports "
+                    "(hd2d = sprites in a 3D world, 16 directions; topdown-rpg = 4 directions, 16 px "
+                    "tiles; side-scroller = 2 directions; isometric; cards-ui).")] = "custom",
+    size: Annotated[Literal["small", "normal", "large"], Field(description="Sprite size preset of the type.")] = "normal",
+    engine: Annotated[Literal["godot", "unity"], Field(description="Target engine.")] = "godot",
+    switch: Annotated[bool, Field(description="Make it the current project.")] = True,
+    style: Annotated[dict[str, Any] | None, Field(
+        description="House-style fields to set right away, e.g. {\"style_prompt\": \"16-bit SNES "
+                    "JRPG, bold outlines, warm palette\", \"shading\": \"cel\"}.")] = None,
+) -> ToolOutput:
+    """Create a project (a game) with a type preset; its house style makes every asset look like one artist."""
+    return _reply(_A.create_project(name, type, size, engine, switch, style), False)
+
+
+@studio_tool(title="Switch project")
+def switch_project(name: Annotated[str, Field(description="Project name.")]) -> ToolOutput:
+    """Make another project current (the app's current project switches too)."""
+    return _reply(_A.switch_project(name), False)
+
+
+@studio_tool(title="Get the house style", read_only=True)
+def get_house_style(project: Annotated[str | None, Field(description=PROJECT_DOC)] = None) -> ToolOutput:
+    """The project's house style (Style): style words, palette, colours, outline, character
+    height, camera tilt, directions, tile size, ppu, engine, clip set, style LoRA; and the
+    prompt words generators add."""
+    return _reply(_A.get_style(project), False)
+
+
+@studio_tool(title="Set the house style")
+def set_house_style(
+    changes: Annotated[dict[str, Any], Field(
+        description="Style fields to change: style_prompt, style_negative, shading (soft|cel|flat), "
+                    "proportions (chibi|normal|tall), detail (chunky|normal|fine), palette (auto, a "
+                    "built-in, lospec:<slug> or a file), colours, outline (selout|solid|none), "
+                    "person_height (px), elevation (deg), directions (2|4|8|16), tile, ppu, icon, "
+                    "engine (godot|unity), animations (clip list).")],
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Change the house style. New assets use it at once; the reply says what restyle_project
+    would redo for existing ones (nothing is redone here)."""
+    return _reply(_A.set_style(changes, project), False)
+
+
+@studio_tool(title="Lock the project palette")
+def lock_palette(
+    colours: Annotated[int, Field(ge=4, le=128, description="Palette size (24-32 suits most games).")] = 32,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Build ONE palette from the project's approved assets (tag good ones 'approved') and make
+    every later asset snap to it."""
+    return _reply(_A.lock_palette(colours, project), False)
+
+
+# --------------------------------------------------------------------------- library
+
+@studio_tool(title="List / search assets", read_only=True)
+def list_assets(
+    kind: Annotated[AssetKind | None, Field(description="Only this kind.")] = None,
+    query: Annotated[str, Field(description="Words that must all appear in name/tags/prompt.")] = "",
+    tag: Annotated[str | None, Field(description="Only assets with this tag.")] = None,
+    collection: Annotated[str | None, Field(description="Only assets in this collection.")] = None,
+    limit: Annotated[int, Field(ge=1, le=500)] = 50,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """The project's assets, newest first: id, name, kind, tags, collections (characters: their
+    state, e.g. draft waiting for an OK). Use the id in every other tool."""
+    return _reply(_A.list_assets(kind, query, tag, collection, project, limit), False)
+
+
+@studio_tool(title="Asset details + previews", read_only=True)
+def get_asset(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    images: Annotated[bool, Field(description="Attach the preview images.")] = True,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Everything about one asset: state, files (sheet, json, normal/glow maps, Godot .tres,
+    models), frame size, animations, directions, variations, quality checks (subject check,
+    drawn-key IoU/colour scores, empty frames) with warnings, and preview images (all
+    directions, every animation facing the viewer, the variations). LOOK at the previews."""
+    return _reply(_A.get_asset(ref, project), images)
+
+
+@studio_tool(title="Delete an asset", destructive=True)
+def delete_asset(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Move an asset to <project>/.trash (recoverable: move the folder back)."""
+    return _reply(_A.delete_asset(ref, project), False)
+
+
+@studio_tool(title="Tag an asset / put it in collections")
+def tag_asset(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    add_tags: Annotated[list[str], Field(description="Tags to add ('approved' feeds lock_palette).")] = [],  # noqa: B006
+    remove_tags: Annotated[list[str], Field(description="Tags to remove.")] = [],  # noqa: B006
+    add_collections: Annotated[list[str], Field(description="Collections to add it to (export by collection).")] = [],  # noqa: B006
+    remove_collections: Annotated[list[str], Field(description="Collections to take it out of.")] = [],  # noqa: B006
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Change an asset's tags and collections."""
+    return _reply(_A.tag_asset(ref, add_tags, remove_tags, add_collections, remove_collections, project), False)
+
+
+@studio_tool(title="List collections", read_only=True)
+def list_collections(project: Annotated[str | None, Field(description=PROJECT_DOC)] = None) -> ToolOutput:
+    """Collections and the asset ids in each."""
+    return _reply(_A.collections(project), False)
+
+
+# --------------------------------------------------------------------------- make
+
+@studio_tool(title="What can be made (kinds, settings, GPU minutes)", read_only=True)
+def what_can_be_made() -> ToolOutput:
+    """Every kind `make` knows with its editable settings (choices) and the measured GPU minutes
+    table (RTX 4070 laptop). CPU-only kinds take seconds."""
+    return _reply(_A.kinds(), False)
+
+
+@studio_tool(title="Plan (dry run): what would be made + cost", read_only=True)
+def plan_asset(
+    description: Annotated[str, Field(description="Plain words, e.g. 'a dwarf warrior with a big axe', "
+                                                  "'rusty iron sword', 'cobblestone road tiles'.")],
+    kind: Annotated[Kind | None, Field(description="Force the kind (null = the router decides).")] = None,
+    params: Annotated[dict[str, Any] | None, Field(description="Settings to override (see fields).")] = None,
+    name: Annotated[str | None, Field(description="Asset name (null = from the words).")] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """What `make` would do, without doing it: kind, name, GPU prompt, settings, a one-line
+    summary, GPU/CPU minutes (characters: plus the minutes after the front is OK'd), other kinds
+    the words could be, and the editable fields."""
+    return _reply(_A.plan(description, kind, params, name, project), False)
+
+
+@studio_tool(title="Make anything from words")
+def make(
+    description: Annotated[str, Field(description="What to make, plain words. The router picks the "
+                                                  "kind (character, item, prop/building, tileset, effect, "
+                                                  "portrait, card, ui kit, map, weather, water, background).")],
+    kind: Annotated[Kind | None, Field(description="Force the kind (null = the router decides).")] = None,
+    params: Annotated[dict[str, Any] | None, Field(description="Settings to override (plan_asset lists them).")] = None,
+    name: Annotated[str | None, Field(description="Asset name (null = from the words).")] = None,
+    dry_run: Annotated[bool, Field(description="Only plan (same as plan_asset).")] = False,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Make an asset in the project's house style, like the app's Make tab. GPU work runs as a
+    background job (one at a time, queued, paced for heat): the reply has the job id, the plan
+    and minutes; poll job_status. When done the result is the asset summary + previews +
+    quality checks. Characters stop after the FRONT drawing for your review (character_review ->
+    character_approve / character_redraw_front / character_change_words)."""
+    return _reply(_A.make(description, kind, params, name, dry_run, wait_s, project))
+
+
+def _kind_tool(kind: str, description: str, name, wait_s, project, **params) -> ToolOutput:
+    return _reply(_A.make_kind(kind, description, name=name, wait_s=wait_s, project=project, **params))
+
+
+@studio_tool(title="Make a character (drawn, front first)")
+def make_character(
+    description: Annotated[str, Field(description="e.g. 'a dwarf warrior with a big axe and a green cloak'.")],
+    body: Annotated[Literal["person", "animal"] | None, Field(description="null = from the words.")] = None,
+    size: Annotated[Literal["small", "normal", "medium", "large"] | None, Field(
+        description="People small/normal/large, animals small/medium/large.")] = None,
+    role: Annotated[str | None, Field(description="Tactics class (knight, archer, mage...).")] = None,
+    review: Annotated[bool, Field(description="Stop after the front drawing for review (recommended: "
+                                              "~3.3 min instead of ~15).")] = True,
+    drawn: Annotated[bool, Field(description="GPU-drawn sprites bent by the skeleton (false = 3D render).")] = True,
+    name: Annotated[str | None, Field(description="Name (null = from the words).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Prompt -> picture -> 3D model -> auto-rig -> all the project's clips -> drawn sprites in
+    every direction. With review (default) it stops after the front drawing + idle: a draft.
+    Then character_review and character_approve (~0.75 min/direction + bending)."""
+    return _kind_tool("character", description, name, wait_s, project, body=body, size=size,
+                      role=role, review=review, drawn=drawn)
+
+
+@studio_tool(title="Make an item (icon variations + world sprite)")
+def make_item(
+    description: Annotated[str, Field(description="e.g. 'rusty iron sword', 'healing potion'.")],
+    category: Annotated[Literal["weapon", "armour", "potion", "food", "key", "misc"] | None, Field(
+        description="null = from the words.")] = None,
+    size: Annotated[Literal["tiny", "small", "medium", "large"] | None, Field(description="Icon size.")] = None,
+    world: Annotated[bool | None, Field(description="Also a world (ground) sprite.")] = None,
+    variations: Annotated[int | None, Field(ge=1, le=6, description="Icon variations to pick from.")] = None,
+    name: Annotated[str | None, Field(description="Name (null = from the words).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Inventory item: SDXL icon variations (best first by the one-subject check) and a world
+    sprite. pick_variation picks another icon."""
+    return _kind_tool("item", description, name, wait_s, project, category=category, size=size,
+                      world=world, variations=variations)
+
+
+@studio_tool(title="Make a prop or building")
+def make_prop(
+    description: Annotated[str, Field(description="e.g. 'wooden barrel', 'thatched cottage', 'stone well'.")],
+    height_people: Annotated[float | None, Field(ge=0.2, le=8, description="Height in people (null = guessed).")] = None,
+    directions: Annotated[Literal[1, 2, 4] | None, Field(description="Sides drawn (1 = one view).")] = None,
+    look: Annotated[Literal["drawn", "3d"] | None, Field(description="drawn pixel art (default) or 3D render.")] = None,
+    variations: Annotated[int | None, Field(ge=1, le=6, description="Drawings to pick from (1 side).")] = None,
+    name: Annotated[str | None, Field(description="Name (null = from the words).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Prop / building drawn as pixel art at the project's camera and scale (normal + glow maps
+    so lights work)."""
+    return _kind_tool("prop", description, name, wait_s, project, height_people=height_people,
+                      directions=directions, look=look, variations=variations)
+
+
+@studio_tool(title="Make a tileset (terrain + words)")
+def make_terrain_tiles(
+    description: Annotated[str, Field(description="e.g. 'cobblestone road tiles', 'mossy forest floor'.")],
+    terrain: Annotated[str | None, Field(
+        description="grass, dirt, sand, snow, stone, road, water, cliff, fence, wall (null = from the words).")] = None,
+    count: Annotated[int | None, Field(ge=1, le=6, description="Textures to make (best kept first).")] = None,
+    name: Annotated[str | None, Field(description="Name (null = from the words).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Seamless terrain tiles at the project's tile size: ground = 16 corner tiles, water/cliff =
+    47 blob, fence/wall = 16 line tiles, with variants; Godot TileSet .tres + Tiled .tsx. The first
+    texture is kept; pick_variation(job=..., index=n) rebuilds from another. (make_tileset cuts an
+    existing picture into tiles instead.)"""
+    return _kind_tool("tileset", description, name, wait_s, project, terrain=terrain, count=count)
+
+
+@studio_tool(title="Make a spell / hit effect")
+def make_effect(
+    description: Annotated[str, Field(description="e.g. 'ice nova', 'fireball', 'sword slash', 'heal'.")],
+    effect: Annotated[str | None, Field(
+        description="fire_burst fireball ice_shard frost_nova lightning_bolt chain_lightning sword_combo "
+                    "hit_spark holy_light poison_cloud dark_magic big_explosion buff_aura level_up_burst "
+                    "or a classic kind (what_can_be_made lists all). null = from the words.")] = None,
+    theme: Annotated[str | None, Field(description="Colour theme (fire, ice, lightning, holy, nature, dark...).")] = None,
+    size: Annotated[Literal["", "small", "medium", "large", "huge"] | None, Field(description="Size.")] = None,
+    paint: Annotated[bool | None, Field(description="Hand-paint pass on the GPU (~0.6 min).")] = None,
+    name: Annotated[str | None, Field(description="Name (null = from the words).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Procedural many-frame effect (no GPU, seconds): sheet + glow map + per-frame timing, Godot
+    additive material + demo scene."""
+    return _kind_tool("effect", description, name, wait_s, project, effect=effect, theme=theme,
+                      size=size, paint=paint)
+
+
+@studio_tool(title="Make weather / water / a background")
+def make_atmosphere(
+    description: Annotated[str, Field(description="e.g. 'heavy rain at night', 'animated lagoon water', "
+                                                  "'sunset mountains background', 'misty bamboo valley background'.")],
+    kind: Annotated[Literal["weather", "water", "background"], Field(description="Which maker.")],
+    weather: Annotated[str | None, Field(description="weather: rain snow fog god_rays leaves petals embers "
+                                                     "fireflies dust sandstorm lightning cloud_shadows.")] = None,
+    theme: Annotated[str | None, Field(description="water: ocean, lagoon, river, swamp, lava...")] = None,
+    scene: Annotated[str | None, Field(description="background: mountains, forest, ... (procedural).")] = None,
+    tod: Annotated[Literal["", "dawn", "noon", "sunset", "night"] | None, Field(description="Time of day.")] = None,
+    intensity: Annotated[float | None, Field(ge=0.3, le=2, description="weather strength.")] = None,
+    words: Annotated[str | None, Field(description="background: words for an SDXL-drawn scene (GPU); "
+                                                   "empty = drawn by code.")] = None,
+    name: Annotated[str | None, Field(description="Name (null = from the words).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Looping, tiling weather overlays + particles; animated water with 47 shore tiles; parallax
+    background layers (Godot Parallax2D). CPU, seconds (a background from words uses the GPU)."""
+    return _kind_tool(kind, description, name, wait_s, project, weather=weather, theme=theme,
+                      scene=scene, tod=tod, intensity=intensity, words=words)
+
+
+@studio_tool(title="Make portraits (+ expressions)")
+def make_portrait(
+    description: Annotated[str, Field(description="Who, e.g. 'goblin shaman' or a library character's name, "
+                                                  "plus expressions: 'Knight portrait, angry and happy'.")],
+    character: Annotated[str | None, Field(description="Library character name to paint (null = from the words).")] = None,
+    expressions: Annotated[str | None, Field(description="Comma list: neutral, happy, angry, sad, surprised, "
+                                                         "determined, smug, hurt...")] = None,
+    style: Annotated[Literal["painted", "pixel"] | None, Field(description="Shown as.")] = None,
+    name: Annotated[str | None, Field(description="Name (null = from the words).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Dialogue busts: a painted neutral portrait, then each expression by face-only inpaint
+    (everything else identical), plus pixel versions and a 9-slice frame."""
+    return _kind_tool("portrait", description, name, wait_s, project, character=character,
+                      expressions=expressions, style=style)
+
+
+@studio_tool(title="Make a card")
+def make_card(
+    description: Annotated[str, Field(description="e.g. 'fire dragon card, legendary' or 'Knight card'.")],
+    type: Annotated[Literal["Unit", "Spell", "Item", "Relic"] | None, Field(description="Card type.")] = None,
+    faction: Annotated[Literal["neutral", "fire", "nature", "water", "shadow", "holy"] | None, Field()] = None,
+    rarity: Annotated[Literal["common", "rare", "epic", "legendary"] | None, Field()] = None,
+    art_style: Annotated[Literal["painted", "pixel"] | None, Field()] = None,
+    variations: Annotated[int | None, Field(ge=1, le=6, description="Art variations.")] = None,
+    name: Annotated[str | None, Field(description="Card name (null = from the words).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """A card: art (from a library asset named in the words, or drawn from the words), frame by
+    rarity/faction, text. Godot Card.tscn / Unity CardView.cs on export."""
+    return _kind_tool("card", description, name, wait_s, project, type=type, faction=faction,
+                      rarity=rarity, art_style=art_style, variations=variations)
+
+
+@studio_tool(title="Make a UI kit")
+def make_ui_kit(
+    theme: Annotated[Literal["wood", "stone", "parchment", "metal", "crystal", "sci-fi"], Field(description="Theme.")] = "wood",
+    scale: Annotated[int, Field(ge=0, le=4, description="Whole-number scale (0 = from the tile size).")] = 0,
+    name: Annotated[str | None, Field(description="Name (null = '<Theme> UI kit').")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """9-slice panels, window, dialogue box, buttons x4, tabs, slots, bars, slider, scrollbar,
+    icons, cursors and a pixel font in the house style (no GPU). Godot theme.tres + demo scene /
+    Unity sprites with borders on export."""
+    return _kind_tool("ui", f"{theme} UI kit", name, wait_s, project, theme=theme, scale=scale)
+
+
+@studio_tool(title="Make a map from a template")
+def make_map(
+    template: Annotated[Literal["flat", "harbour", "forest", "castle", "snowfield", "village"], Field()] = "flat",
+    cols: Annotated[int | None, Field(ge=8, le=64)] = None,
+    rows: Annotated[int | None, Field(ge=8, le=64)] = None,
+    seed: Annotated[int, Field(ge=0, le=9999)] = 0,
+    name: Annotated[str | None, Field(description="Name (null = '<Template> map').")] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """A tactics map (heights, terrain, props, team spawns) drawn with the project's tilesets.
+    Edit it with map_edit (terrain_grid shows the cells)."""
+    return _kind_tool("map", f"{template} map", name, None, project, template=template, cols=cols,
+                      rows=rows, seed=seed)
+
+
+@studio_tool(title="Pick a variation")
+def pick_variation(
+    index: Annotated[int, Field(ge=1, le=12, description="1-based variation number (see the previews).")],
+    ref: Annotated[str | None, Field(description=REF_DOC + " Items: icon; drawn props: drawing; cards: art.")] = None,
+    job: Annotated[str | None, Field(description="Tilesets: the job id that made it.")] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Use another variation (no GPU): an item's icon, a drawn prop's drawing, a card's art, or a
+    tileset's texture (rebuilt from it; give the job)."""
+    return _reply(_A.pick_variation(ref, index, project, job))
+
+
+# --------------------------------------------------------------------------- characters: front first
+
+@studio_tool(title="Review a character (front drawing / sheet)", read_only=True)
+def character_review(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """A draft character's front drawing + its idle (and earlier tries), the picture it was made
+    from, the minutes left after an OK; or a finished character's directions + animations. Judge:
+    does it match the words, read at game size, have the held things, no extra limbs? Then
+    character_approve, character_redraw_front, character_change_words or character_pick_try."""
+    return _reply(_A.review(ref, project))
+
+
+@studio_tool(title="Approve: draw every direction")
+def character_approve(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """The front looks good: draw the other directions paired to it (the front is reused byte
+    for byte) and bend every animation. GPU ~0.75 min per direction + ~2 min bending (16
+    directions ~13 min). Cancel keeps the drawings; approving again carries on."""
+    return _reply(_A.approve(ref, wait_s, project))
+
+
+@studio_tool(title="Redraw the front (new seed)")
+def character_redraw_front(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    seed: Annotated[int | None, Field(description="A specific seed (null = a new one).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Draw the front again with a new seed (~40 s GPU); earlier tries stay pickable."""
+    return _reply(_A.redraw_front(ref, seed, wait_s, project))
+
+
+@studio_tool(title="Change a character's words")
+def character_change_words(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    words: Annotated[str, Field(description="The new description.")],
+    new_model: Annotated[bool, Field(description="Also a new picture + 3D shape (when the SHAPE is wrong: "
+                                                 "missing weapon, wrong body; ~3 min).")] = False,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Redraw the front from new words (same seed, so only the words change); new_model for a
+    new shape too."""
+    return _reply(_A.change_words(ref, words, new_model, wait_s, project))
+
+
+@studio_tool(title="Pick an earlier try of the front")
+def character_pick_try(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    n: Annotated[int, Field(ge=1, description="Try number (character_review lists them).")],
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Use an earlier front drawing again (no GPU)."""
+    return _reply(_A.pick_try(ref, n, project))
+
+
+@studio_tool(title="Finish an interrupted drawing")
+def character_finish(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """A character whose drawing stopped (GPU crash: 3D-rendered sheets for now): draw only the
+    missing directions, then bend every animation."""
+    return _reply(_A.finish(ref, wait_s, project))
+
+
+@studio_tool(title="Redraw some directions of a finished character")
+def character_redraw(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    directions: Annotated[list[str], Field(description="e.g. ['NE', 'NNE'] (empty = every direction).")],
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """New seeds for those directions (the rest stay identical, same palette); quality.drawn.worst
+    in get_asset names weak ones."""
+    return _reply(_A.redraw_directions(ref, directions, wait_s, project))
+
+
+# --------------------------------------------------------------------------- animation
+
+@studio_tool(title="List animations that can be added", read_only=True)
+def list_motions(body: Annotated[Literal["person", "animal"], Field()] = "person") -> ToolOutput:
+    """Built-in clips, clips add_animation can add (cast shoot block thrust jump wave kneel
+    victory; animals bark howl jump eat) and the mocap library (downloaded ones usable)."""
+    return _reply(_A.motions(body), False)
+
+
+@studio_tool(title="Add animations to a character")
+def add_animation(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    names: Annotated[list[str], Field(description="Clips, e.g. ['cast', 'jump'] or ['attack=shoot'] with replace.")],
+    replace: Annotated[bool, Field(description="Replace clips of the same name.")] = False,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """New clips on the rig; old frames stay identical (drawn characters bend the same drawings:
+    no GPU). ~20-70 s CPU."""
+    return _reply(_A.add_animation(ref, names, replace, wait_s, project))
+
+
+@studio_tool(title="Add mocap clips to a character")
+def add_mocap(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    names: Annotated[list[str], Field(description="Mocap library names (list_motions) or .bvh paths.")],
+    replace: Annotated[bool, Field(description="A clip with an existing name replaces it.")] = True,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Motion capture retargeted onto the character's rig (people only)."""
+    return _reply(_A.add_mocap(ref, names, replace, wait_s, project))
+
+
+@studio_tool(title="Capes / hair / tails swing (springs)")
+def add_springs(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    stiffness: Annotated[float | None, Field(ge=0, le=1)] = None,
+    damping: Annotated[float | None, Field(ge=0, le=1)] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Spring bones baked into every clip, sheet rendered again."""
+    opts = {k: v for k, v in {"stiffness": stiffness, "damping": damping}.items() if v is not None}
+    return _reply(_A.add_springs(ref, opts, wait_s, project))
+
+
+@studio_tool(title="Re-skin a character (new colours)")
+def reskin_character(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    name: Annotated[str, Field(description="The new character's name, e.g. 'Blue Knight'.")],
+    colour: Annotated[str | None, Field(description="New colour for the main colour family: blue, red, green, "
+                                                    "purple... or #rrggbb.")] = None,
+    hue: Annotated[float | None, Field(ge=0, le=360, description="Or turn every hue by degrees.")] = None,
+    source_colour: Annotated[str | None, Field(description="#rrggbb of the colour to change (null = the main one).")] = None,
+    saturation: Annotated[float, Field(ge=0, le=3)] = 1.0,
+    lightness: Annotated[float, Field(ge=0.2, le=3)] = 1.0,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """A new library character with its sheet recoloured (pixels, frames, normal maps kept). No GPU."""
+    return _reply(_A.reskin(ref, name, hue, colour, source_colour, saturation, lightness, project))
+
+
+@studio_tool(title="Restyle the project's assets")
+def restyle_project(
+    dry_run: Annotated[bool, Field(description="Only say what would be redone.")] = True,
+    kinds: Annotated[list[Literal["character", "item", "prop"]] | None, Field()] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Redo characters/items/props in the CURRENT house style (drawn characters are drawn again
+    on the GPU: ~10 min each)."""
+    return _reply(_A.restyle(kinds, dry_run, wait_s, project), False)
+
+
+@studio_tool(title="Game-ready 3D model")
+def game_model(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    look: Annotated[Literal["smooth", "pixel"] | None, Field(description="smooth (1024 textures) or pixel "
+                                                                         "(256, palette, nearest). null = project's.")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """LOD0-2 .glb with UVs, baked colour + normal maps, skin + every clip (characters), for 3D
+    games. CPU ~1.5-2.5 min; drawn props/items first get a 3D shape on the GPU (~1.5 min).
+    Export with export_to_game(models=true)."""
+    return _reply(_A.game_model(ref, look, wait_s, project), True)
+
+
+# --------------------------------------------------------------------------- maps
+
+@studio_tool(title="Map cells (terrain / height grid)", read_only=True)
+def map_info(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """A map as text: terrain rows (one letter per cell, legend), height rows (levels 0-9),
+    props, spawns; plus its preview. Row 0 is the top (north), col 0 the left."""
+    return _reply(_A.map_info(ref, project))
+
+
+@studio_tool(title="Edit a map")
+def map_edit(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    edits: Annotated[list[dict[str, Any]], Field(
+        description="In order: {op: paint, col, row, terrain, brush} | {op: rect, col, row, col2, row2, "
+                    "terrain and/or level} | {op: fill, col, row, terrain} | {op: raise|lower, col, row, "
+                    "amount, brush} | {op: height, col, row, level} | {op: prop, col, row, kind} | "
+                    "{op: erase_prop, col, row} | {op: spawn, col, row, team 0|1} | {op: clear_spawn, col, "
+                    "row} | {op: resize, cols, rows}.")],
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Apply edits and save the map (preview re-rendered with the project's tilesets)."""
+    return _reply(_A.map_edit(ref, edits, project))
+
+
+# --------------------------------------------------------------------------- export into a game
+
+@studio_tool(title="Export into a Godot / Unity project")
+def export_to_game(
+    project_path: Annotated[str, Field(description="The game project folder (has project.godot / Assets).")],
+    engine: Annotated[Literal["godot", "unity"] | None, Field(description="null = the house style's engine.")] = None,
+    refs: Annotated[list[str] | None, Field(description="Asset ids (null with no collection/kinds = every asset).")] = None,
+    collection: Annotated[str | None, Field(description="Export a collection.")] = None,
+    kinds: Annotated[list[AssetKind] | None, Field(description="Export every asset of these kinds.")] = None,
+    subdir: Annotated[str, Field(description="Folder inside the project: Godot res://<subdir> (default art), "
+                                             "Unity Assets/<subdir> (default Assets/PixelPipeline).")] = "",
+    force: Annotated[bool, Field(description="Re-export unchanged assets too.")] = False,
+    models: Annotated[bool, Field(description="Also the game-ready 3D models (made with game_model).")] = False,
+    build_models: Annotated[bool, Field(description="Build missing 3D models during the export (slow).")] = False,
+    verify: Annotated[bool, Field(description="Godot: import headless and load every exported resource.")] = False,
+    preset: Annotated[str | None, Field(description="Sprite preset override (godot-2d, godot-hd2d, unity...).")] = None,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Write assets into an existing game project with the engine's import settings (Godot
+    .import: lossless, no mipmaps; Unity .meta: point filter, sliced sprites) and update
+    <subdir>/pixel_pipeline_manifest.json: asset id -> files (res:// paths for Godot), frame
+    size, animations (directions, frames, ms, loop), anchor (feet), ppu, tile, normal/glow maps;
+    by_name maps engine-safe names to ids, so game code loads assets by name. Incremental:
+    unchanged assets are skipped. Drafts are skipped (approve them first)."""
+    return _reply(_A.export(refs, engine, project_path, subdir, collection, kinds, force, models,
+                            build_models, verify, preset, wait_s, project), False)
+
+
+@studio_tool(title="Verify the Godot import (headless)")
+def verify_godot_import(
+    project_path: Annotated[str, Field(description="The Godot project folder.")],
+    subdir: Annotated[str, Field(description="Where the manifest is (default art).")] = "",
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+) -> ToolOutput:
+    """Run Godot --headless --import, then load every resource in the manifest (SpriteFrames,
+    textures, TileSets, themes, scenes instantiated, models). Needs GODOT_BIN or Godot on PATH."""
+    return _reply(_A.verify_godot(project_path, subdir, wait_s), False)
+
+
+# --------------------------------------------------------------------------- jobs
+
+@studio_tool(title="Job status", read_only=True)
+def job_status(
+    job: Annotated[str, Field(description="Job id.")],
+    wait_s: Annotated[float, Field(ge=0, le=600, description="Wait up to this long for it to finish first.")] = 0,
+    images: Annotated[bool, Field(description="Attach the result's previews when done.")] = True,
+) -> ToolOutput:
+    """percent, stage, what it's doing, eta, minutes so far; when done the result (asset summary,
+    previews, quality checks; attached as images); failed: the error and the log tail."""
+    d = _A.job_status(job, wait_s)
+    extra = [d["latest_drawing"]] if d.get("latest_drawing") else []
+    return _reply(d, images, extra)
+
+
+@studio_tool(title="List jobs", read_only=True)
+def list_jobs(
+    status: Annotated[Literal["queued", "running", "done", "failed", "cancelled", "interrupted"] | None, Field()] = None,
+    project: Annotated[str | None, Field(description="Only this project's.")] = None,
+    limit: Annotated[int, Field(ge=1, le=200)] = 20,
+) -> ToolOutput:
+    """Recent jobs (running/queued first) and who holds the GPU lock. 'interrupted' = its process
+    stopped (crash/restart): resume_jobs."""
+    return _reply(_A.list_jobs(status, project, limit), False)
+
+
+@studio_tool(title="Cancel a job")
+def cancel_job(job: Annotated[str, Field(description="Job id.")]) -> ToolOutput:
+    """Queued: dropped. Running: stops at its next step (finished drawings/variations are kept;
+    a character can be approved/finished again later)."""
+    return _reply(_A.cancel_job(job), False)
+
+
+@studio_tool(title="Resume interrupted jobs")
+def resume_jobs(
+    jobs: Annotated[list[str] | None, Field(description="Job ids (null = every interrupted job). Failed or "
+                                                        "cancelled ones run again when named.")] = None,
+) -> ToolOutput:
+    """Queue interrupted jobs again (nothing restarts by itself after a crash). Drawn characters
+    carry on from their kept drawings."""
+    return _reply(_A.resume_jobs(jobs), False)
 
 
 def main() -> None:

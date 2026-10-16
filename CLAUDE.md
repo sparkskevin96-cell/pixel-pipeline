@@ -641,6 +641,36 @@ wants terse answers and fixes over polish.
   (prompt_to_model picture=, views front; GPU ~1.5 min, said in the dialog). makeany.GPU recalibrated from the
   QA timings (tile 0.22/texture, card art 0.16, icon 0.2 + item 3D 1.2, prop drawing 0.35). Tests:
   tests/test_robust.py (fake ComfyUI that drops connections mid-run).
+- **Tiles round 2 (2026-10-16, Kevin: "work on those")**: (1) HD-2D board ground = `hd2d.TERRAIN_SHADER`
+  (shaders/terrain.gdshader, ShaderMaterial per top/side, `terrain_mats`): per-texel normals (nearest) + each
+  light's diffuse in `terrain_bands` (5, lighting.json; B toggles with the sprites' bands) steps, lower bands
+  toward a cool shade_tint, no specular (weather wet adds some); `neo_terrain.board_albedo`: bright tops capped
+  (ALBEDO_CAP snow 83 / sand 76 Lab L at p98), their steps spread (BOARD_CONTRAST 1.6 / 1.75), shadows hue-shifted
+  (SHADE_SHIFT); RELIEF snow 1.5 / sand 1.3 + terrain.json "relief" (normal depth 1.6 / 1.4); noon sun 1.75 -> 1.6,
+  exposure 0.93, "white" 1.6 (env.tonemap_white); tilt-shift band wider (near cam_dist-7, far +5, amount 0.12).
+  Noon 1:1 crop: snow L 97 -> 87, std 11 -> 14 (drifts read), sand reads as sand. weather_hd2d tints the shader
+  mats too. (2) `stone_tile` -> `split_stones`: stones bigger than STONE_AREA max (road 0.13 x tile area), aspect
+  > 2.6 or solidity < 0.78 (`stone_shape`, wrap-aware) split by 2-means along a new 1 px joint (halves >= 30%);
+  on the real 2026-10-15 GPU paintings odd stones (>= 12 px) road 20% -> 12%, cliff 29% -> 16% (stricter 0.8/2.3
+  metric). (3) Cliff faces: `tilepaint.boulder_face` (same signature as rock_face; `face_layout` = strata bands +
+  leaning wobbly cuts, big ones split in rows; stones drawn like stone_tile: tone rank, 3 tints from the cliff
+  tile (`stone_tints`), dome shading, 2-pass rounding, glint, deep joints, moss) used by `cliff_art` (CliffArt
+  layout/rules unchanged) and the board's natural side walls (bricks still rock_face). FACE_STYLE "strata" = old.
+  (4) `tilewords.py`: words shape drawn ground: `details(terrain, words)` -> Details (moss, flowers, cracks,
+  puddles, pebbles/big, ripples/dunes, fresh, footprints, tall, leaves, tufts; USES per terrain; whole words,
+  phrases first); grass/dirt/sand/snow/_flag idx painters take d (plain = byte-identical to before);
+  `stamp_details` = coloured stamps (moss clumps, flowers, leaves, puddles, grey pebbles). Swatch.words,
+  drawn_tile/drawn_variants/builtin_swatch(words=), save_tileset stores them, rebuild_tileset redoes them; the UI
+  Quick button passes the Words box. SDXL-suggested stamp shapes: not done. (5) makeany: `tile_pictures` ->
+  painted terrains (road/cliff, top-down/iso) = 2 x count pictures x GPU["paint_picture"] 0.35 min (QA road
+  41 s/swatch); progress_plan has a "Painting N tiles (2N pictures)" stage. Tests tests/test_tiles_round2.py.
+  Sheets: Pictures/PixelPipeline/tiles_round2_ab.png (2D before/after per terrain, road/cliff stone_tile on the
+  real paintings, word variants on today's SDXL swatches), tiles_round2_hd2d.png (4 times of day + noon crops).
+  Note: this run SDXL took ~55-75 s per 1024 picture (ComfyUI cold start in the lock), vs 13 s before.
+  Still weak: the board's road uses the QA project's saved (pre-split) road set; noon grass is richer/greener
+  than before (no specular wash) - check it's wanted; puddles/footprints repeat per tile (2 per tile, variants
+  help); moss on dirt reads as small bars; face strata seams are straight joints every tile row (by design for
+  the cut rules).
 - **Front first, then OK (2026-10-15, Kevin: "show one side then ask for approval to make all 16
   directions, or redraw if it's not up to par")**: `library.add_character(drawn=True, preview=True)` =
   picture -> model -> rig -> ONLY the reference drawing (S; animals E) + its idle bent from it
@@ -722,6 +752,31 @@ wants terse answers and fixes over polish.
   bar shows the running job from any tab and the window title gets "NN% · ". Style training feeds the
   same hub. Tests tests/test_progress.py (fake clock, fake ComfyUI websocket); shot
   tools/progress_shot.py -> Pictures/PixelPipeline/progress_ui.png.
+- **Claude drives the studio (2026-10-16, Kevin: "use Claude to build games and use this app as a
+  tool")**: guide docs/FOR_CLAUDE.md (MCP config for a game repo, workflow, timings, gotchas) + a
+  copyable skill docs/skill/pixel-pipeline/SKILL.md. `agent.py` = every app operation as a function
+  returning JSON dicts (projects/house style, library list/get/tag/delete->.trash, plan/make for all
+  12 makeany kinds, front-first character review/approve/redraw/words/pick/finish, animations/mocap/
+  springs, reskin/restyle, game 3D model, map_info/map_edit, export, jobs); asset ids "kind/folder";
+  previews under <project>/.agent/previews (directions grid, animations grid, variations, gif);
+  `quality()` = subject check of the chosen picture + generator checks + drawn keys_report IoU/colour
+  + empty frames -> warnings. `agentjobs.py`: job records <project>/agent_jobs/<id>.json, one GPU
+  worker thread + cross-process O_EXCL lock (PIXEL_GPU_LOCK, default <home>/gpu.lock, same protocol
+  as tools/gpu_lock), PIXEL_AGENT_PAUSE rest (20 s), CPU jobs on their own threads, Stop via the
+  progress.Tracker, a dead owner pid -> "interrupted", resume() only on request (no unattended
+  restarts). Jobs run under `assets.using_project` (thread-local current project, new, additive).
+  Tilesets keep texture 1; the Made is pickled per job so pick_variation(job=) works after a restart.
+  `gameexport.py`: export_to_game(engine godot|unity, project_path, subdir) -> per-kind writers
+  (exports presets, uikit/cards/maplib exporters, tileset files), Godot pixel .import per PNG (not
+  BMFont pages: the .fnt importer claims them), nested project.godot from map exports removed + res://
+  re-rooted, project.godot Nearest filter, manifest pixel_pipeline_manifest.json (files/res paths,
+  frame, animations {directions, frames, ms, loop}, feet anchor, ppu, tile, by_name), fingerprint
+  (files size+mtime + options) -> incremental; verify_godot = --import (twice if errors) + load
+  every manifest resource (Godot 4.6.1: 7/7 incl. character, UI theme, map, weather, water, parallax).
+  MCP (mcp_server.py "asset studio" section): 47 new tools (17 old kept; the studio's tileset maker
+  is make_terrain_tiles since make_tileset exists); CLI `cli_agent.py`: make/character/jobs/library/
+  project/export with --json. Tests tests/test_agent.py (fake ComfyUI, robot draft, temp Godot/Unity
+  projects, stdio).
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 
@@ -732,14 +787,16 @@ wants terse answers and fixes over polish.
 - `pipeline.py`: load → isolate → prepare (crop, fit, fill, pixelize) → finish (palette,
   dither, cleanup, outline); `convert`, `convert_batch`, `sprites_from_rgba` (shared
   palette)
-- `tilegen.py` + `tilepaint.py` (tiles v3: painted stones, drawn soft ground, fold, stone_tile)
+- `tilegen.py` + `tilepaint.py` (tiles v3: painted stones, drawn soft ground, fold, stone_tile, boulder_face) +
+  `tilewords.py` (words -> drawn ground shapes)
 - `pixelize.py` (outline expansion, contrast downscale, tileable), `quantize.py`,
   `palettes.py`, `finishing.py` (orphan cleanup, sel-out), `color.py`
 - `video.py` (frames → aligned sprites, track/fixed), `animate.py` (breathe/bob/sway)
 - `export.py` (sheets + JSON, tilesets + Tiled .tmj, `write_animation`, `load_sprite`
   undoes upscaled exports), `aseprite.py`, `godot.py`
 - `cli.py` (convert, video, idle, sheet, tileset, palettes), `ui/app.py` (desktop),
-  `mcp_server.py` (MCP tools for Claude; needs mcp>=2)
+  `mcp_server.py` (MCP tools for Claude; needs mcp>=2), `agent.py` / `agentjobs.py` /
+  `gameexport.py` / `cli_agent.py` (Claude drives the studio: docs/FOR_CLAUDE.md)
 - `systems.py` (retro looks), `drawing.py` (text-row sprites), `generate.py` (ComfyUI)
 - `depth.py` + `parallax.py`: depth-based parallax layers + Godot Parallax2D scene
 - `packaging/` (PyInstaller spec), `.github/workflows/ci.yml` (tests on win+linux, exe on

@@ -102,6 +102,20 @@ func _ground() -> void:
 				m.metallic_specular = lerpf(0.5, 0.85, wet)
 			if snow > 0.0:                    # snow: frosted, cooler
 				m.albedo_color = m.albedo_color.lerp(Color(0.92, 0.95, 1.05), snow)
+		elif n is MeshInstance3D and n.material_override is ShaderMaterial and n.material_override in board.terrain_mats:
+			var sm: ShaderMaterial = n.material_override      # the ground (terrain.gdshader)
+			if seen.has(sm):
+				continue
+			seen[sm] = true
+			var tint = sm.get_shader_parameter("tint")
+			var c := Color(1, 1, 1) if tint == null else Color(tint.x, tint.y, tint.z)
+			if wet > 0.0:
+				c = c * Color(1.0 - 0.3 * wet, 1.0 - 0.28 * wet, 1.0 - 0.22 * wet)
+				sm.set_shader_parameter("roughness", lerpf(0.95, 0.25, wet))
+				sm.set_shader_parameter("specular", 0.6 * wet)
+			if snow > 0.0:
+				c = c.lerp(Color(0.92, 0.95, 1.05), snow)
+			sm.set_shader_parameter("tint", Vector3(c.r, c.g, c.b))
 	wet_done = true
 
 func apply(L: Dictionary) -> void:

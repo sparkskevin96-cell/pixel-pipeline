@@ -885,7 +885,26 @@ GPU = {"sdxl": 0.25, "model3d": 2.5, "drawn16": 8.5, "rig": 2.0, "inpaint": 0.3,
        "icon": 0.2, "item3d": 1.2, "tile": 0.22, "card_art": 0.16, "prop_drawing": 0.35,
        # front-first characters: the directions after the OK'd front, per direction (QA dwarf
        # 2026-10-15: 15 directions = 25 drawings in 11.6 min) and the bending after (~1.8 min CPU)
-       "drawn_dir": 0.75, "bend": 1.8}
+       "drawn_dir": 0.75, "bend": 1.8,
+       # tiles v3 paint (road, cliff): 2 img2img pictures per swatch (the tile + 4 variant
+       # layouts), QA 2026-10-15: road 41 s per swatch
+       "paint_picture": 0.35}
+
+
+def tile_pictures(plan: "Plan", style=None) -> tuple[int, float]:
+    """(GPU pictures, minutes per picture) a tileset plan takes: painted terrains (road, cliff
+    on a top-down / iso camera) paint 2 pictures per swatch, the others draw one."""
+    from . import tilegen
+    p = plan.params
+    n = max(1, int(p.get("count", 3)))
+    try:
+        camera = p.get("camera") or tilegen.camera_for(style)
+        how = tilegen.tile_method(p.get("terrain", "grass"), camera, p.get("method"))
+    except Exception:  # noqa: BLE001 - no project style: the top-down default
+        how = tilegen.tile_method(p.get("terrain", "grass"), "topdown", None)
+    if how == "paint":
+        return 2 * n, GPU["paint_picture"]
+    return n, GPU["tile"]
 
 
 def gpu_minutes(plan: Plan, style=None) -> float:
@@ -909,7 +928,8 @@ def gpu_minutes(plan: Plan, style=None) -> float:
             return GPU["sdxl"] + GPU["model3d"] + 4 * GPU["sdxl"]
         return GPU["model3d"] + GPU["sdxl"]
     if k == "tileset":
-        return GPU["tile"] * max(1, int(p.get("count", 3)))
+        pics, each = tile_pictures(plan, style)
+        return pics * each
     if k == "background":
         return GPU["sdxl"] + 0.1 if p.get("words") else 0.0
     if k in ("weather", "water"):
@@ -969,6 +989,12 @@ def progress_plan(plan: Plan) -> tuple[list | None, float | None]:
         return None, max(10.0, (gpu_minutes(plan) + cpu_minutes(plan)) * 60)
     if k == "tileset":
         n = max(1, int(p.get("count", 3)))
+        pics, each = tile_pictures(plan)
+        if pics > n:                     # painted: the tile, then four more layouts, per swatch
+            return [P.Stage("draw", f"Painting {n} tiles ({pics} pictures)", each * pics,
+                            r"painting .* tile|painting four more"),
+                    P.Stage("seamless", "Stones re-drawn + checks", 0.05 * n,
+                            r"painting stays off|drawn layout")], None
         return [P.Stage("draw", f"Drawing {n} textures", GPU["tile"] * n, r"drawing .* texture"),
                 P.Stage("seamless", "Seamless + checks", 0.05 * n, r"seamless|came out|calm drawn")], None
     m = gpu_minutes(plan) + cpu_minutes(plan)
