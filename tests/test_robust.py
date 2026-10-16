@@ -300,15 +300,17 @@ def test_a_brick_road_or_a_grid_lagoon_is_drawn_again(monkeypatch):
         return [(Image.fromarray(img), (seed or 0) + i) for i in range(count)]
     monkeypatch.setattr("pixel_pipeline.generate.generate_images", fake_generate)
     said = []
-    sw, = tg.make_swatches("road", count=1, seed=7, style=assets.Style(tile=16), say=said.append)
+    sw, = tg.make_swatches("road", count=1, seed=7, style=assets.Style(tile=16), say=said.append,
+                          method="swatch")
     assert len(calls) == 2 and sw.pattern_miss == 0 and sw.seed == 7 + 1000
     assert "(bricks:1.5)" in calls[1][1] and any("wrong pattern" in s for s in said)
     calls.clear()
-    sw, = tg.make_swatches("water", count=1, seed=3, style=assets.Style(tile=16))
+    sw, = tg.make_swatches("water", count=1, seed=3, style=assets.Style(tile=16), method="swatch")
     assert len(calls) == 2 and sw.pattern_miss == 0 and sw.colour_miss == 0
     calls.clear()                              # never good: the least bad is kept, said so
     monkeypatch.setattr(tg, "PATTERN_WORDS", {"road": ("(still bricks", "x")})
-    sw, = tg.make_swatches("road", count=1, seed=7, style=assets.Style(tile=16), retries=2)
+    sw, = tg.make_swatches("road", count=1, seed=7, style=assets.Style(tile=16), retries=2,
+                          method="swatch")
     assert len(calls) == 3 and sw.pattern_miss > 0
 
 
@@ -400,7 +402,8 @@ def test_flat_water_is_lifted_or_drawn_as_calm_ripples(monkeypatch):
         return [(Image.fromarray(flat), (seed or 0) + i) for i in range(count)]
     monkeypatch.setattr("pixel_pipeline.generate.generate_images", fake_generate)
     said = []
-    sw, = tg.make_swatches("water", count=1, seed=3, style=assets.Style(tile=32), say=said.append)
+    sw, = tg.make_swatches("water", count=1, seed=3, style=assets.Style(tile=32), say=said.append,
+                          method="swatch")
     assert len(calls) == 3 and "(clearly visible ripples" in calls[1]       # redrawn, aimed at it
     st = tg.tile_stats(sw.texture)
     assert st["lstd"] >= tg.FLAT_MIN["water"] and sw.pattern_miss == 0      # readable in the end
@@ -436,6 +439,7 @@ def test_water_that_keeps_coming_out_as_islands_becomes_drawn_ripples(monkeypatc
                         lambda p, n="", *, seed=None, count=1, **kw:
                         [(Image.fromarray(lagoon), (seed or 0) + i) for i in range(count)])
     said = []
-    sw, = tg.make_swatches("water", count=1, seed=3, style=assets.Style(tile=32), say=said.append)
+    sw, = tg.make_swatches("water", count=1, seed=3, style=assets.Style(tile=32), say=said.append,
+                          method="swatch")
     assert sw.colour_miss == 0 and "[neo water" in sw.prompt and any("land" in s for s in said)
     assert tg.tile_stats(sw.texture)["lstd"] >= tg.FLAT_MIN["water"]

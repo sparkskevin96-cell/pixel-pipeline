@@ -53,7 +53,7 @@ def test_gpu_swatches_carry_the_house_style_and_wrap(comfy):
     # seam repaint on the GPU: an inpaint pass (mask) over the offset copy
     n = len(fake.prompts)
     tg.make_swatches("water", count=1, client=client, seed=1, style=proj.style, style_lora="",
-                     inpaint_seams=True, retries=0)
+                     inpaint_seams=True, retries=0, method="swatch")
     assert len(fake.prompts) == n + 2
     side = assets.style_for_type("side-scroller")
     pos, _ = tg.swatch_prompt("cliff", "", tg.camera_for(side), side)
@@ -148,7 +148,11 @@ def test_cliff_faces_are_real_rock_walls(tmp_path):
     edge = tile(ch[255 & ~(tg.S | tg.SE | tg.SW)][0][0])
     mid = tile(tg.face_choice(ch, "mid", 3, 0))
     base = tile(tg.face_choice(ch, "base", 3, 0))
-    assert (np.abs(edge - grass[..., :3]).sum(-1) > 30)[-3:, 3:-3].mean() > 0.75  # rock (some moss) to the bottom
+    bare = tg.build_tileset("cliff", rock, base=grass, overhang=False)          # no grass drips over it:
+    c0, r0 = bare.choices()[255 & ~(tg.S | tg.SE | tg.SW)][0][0]                 # rock to the bottom
+    edge0 = bare.atlas[r0 * t:(r0 + 1) * t, c0 * t:(c0 + 1) * t, :3].astype(int)
+    assert (np.abs(edge0 - grass[..., :3]).sum(-1) > 30)[-3:, 3:-3].mean() > 0.75
+    assert (np.abs(edge - grass[..., :3]).sum(-1) > 30)[-3:, 3:-3].mean() > 0.5   # drips + moss: some
     assert (np.abs(mid - grass[..., :3]).sum(-1) > 30).mean() > 0.8                # a full tile of rock
     assert edge[-1].sum(-1).mean() < mid[0].sum(-1).mean()                      # joint, then lit top
     assert (np.abs(base - grass[..., :3]).sum(-1) < 30)[-2:].mean() > 0.5        # ground at its foot

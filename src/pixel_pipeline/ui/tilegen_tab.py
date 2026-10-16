@@ -143,7 +143,8 @@ class TilegenTab(ToolTab):
             self.tileset = build_tileset(sw.terrain, sw.texture, picture=sw.picture,
                                          base=self.base.currentText(), camera=self._camera(),
                                          variants=self.variants.value(), seed=sw.seed,
-                                         overhang=self.overhang.isChecked())
+                                         overhang=self.overhang.isChecked(),
+                                         sources=sw.sources)
         except ValueError as e:
             self.tileset = None
             self.save_btn.setEnabled(False)

@@ -615,6 +615,28 @@ wants terse answers and fixes over polish.
   dirt tile repeats in diagonal streaks, sand faint streaks (flagged, kept), SDXL "snow" = drifts on dark
   ground, cliff drawn as courses (not checked). The house style (style LoRA + "16-bit") seems to push swatches
   toward bricks/courses.
+- **Tiles v3 (2026-10-15/16, Kevin: "finished tiles are much worse than the swatches")** (`tilepaint.py`,
+  `tilegen.METHODS` / `tile_method`, make_swatches(method=None)): top-down + iso default = **paint** for road/cliff
+  (irregular mixed-size cobble/boulder layout at the tile size -> 16x, softened, 2x2 1024 canvas -> SDXL img2img
+  denoise 0.7, style LoRA at TILE_STYLE_STRENGTH 0.35 -> `fold` (sin^2 over the canvas: wraps exactly, no ghosts)
+  -> `stone_tile` (watershed stones on evened lightness, 3x3 wrap, ids by marker position; per-stone tone rank +
+  3 shared tints, lit/shadow rims, glint, rounded corners, 1 px joints) + `paint_variants` (one more pass: 4 other
+  layouts) = 2 GPU pictures per swatch; misses -> lower denoise -> neo layout) and **drawn** for grass/dirt/sand/
+  snow/stone/water/fence/wall (code-drawn shapes at tile scale, evenly scattered details, ramp = hand ramp mixed with
+  SDXL swatch colours (`picture_ramp`, SWATCH_WEIGHT 0.6, snow 0.3; only colour_miss is checked); water = neo ripples
+  in the swatch blue; `drawn_variants` = other seeds). Side-scroller camera keeps **swatch** (the old way; also
+  method="swatch"). Swatch.method/sources/variants_raw; build_tileset(sources=) feeds variety() (base grass gets its
+  drawn variants too); save writes extra.method + swatch_variants.png; rebuild_tileset redoes paint/drawn on the CPU
+  identically; builtin_swatch (no GPU, even=True) = drawn / neo. GPU A/B findings (QA project): SDXL keeps the
+  init's pixel steps at 0.4-0.55 (rows of square stones), redraws round stones at 0.7; it flattens soft ground into
+  blobs at any denoise and at 2x2 or 4x4 canvases (so soft ground is drawn); the LoRA at 0.35 vs 0.8 made no
+  bricks in paint mode (bricks came from the free swatch prompt); the old converter's contrast downscale point-
+  samples (aliasing) and prepare(tileable) re-blends an already seamless picture (ghosts) - finish_tile uses area
+  downscale (tested isotropic). Sheets: Pictures/PixelPipeline/tiles_quality_ab.png (old tile | new tile | sample
+  map 1x | transition 2x | HD-2D board before/after), tiles_quality_hd2d_before/after.png; v3 sets saved in
+  "QA 2026-10-15" (v3-*-tiles). Weak: on the HD-2D board at noon snow reads near-plain white and sand pale (fine
+  detail lost to bright light + depth of field; 2D is fine); road stones sometimes merge into odd shapes; cliff
+  faces are still neo rock_face (unchanged). Tests: tests/test_tilepaint.py.
   Drawn picture-only props/items: `gamemodel.needs_shape` -> Export builds model.glb from the chosen drawing
   (prompt_to_model picture=, views front; GPU ~1.5 min, said in the dialog). makeany.GPU recalibrated from the
   QA timings (tile 0.22/texture, card art 0.16, icon 0.2 + item 3D 1.2, prop drawing 0.35). Tests:
@@ -710,6 +732,7 @@ wants terse answers and fixes over polish.
 - `pipeline.py`: load → isolate → prepare (crop, fit, fill, pixelize) → finish (palette,
   dither, cleanup, outline); `convert`, `convert_batch`, `sprites_from_rgba` (shared
   palette)
+- `tilegen.py` + `tilepaint.py` (tiles v3: painted stones, drawn soft ground, fold, stone_tile)
 - `pixelize.py` (outline expansion, contrast downscale, tileable), `quantize.py`,
   `palettes.py`, `finishing.py` (orphan cleanup, sel-out), `color.py`
 - `video.py` (frames → aligned sprites, track/fixed), `animate.py` (breathe/bob/sway)

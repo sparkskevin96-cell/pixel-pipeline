@@ -1344,7 +1344,7 @@ def keep(made: Made, index: int | None = None, project=None) -> Made:
         sw = made.extra["swatches"][index - 1]
         if made.asset is None or made.extra.get("kept") != index:
             gs = tilegen.build_tileset(sw.terrain, sw.texture, picture=sw.picture, seed=sw.seed,
-                                       project=proj)
+                                       project=proj, sources=sw.sources)
             made.asset = tilegen.save_tileset(gs, made.plan.name, project=proj, swatch=sw,
                                               words=made.plan.params.get("words", ""))
             made.extra["kept"] = index
