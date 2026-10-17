@@ -231,7 +231,10 @@ class CharacterReview(QWidget):
         if pic is None:
             self.picture_view.setText("(no picture)")
         self.words.setText(f"“{info['words']}”" if info["words"] else "")
-        self.estimate.setText(f"Looks good: {info['estimate']} (Stop keeps what's drawn).")
+        from ..metrics import made_in
+        so_far = made_in(ch.folder)
+        self.estimate.setText(f"Looks good: {info['estimate']} (Stop keeps what's drawn)."
+                              + (f"  So far: {so_far.replace('made in ', '')}." if so_far else ""))
         n = 16
         try:
             from ..library import _keys_meta

@@ -2118,16 +2118,20 @@ def project_tilesets(project: assets.Project | None = None) -> list[assets.Asset
 
 
 def rebuild_tileset(asset: assets.Asset, *, save: bool = False, mix: bool = True,
-                    keep_texture: bool = False) -> GenTileset:
+                    keep_texture: bool = False, tile: int | None = None) -> GenTileset:
     """A saved set built again on the CPU with today's code: from its swatch.png (the GPU
     picture, made seamless and evened out again) or the built-in look. keep_texture: the saved
     texture.png stays the tile (a GPU seam repaint can't be redone on the CPU), the picture
-    only gives interiors. save=True rewrites the asset's files (and asset.json's variants/mix)."""
+    only gives interiors. save=True rewrites the asset's files (and asset.json's variants/mix).
+    tile: build it at another tile size (e.g. 64 for a "detailed" project: the same picture
+    drawn with twice the pixels, so tiles stay one pixel grid with 2x sprites)."""
     ex = asset.extra
     folder = Path(asset.folder)
     proj = assets.Project(folder.parent.parent.name, folder.parent.parent)
     st = proj.style
-    t = int(ex.get("tile") or st.tile)
+    t = int(tile or ex.get("tile") or st.tile)
+    if tile and int(ex.get("tile") or 0) != t:
+        keep_texture = False                  # the saved texture is the old size
     terrain = ex.get("terrain", "grass")
     raw = folder / "swatch.png"
     method = ex.get("method", "swatch")
@@ -2167,7 +2171,7 @@ def rebuild_tileset(asset: assets.Asset, *, save: bool = False, mix: bool = True
                        overhang=bool(ex.get("overhang", True)), sources=sources)
     if save:
         write_tileset(gs, folder)
-        asset.extra.update(variants=gs.meta.get("variants", 3), mix=mix)
+        asset.extra.update(variants=gs.meta.get("variants", 3), mix=mix, tile=t)
         asset.save()
     return gs
 

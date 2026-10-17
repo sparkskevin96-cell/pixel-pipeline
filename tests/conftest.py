@@ -76,6 +76,8 @@ def _own_library(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("PIXEL_DRAFT", "0")       # full-quality sampling whatever the app's switch says
     monkeypatch.setenv("PIXEL_HOME", str(tmp_path_factory.mktemp("home")))
     monkeypatch.setenv("PIXEL_DRAWN", "0")       # library characters: 3D render unless asked
+    monkeypatch.setenv("PIXEL_QUALITY", "0")     # the automatic per-direction redraw loop: off unless a
+    #                                              test turns it on (tests count the fake's prompts)
     # CPU caches (cache.py) per test: a test never gets another test's results (some tests
     # swap functions out), and the real ~/.pixel-pipeline/cache is never touched
     monkeypatch.setenv("PIXEL_CACHE", str(tmp_path_factory.mktemp("cache")))

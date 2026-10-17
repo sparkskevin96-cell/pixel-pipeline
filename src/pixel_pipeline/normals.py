@@ -130,7 +130,7 @@ def write_normal_sheet(sprites: list[Sprite], out_png, columns: int, rows: list[
     missing = [i for i, s in enumerate(sprites) if s.normal is None]
     if missing:
         raise ValueError("these sprites have no normal map (render with normals=True)")
-    if rows is not None and len(set(rows)) > 1:
+    if rows is not None:                       # row by row like the sheet (pack_rows wraps tall ones)
         from .export import pack_rows
         maps, at, lines = [s.normal for s in sprites], 0, []
         for n in rows:
@@ -160,3 +160,73 @@ def from_drawing(rgba: np.ndarray, bevel: float = 3.0, relief: float = 0.6) -> n
     out = np.dstack([encode(face_camera(n)), rgba[..., 3]])
     out[a == 0] = 0
     return out.astype(np.uint8)
+
+
+def material_labels(rgba: np.ndarray, palette_lab: np.ndarray | None = None, ab_step: float = 14.0,
+                    l_step: float = 34.0) -> np.ndarray:
+    """A material id per opaque pixel: colours binned by hue (Lab a/b) and coarse lightness, so
+    the shades of one material (a cape's 4 reds) share an id and its neighbours (skin, steel)
+    don't. -1 = see-through."""
+    from .color import rgb_to_lab
+    on = rgba[..., 3] > 0
+    lab = rgb_to_lab(rgba[..., :3])
+    key = (np.floor(lab[..., 1] / ab_step).astype(np.int32) * 1000
+           + np.floor(lab[..., 2] / ab_step).astype(np.int32) * 10
+           + np.floor(lab[..., 0] / l_step).astype(np.int32))
+    return np.where(on, key, -1)
+
+
+def smooth_by_material(normal: np.ndarray, rgba: np.ndarray, radius: int = 1, passes: int = 2,
+                       keep: float = 0.35) -> np.ndarray:
+    """A sprite normal map averaged over each pixel's neighbours OF THE SAME MATERIAL
+    (material_labels), `passes` times: the noise of a bent drawing's normals (every pixel
+    pointing its own way -> blotchy light) goes, while the edges between materials (where the
+    shape folds: a cape over armour) stay. keep = share of the pixel's own normal kept."""
+    import cv2
+    on = rgba[..., 3] > 0
+    if not on.any():
+        return normal
+    lab = material_labels(rgba)
+    vec = decode(normal[..., :3]).astype(np.float32) * on[..., None]
+    h, w = on.shape
+    for _ in range(passes):
+        acc = vec * keep
+        wsum = np.full((h, w), keep, np.float32)
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if (dy, dx) == (0, 0):
+                    continue
+                sh_v = np.roll(np.roll(vec, dy, 0), dx, 1)
+                sh_l = np.roll(np.roll(lab, dy, 0), dx, 1)
+                ok = (sh_l == lab) & on
+                # no wrap-around at the borders
+                if dy > 0: ok[:dy] = False
+                if dy < 0: ok[dy:] = False
+                if dx > 0: ok[:, :dx] = False
+                if dx < 0: ok[:, dx:] = False
+                acc += sh_v * ok[..., None]
+                wsum += ok
+        vec = acc / wsum[..., None]
+        vec /= np.maximum(np.linalg.norm(vec, axis=-1, keepdims=True), 1e-6)
+        vec *= on[..., None]
+    out = normal.copy()
+    out[..., :3] = np.where(on[..., None], encode(face_camera(vec)), normal[..., :3])
+    return out
+
+
+def smooth_sheet(sheet_png, normal_png=None, out=None) -> Path | None:
+    """smooth_by_material over a whole sheet + its _n.png (frames are separate islands of
+    pixels, so neighbours never cross frames that don't touch). Writes `out` (default: the
+    normal map in place) and returns it; None when the sheet has no normal map."""
+    sheet_png = Path(sheet_png)
+    normal_png = Path(normal_png) if normal_png else normal_sheet_path(sheet_png)
+    if not normal_png.exists():
+        return None
+    rgba = np.asarray(Image.open(sheet_png).convert("RGBA"))
+    nm = np.asarray(Image.open(normal_png).convert("RGBA"))
+    if nm.shape[:2] != rgba.shape[:2]:
+        return None
+    sm = smooth_by_material(nm, rgba)
+    dst = Path(out) if out else normal_png
+    Image.fromarray(sm).save(dst)
+    return dst

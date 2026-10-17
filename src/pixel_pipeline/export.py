@@ -56,6 +56,9 @@ def pack_sheet(frames: list[np.ndarray], columns: int | None = None, padding: in
     return sheet, rects
 
 
+MAX_SHEET = 8192        # px: sheets wrap into column blocks beyond this height (pack_rows)
+
+
 def pack_rows(rows: list[list[np.ndarray]], padding: int = 0):
     """Pack frames ROW BY ROW: every row (e.g. one animation facing one way) starts on a new line
     of the grid; columns = the longest row, shorter rows leave the rest of their line empty.
@@ -68,14 +71,22 @@ def pack_rows(rows: list[list[np.ndarray]], padding: int = 0):
     cw = max(f.shape[1] for f in frames)
     ch = max(f.shape[0] for f in frames)
     lines = [r for r in rows if r]
-    sheet = np.zeros((len(lines) * ch + (len(lines) - 1) * padding, cols * cw + (cols - 1) * padding, 4),
-                     np.uint8)
+    # taller than MAX_SHEET (2x characters: 144 rows of 128 px = 18432, over GPUs' 16384 and
+    # Unity's 8192): the lines continue in a second (third...) block of columns to the right
+    per = max(1, (MAX_SHEET + padding) // (ch + padding))
+    blocks = math.ceil(len(lines) / per)
+    per = math.ceil(len(lines) / blocks)
+    bw = cols * cw + (cols - 1) * padding
+    sheet = np.zeros((per * ch + (per - 1) * padding, blocks * bw + (blocks - 1) * padding, 4), np.uint8)
     rects = []
     for j, r in enumerate(lines):
+        bx, by = (j // per) * (bw + padding), (j % per) * (ch + padding)
         for i, f in enumerate(r):
-            x, y = i * (cw + padding), j * (ch + padding)
+            x, y = bx + i * (cw + padding), by
             sheet[y:y + f.shape[0], x:x + f.shape[1]] = f
             rects.append((x, y, f.shape[1], f.shape[0]))
+    if blocks > 1:                       # the sheet ends where its frames do (= sheet_json's size)
+        sheet = sheet[:max(y + h for _, y, _, h in rects), :max(x + w for x, _, w, _ in rects)]
     return sheet, rects
 
 

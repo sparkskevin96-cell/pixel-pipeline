@@ -51,7 +51,10 @@ MOTION = {
     "rise": 0.07,              # s: free movement climbs onto a step this fast
     "gravity": 22.0,           # tiles/s^2: free movement drops off a ledge
     "foot_radius": 0.22,       # tiles: the ground under the feet = highest cell within this
-    "body_radius": 0.24,       # tiles: action-mode collision circle
+    "body_radius": 0.24,       # tiles: (old) action-mode collision circle; feet_* below win
+    "feet_rx": 0.17,           # tiles: the FEET collider (an ellipse on the ground), half-width
+    "feet_rz": 0.11,           # tiles: half-depth (top-down games collide with the feet, not the body)
+    "corner_slip": 0.32,       # tiles: blocked within this of a way past -> nudged sideways into it
     "hitstop": 0.075,          # s: both fighters freeze on impact
     "knockback": 0.22,         # tiles a tactics hit pushes the target (it steps back after)
     "shake": 0.06,             # camera shake trauma per hit (squared, decays)
@@ -255,9 +258,14 @@ def annotate_sheet(sheet_png, info: dict) -> Path:
     js = Path(sheet_png).with_suffix(".json")
     meta = json.loads(js.read_text(encoding="utf-8"))
     m = meta.setdefault("meta", {})
-    m["stride"] = info.get("stride", {})
+    if info.get("stride") or "stride" not in m:
+        m["stride"] = info.get("stride", {})
     if info.get("body_px"):
         m["body_px"] = info["body_px"]
+    if info.get("elevation") is not None:          # the camera angle the sheet was drawn at
+        m["elevation"] = float(info["elevation"])
+    if info.get("normals_smooth"):
+        m["normals_smooth"] = True
     js.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return js
 

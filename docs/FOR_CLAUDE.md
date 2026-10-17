@@ -210,6 +210,28 @@ Library: new characters get 12-frame walk/run (`Style.locomotion_frames`, 12 or 
 clips 8) and planted-feet IK walk/run clips; `library.rerender_locomotion(ch, 12)` upgrades an
 old character on the CPU (bends its existing drawings: no GPU; `drawnrig.no_new_drawings()`).
 
+## Automatic quality defaults (2026-10-17: nothing to call by hand)
+
+- **One pixel grid.** A project's `pixel_grid` (get_style / manifest `pixel_grid`): sprite texels
+  per tile = the tile size, a whole-number screen scale at 1080p (32 px tiles x4 = 480x270, 64 px
+  x2 = 960x540, 16 px x6 = 320x180). Size "detailed" = 2x people AND 2x tiles. Top-down,
+  side-scroller and isometric projects render pixel-perfect (board look `pixel3d.tscn`); HD-2D keeps
+  perspective, but every sprite texel is still a whole k x k screen pixels (sprite shader
+  `whole_texels`). The camera looks at sprites from the angle they were drawn at (Style.elevation).
+- **Every new drawn character** (make, character_approve, finish, redraw) goes through the
+  per-direction check: specks, dark blotches, torn bits, crawling pixels, colour drift / foreign
+  colours vs the front, softness, model fit - the worst failing directions (max 4, never the
+  approved front, never twice for the same reason) are redrawn once, a worse redraw is put back.
+  `get_asset` -> `direction_quality` {text "14/16 directions passed (redrawn ...; still weak ...)"}
+  and `timing` (minutes per stage). Existing characters: `character_check_quality` (say its
+  estimate first; confirm=true runs it). Timing over many: `character_metrics`.
+- Keys are cleaned art-directed (near colours merged into ramps, salt-and-pepper smoothed, crumbs
+  dropped), dark back views lifted toward the front's lightness, normals smoothed per material:
+  calmer light on sprites (3 soft bands, light per texel).
+- Free-movement games collide with the FEET (ellipse 0.17 x 0.11 tiles), props by trunk radii,
+  Zelda corner correction (slip up to 0.32 tiles round a corner), push-out after knockback
+  (motion.json feet_rx / feet_rz / corner_slip). Check a map with `diorama.unreachable_cells`.
+
 ## Gotchas
 
 - One GPU job at a time; don't queue hours of GPU work unattended (Kevin's laptop crashed after a

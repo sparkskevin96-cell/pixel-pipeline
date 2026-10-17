@@ -664,3 +664,159 @@ def hand_pixel(sprites: list[Sprite], outline: str = "selout", *, max_materials:
         out = [clean_sprite(o, outline, speck=0, islands=0, corners=False, lut=lut,
                             palette=snapped, reshade=False) for o in out]
     return out
+
+
+# --------------------------------------------------------------------------- art-directed clean-up
+# Kevin (2026-10-17): "why do the skins look so pixely... like lots of artifacts". A drawing
+# downsampled to 64-128 px and bent by a skeleton keeps the marks of both: near-identical
+# colours side by side (two greens a step apart that read as noise), single pixels of another
+# shade sprinkled through a flat area, 1-3 px islands, crumbs off the silhouette. art_clean()
+# fixes those on the KEY drawings (every bent frame copies its pixels from them, so cleaning
+# the keys cleans every frame), the same way for all directions (one shared palette):
+#   1. ramps: palette colours closer than `merge_de` (Lab) merge (their pixels take the more
+#      used one): fewer, clearer steps per material
+#   2. cluster smoothing: a body pixel whose 8 neighbours mostly (>= `majority`) share ONE
+#      other colour of the same material (within `smooth_de`) takes it - salt-and-pepper inside
+#      a shade goes, while edges between shades (neighbours split) and real details (a far
+#      colour: an eye, a gem, a strap) stay
+#   3. islands up to `islands` px merge into the colour around them (within island_delta)
+#   4. crumbs: pieces up to `speck` px (or speck_share of the body) apart from the body go
+#   5. the 1 px outline is shaded again from the body colours it touches (selout), so it is a
+#      consistent dark edge
+ART = {"merge_de": 7.0, "smooth_de": 26.0, "majority": 4, "islands": 3, "island_delta": 26.0,
+       "speck": 6, "speck_share": 0.015, "passes": 3}
+
+
+def merge_palette(sprites: list[Sprite], merge_de: float = 5.0) -> list[Sprite]:
+    """Colours of the shared palette closer than merge_de (Lab) become one (the most used)."""
+    if not sprites:
+        return sprites
+    pal = sprites[0].palette
+    lab = rgb_to_lab(pal.astype(np.float32))
+    counts = np.zeros(len(pal), np.int64)
+    for sp in sprites:
+        v = sp.indices[sp.indices >= 0]
+        counts += np.bincount(v, minlength=len(pal))[:len(pal)]
+    order = np.argsort(-counts, kind="stable")
+    lut = np.arange(len(pal))
+    kept = []
+    for i in order:
+        if counts[i] == 0:
+            continue
+        hit = next((k for k in kept if np.linalg.norm(lab[k] - lab[i]) < merge_de), None)
+        if hit is None:
+            kept.append(i)
+        else:
+            lut[i] = hit
+    out = []
+    for sp in sprites:
+        idx = np.where(sp.indices >= 0, lut[np.maximum(sp.indices, 0)], -1).astype(sp.indices.dtype)
+        rgba = sp.rgba.copy()
+        on = idx >= 0
+        rgba[on, :3] = pal[idx[on]]
+        out.append(Sprite(rgba, idx, pal, sp.normal))
+    return out
+
+
+def _smooth_clusters(idx: np.ndarray, body: np.ndarray, lab: np.ndarray, smooth_de: float,
+                     majority: int) -> int:
+    """Step 2 of art_clean, in place; returns how many pixels changed."""
+    h, w = idx.shape
+    nb = np.stack([_shift(idx, dy, dx, -1) for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                   if (dy, dx) != (0, 0)], -1)                         # (h, w, 8)
+    nbody = np.stack([_shift(body, dy, dx, False) for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+                      if (dy, dx) != (0, 0)], -1)
+    nb = np.where(nbody, nb, -1)
+    ys, xs = np.nonzero(body)
+    if not len(ys):
+        return 0
+    v = nb[ys, xs].astype(np.int64)                                    # (n, 8)
+    ok = v >= 0
+    same = (v[:, :, None] == v[:, None, :]) & ok[:, None, :]
+    count = same.sum(-1)
+    count[~ok] = 0
+    best = v[np.arange(len(v)), count.argmax(1)]
+    bestn = count.max(1)
+    cur = idx[ys, xs].astype(np.int64)
+    cand = (bestn >= majority) & (best != cur) & (best >= 0)
+    # the pixel's own colour must be rare around it (an isolated shade, not an edge)
+    own = (v == cur[:, None]).sum(1)
+    cand &= own <= 1
+    if not cand.any():
+        return 0
+    d = np.linalg.norm(lab[np.maximum(best, 0)] - lab[cur], axis=1)
+    cand &= d < smooth_de
+    idx[ys[cand], xs[cand]] = best[cand]
+    return int(cand.sum())
+
+
+def art_clean(sprites: list[Sprite], outline: str = "selout", **options) -> list[Sprite]:
+    """The art-directed clean-up of drawn keys (see above); one shared palette in and out."""
+    o = {**ART, **options}
+    if not sprites:
+        return sprites
+    sprites = merge_palette(sprites, o["merge_de"]) if o["merge_de"] > 0 else list(sprites)
+    pal = sprites[0].palette
+    lab = rgb_to_lab(pal.astype(np.float32))
+    has_outline = outline in ("selout", "solid")
+    out = []
+    for sp in sprites:
+        idx = sp.indices.astype(np.int32).copy()
+        for _ in range(int(o["passes"])):
+            mask = idx >= 0
+            body = mask & ~boundary(mask) if has_outline else mask
+            n = _smooth_clusters(idx, body, lab, o["smooth_de"], int(o["majority"]))
+            if not n:
+                break
+        tmp = Sprite(sp.rgba, idx.astype(sp.indices.dtype), pal, sp.normal)
+        speck = max(int(o["speck"]), int(o["speck_share"] * (idx >= 0).sum()))   # crumbs scale with size
+        tmp = clean_sprite(tmp, outline, speck=speck, islands=int(o["islands"]),
+                           island_delta=float(o["island_delta"]))
+        out.append(tmp)
+    return out
+
+
+def tone_match(sprites: list[Sprite], ref: int, *, strength: float = 0.6, most: float = 14.0,
+               dark: float = 6.0) -> list[Sprite]:
+    """Views much darker than the reference drawing (a muddy back view: armour + cloak drawn as
+    one dark mass) brought part way toward the reference's lightness: each view's body lightness
+    quantiles are matched to the reference's (`strength` of the way, at most `most` Lab L), and
+    every colour it uses moves to the nearest colour of the SHARED palette at its new lightness
+    (same hue): no new colours, the shading order kept. Views within `dark` L of the reference
+    are left alone."""
+    if not sprites:
+        return sprites
+    pal = sprites[0].palette
+    lab = rgb_to_lab(pal.astype(np.float32))
+    r = sprites[ref]
+    rl = lab[r.indices[r.indices >= 0], 0]
+    if not len(rl):
+        return sprites
+    qs = np.linspace(5, 95, 19)
+    rq = np.percentile(rl, qs)
+    out = []
+    for i, sp in enumerate(sprites):
+        on = sp.indices >= 0
+        if i == ref or not on.any():
+            out.append(sp)
+            continue
+        vl = lab[sp.indices[on], 0]
+        if np.median(vl) > np.median(rl) - dark:
+            out.append(sp)
+            continue
+        vq = np.percentile(vl, qs)
+        used = np.unique(sp.indices[on])
+        lut = np.arange(len(pal))
+        for u in used:
+            L = lab[u, 0]
+            shift = np.clip((np.interp(L, vq, rq) - L) * strength, 0.0, most)
+            if shift < 1.0:
+                continue
+            target = np.array([L + shift, lab[u, 1], lab[u, 2]], np.float32)
+            d = ((lab - target) ** 2 * np.array([1.0, 2.0, 2.0], np.float32)).sum(1)
+            lut[u] = int(np.argmin(d))
+        idx = np.where(on, lut[np.maximum(sp.indices, 0)], -1).astype(sp.indices.dtype)
+        rgba = sp.rgba.copy()
+        rgba[on, :3] = pal[idx[on]]
+        out.append(Sprite(rgba, idx, pal, sp.normal))
+    return out

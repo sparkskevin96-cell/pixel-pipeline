@@ -213,7 +213,7 @@ func _hud() -> void:
 	coin_label = _label("000", Vector2(580, 9))
 	hud.add_child(coin_label)
 	banner = _label("", Vector2(0, 150))
-	banner.size = Vector2(640, 40)
+	banner.size = Vector2(get_viewport().get_visible_rect().size.x, 40)
 	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	banner.visible = false
 	hud.add_child(banner)

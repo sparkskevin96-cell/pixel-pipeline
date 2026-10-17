@@ -11,6 +11,7 @@ var shape: CollisionShape2D
 var facing := -1
 var hp := 2
 var state := "patrol"
+var u := 1.0                    # tile / 32 (see side_player.gd)
 var patrol_speed := 38.0
 var chase_speed := 105.0
 var sight := 150.0
@@ -23,6 +24,9 @@ var size := Vector2(30, 20)
 
 func setup(g: Node, frames: SpriteFrames, feet: Vector2, frame: Vector2, body: Vector2) -> void:
 	game = g
+	u = float(g.tile) / 32.0 if "tile" in g else 1.0
+	patrol_speed *= u
+	chase_speed *= u
 	collision_layer = 4
 	collision_mask = 1
 	floor_snap_length = 6.0
@@ -62,7 +66,7 @@ func _ground_ahead() -> bool:
 
 
 func _physics_process(delta: float) -> void:
-	velocity.y = minf(velocity.y + GRAVITY * delta, 540.0)
+	velocity.y = minf(velocity.y + GRAVITY * u * delta, 540.0 * u)
 	if dead:
 		velocity.x = move_toward(velocity.x, 0, 600 * delta)
 		move_and_slide()
@@ -101,7 +105,7 @@ func take_hit(amount: int, from_x: float) -> void:
 	hp -= amount
 	hit_flash = 0.25
 	stun = 0.35
-	velocity = Vector2(signf(global_position.x - from_x) * 160.0, -160.0)
+	velocity = Vector2(signf(global_position.x - from_x) * 160.0, -160.0) * u
 	if hp <= 0:
 		dead = true
 		collision_layer = 0

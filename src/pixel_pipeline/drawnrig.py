@@ -945,6 +945,8 @@ class KeySet:
 
 
 REFERENCE = "S"                    # drawn first; every other direction copies its design
+ART_CLEAN = os.environ.get("PIXEL_ART_CLEAN", "1") != "0"   # pixelclean.art_clean on the keys
+SMOOTH_NORMALS = os.environ.get("PIXEL_SMOOTH_NORMALS", "1") != "0"   # normals.smooth_by_material
 # (init: o = outlined / k = outlined + local contrast, denoise[, seed offset]) tried per view;
 # on the knight the outlined init won every direction over a plain one (sharper). Back views
 # (the model's far side is a blurred projection of the picture) get a third, crisper try.
@@ -967,7 +969,8 @@ BACK_PICTURE_TRIES = 2
 BACK_PICTURE_DENOISE = 0.62
 # back views still failing the checks after BACK_CANDIDATES (part colours off, grey mush, soft)
 # get these tries before the best is kept
-BACK_RETRY = (("k", 0.6, 2), ("o", 0.66, 3))
+# (o0.66+3 dropped 2026-10-17: it never won a back view in 9 characters / ~56 backs; k0.6+2 won 4)
+BACK_RETRY = (("k", 0.6, 2),)
 PART_WEIGHT = 1.0                  # score -= w * (share of whole parts recoloured + grey share)
 BACK_OK = {"miss": 0.15, "grey": 0.10, "sharp": 0.6}   # a back view passing these is kept
 
@@ -1858,6 +1861,10 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
         palette = resolve_palette(s_plain, pixels)
     palette = np.asarray(palette, np.uint8)
     sprites = [clean_sprite(finish(preps[d], s_plain, palette), outline_style) for d in order_n]
+    if ART_CLEAN:                                   # pixelclean.art_clean: calmer, cleaner keys
+        from .pixelclean import art_clean, tone_match
+        sprites = tone_match(sprites, order_n.index(ref))   # muddy back views lifted toward S
+        sprites = art_clean(sprites, outline_style)
     refsp = sprites[order_n.index(ref)]
     for d, sp in zip(order_n, sprites):             # final numbers, on the shared palette
         report[d]["colour_distance_final"] = colour_distance(
@@ -2172,6 +2179,9 @@ def bend_direction(state: BendState, k: int, clips=None):
                 nm[..., :3] = encode(face_camera(mix))
                 nm[..., 3] = np.where(on, 255, 0)
                 nm[~on] = 0
+                if SMOOTH_NORMALS:          # calm light: normals even within each material
+                    from .normals import smooth_by_material
+                    nm = smooth_by_material(nm, sp.rgba)
                 sp.normal = nm
             out.append(sp)
         rows.append(out)
@@ -2667,6 +2677,7 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
                  blocky: bool = True, candidates=CANDIDATES, back_candidates=BACK_CANDIDATES,
                  absent=None, size: str | None = None, client=None, keys_folder=None,
                  reuse: bool = True, redraw=(), name: str = "", cancel=None, gpu=None,
+                 keep_palette: bool = False, keep_back: bool = False,
                  progress=None) -> tuple[AnimatedSet, dict, list[Path]]:
     """A library Character (or a rigged .glb + prompt) -> drawn sheets at the library scale of
     the CURRENT project (frame size, colours, outline, elevation, directions), written with
@@ -2674,7 +2685,9 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
     (default: the character's sheet.png). keys_folder: where the key drawings are kept
     (default: <character>/keys); drawings already there are reused (resume after a cancel).
     redraw: directions to draw again with a new seed (one bad direction); reuse=False draws
-    every direction again (a new house style). No words: the character's name / kind."""
+    every direction again (a new house style). keep_palette: snap to the palette keys.json has
+    (the second, full bend after the quality loop redrew a few directions). No words: the
+    character's name / kind."""
     from .library import Character, style as lib_style
     st = lib_style()
     if isinstance(character_or_rigged, Character):
@@ -2709,7 +2722,7 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
             bin_.mkdir(exist_ok=True)
             for f in keys_folder.glob(f"drawn_{d}_*.png" if d else "drawn_*.png"):
                 f.replace(bin_ / f.name)
-            if not d or d == "N":            # the back picture goes with the back view
+            if not d or (d == "N" and not keep_back):   # the back picture goes with the back view
                 for f in keys_folder.glob("back_*.png"):
                     f.replace(bin_ / f.name)
     s = drawn_settings(kind, size, st)
@@ -2726,8 +2739,8 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
                                  # a few redrawn: snapped to the old palette so the rest stay
                                  # as they were; most redrawn: a new one over all of them
                                  palette=_hex_palette(old.get("palette"))
-                                 if redraw and 2 * len(set(redraw)) < (directions or st.directions)
-                                 else None,
+                                 if (redraw and 2 * len(set(redraw)) < (directions or st.directions))
+                                 or keep_palette else None,
                                  progress=progress)
     written = write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
     from .library import annotate_stride           # stride for the games (feet planted)

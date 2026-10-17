@@ -176,12 +176,16 @@ def _character_worker(name: str, prompt: str, options: dict, project):
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "model.glb"
         subject = "animal" if kind == "animal" else "person"
+        import time as _time
+        t_model = _time.time()
         res = prompt_to_model(prompt or name, out, subject=subject, seed=seed, **opts)
+        t_model = _time.time() - t_model
         model = Path(getattr(res, "model", None) or out)
         picture = getattr(res, "picture", None)
         return _call(library.add_character, name, model, kind=kind, size=size, role=role,
                      picture=picture if picture and Path(picture).exists() else None,
-                     folder=folder, prompt=prompt or name, preview=review)
+                     folder=folder, prompt=prompt or name, preview=review,
+                     timing={"model": t_model})
 
 
 def _object_worker(kind: str):

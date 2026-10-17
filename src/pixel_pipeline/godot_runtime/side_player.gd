@@ -37,12 +37,14 @@ var body_h := 40.0
 var anims := {}
 var test_input := {}            # selftest: {"x": -1..1, "jump": bool, "sprint": bool}
 var last_safe := Vector2.ZERO
+var u := 1.0                    # tile / 32: speeds, jump and gravity scale with the pixel grid
 var strides := {}               # {walk: px per cycle, run: ...} (manifest animations[clip].stride.px)
 var stopping := 0.0             # settle: the walk finishes its step before idle
 
 
 func setup(g: Node, frames: SpriteFrames, feet: Vector2, frame: Vector2, height_px: float) -> void:
 	game = g
+	u = float(g.tile) / 32.0 if "tile" in g else 1.0
 	collision_layer = 2
 	collision_mask = 1
 	floor_snap_length = 6.0
@@ -133,7 +135,7 @@ func _anim_len(a: String) -> float:
 
 func _physics_process(delta: float) -> void:
 	if dead:
-		velocity.y = minf(velocity.y + GRAVITY * delta, MAX_FALL)
+		velocity.y = minf(velocity.y + GRAVITY * u * delta, MAX_FALL * u)
 		velocity.x = move_toward(velocity.x, 0, FRICTION * delta)
 		move_and_slide()
 		return
@@ -142,7 +144,7 @@ func _physics_process(delta: float) -> void:
 	sprite.visible = invuln <= 0.0 or int(invuln * 14.0) % 2 == 0
 	var x := 0.0 if stun > 0.0 else _axis()
 	var sprint := bool(test_input.get("sprint", false)) or _key([KEY_SHIFT])
-	var top := SPRINT if sprint else WALK
+	var top := (SPRINT if sprint else WALK) * u
 	if is_on_floor():
 		coyote = COYOTE
 		last_safe = global_position
@@ -151,16 +153,16 @@ func _physics_process(delta: float) -> void:
 	buffer = maxf(0.0, buffer - delta)
 	if x != 0.0:
 		facing = 1 if x > 0.0 else -1
-		velocity.x = move_toward(velocity.x, x * top, (ACCEL if is_on_floor() else AIR_ACCEL) * delta)
+		velocity.x = move_toward(velocity.x, x * top, (ACCEL if is_on_floor() else AIR_ACCEL) * u * delta)
 	elif stun <= 0.0:
-		velocity.x = move_toward(velocity.x, 0.0, (FRICTION if is_on_floor() else AIR_ACCEL * 0.5) * delta)
-	velocity.y = minf(velocity.y + GRAVITY * delta, MAX_FALL)
+		velocity.x = move_toward(velocity.x, 0.0, (FRICTION if is_on_floor() else AIR_ACCEL * 0.5) * u * delta)
+	velocity.y = minf(velocity.y + GRAVITY * u * delta, MAX_FALL * u)
 	if buffer > 0.0 and coyote > 0.0:
-		velocity.y = JUMP
+		velocity.y = JUMP * u
 		buffer = 0.0
 		coyote = 0.0
 	if velocity.y < 0.0 and not _jump_held():
-		velocity.y = maxf(velocity.y, JUMP * JUMP_CUT)          # let go early: a short hop
+		velocity.y = maxf(velocity.y, JUMP * u * JUMP_CUT)          # let go early: a short hop
 	move_and_slide()
 	# shooting: the arrow leaves halfway through the attack clip
 	if attack_t > 0.0:
@@ -203,10 +205,10 @@ func _animate(x: float) -> void:
 			# the jump clip: rise on its first half, fall on the second
 			var n := sprite.sprite_frames.get_frame_count(sprite.animation)
 			sprite.pause()
-			sprite.frame = clampi(int(remap(velocity.y, JUMP, MAX_FALL * 0.6, 0.0, n - 1)), 0, n - 1)
+			sprite.frame = clampi(int(remap(velocity.y, JUMP * u, MAX_FALL * u * 0.6, 0.0, n - 1)), 0, n - 1)
 		return
 	var sp := absf(velocity.x)
-	var run_from := float(strides.get("walk", 0.0)) * 1.9 * 0.92 if strides.has("walk") else SPRINT * 0.8
+	var run_from := float(strides.get("walk", 0.0)) * 1.9 * 0.92 if strides.has("walk") else SPRINT * u * 0.8
 	if sp > maxf(run_from, 40.0) and _has("run"):
 		_play("run")
 		sprite.speed_scale = _rate_for("run", sp)
@@ -251,7 +253,7 @@ func heal(n: int) -> void:
 
 
 func bounce() -> void:
-	velocity.y = JUMP * 0.7
+	velocity.y = JUMP * u * 0.7
 	coyote = 0.0
 
 

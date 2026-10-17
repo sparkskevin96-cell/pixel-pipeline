@@ -313,7 +313,8 @@ def _describe(asset, kind: str, files: list[Path], base: Path, root: Path, engin
             sheet.with_suffix(".json").exists():
         entry.update(_sheet_info(sheet.with_suffix(".json"), sheet, kind))
     st = project.style
-    entry["ppu"] = float(st.ppu)
+    from .assets import pixel_grid
+    entry["ppu"] = float(pixel_grid(st)["ppu"])      # one pixel grid: sprite texels = tile texels
     entry["tile"] = int(st.tile)
     extra = getattr(asset, "extra", {}) or {}
     if kind == "tileset":
@@ -327,7 +328,11 @@ def _describe(asset, kind: str, files: list[Path], base: Path, root: Path, engin
             pass
     if kind == "character":
         entry["body"] = extra.get("body", "person")
-        entry.update(_motion_info(asset, sheet, entry, float(st.ppu)))
+        entry.update(_motion_info(asset, sheet, entry, entry["ppu"]))
+        q = extra.get("quality") or {}
+        if q:
+            entry["quality"] = {k: q.get(k) for k in ("passed", "total", "failed") if k in q}
+            entry["weak_directions"] = list(q.get("failed") or [])
     if kind == "effect":
         entry["effect"] = {k: extra.get(k) for k in ("effect", "theme", "blend") if extra.get(k)}
     entry["has_normal_map"] = "normal_map" in roles
@@ -543,7 +548,9 @@ def export_to_game(items, engine: str, project_path, subdir: str = "", *, projec
            "updated": round(time.time()), "assets": dict(sorted(entries.items())),
            "by_name": dict(sorted(by_name.items()))}
     from .motion import MOTION
-    man["motion"] = dict(MOTION)
+    man["motion"] = dict(MOTION)            # incl. the feet collider + corner correction (on)
+    from .assets import pixel_grid
+    man["pixel_grid"] = pixel_grid(proj.style)   # tile, ppu, whole scale, base, render, pitch
     if runtime:
         rt = install_runtime(engine, base)
         man["runtime"] = {Path(f).name: (f"res://{sub}/pp_runtime/{Path(f).name}" if engine == "godot"

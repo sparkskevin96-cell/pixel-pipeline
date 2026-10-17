@@ -644,6 +644,14 @@ def asset_summary(asset: A.Asset, project: A.Project | None = None, previews: bo
         prompt = ch.prompt if ch is not None else prompt
         if ch is not None:
             d["body"], d["size"] = ch.kind, ch.size
+            from . import metrics as MT
+            t = MT.summary(f)
+            if t:
+                d["timing"] = t                            # minutes per stage, GPU, wall
+            q = library.quality_of(ch)
+            if q:
+                d["direction_quality"] = {k: q.get(k) for k in ("text", "passed", "total", "failed",
+                                                                 "redrawn", "reverted")}
     if prompt:
         d["prompt"] = prompt
     d["files"] = asset_files(asset)
@@ -973,6 +981,15 @@ def _op_redraw(args, tracker):
     return {"asset": asset_summary(resolve(args["ref"]), A.current_project())}
 
 
+@J.register("character_check", plan=lambda a: (None, float(a.get("_gpu_min", 2.0)) * 60 + 90))
+def _op_check(args, tracker):
+    from . import library
+    ch = character(args["ref"])
+    q = library.check_and_fix(ch, progress=tracker, cancel=_cancel_fn(tracker),
+                              redraw_bad=bool(args.get("redraw", True)))
+    return {"quality": q, "asset": asset_summary(resolve(args["ref"]), A.current_project())}
+
+
 def _char_job(op: str, ref, project, wait_s, title: str, gpu: bool = True, minutes: float = 1.0,
               **args) -> dict:
     proj = _project(project)
@@ -1046,6 +1063,33 @@ def redraw_directions(ref, directions: list[str] | None, wait_s: float | None = 
     return _char_job("character_redraw", ref, project, wait_s,
                      "Redraw " + (", ".join(dirs) if dirs else "every direction"),
                      minutes=M.GPU["drawn_dir"] * (len(dirs) or 16) + M.GPU["bend"], directions=dirs)
+
+
+def check_quality(ref, redraw: bool = True, confirm: bool = False, wait_s: float | None = None,
+                  project: str | None = None) -> dict:
+    """Check and fix quality on an existing character (library.check_and_fix): every direction
+    measured as the game shows it; failing ones drawn again on the GPU when redraw (bounded).
+    Without confirm=True it only returns the estimate (GPU minutes) - say it to the user first."""
+    from . import library
+    proj = _project(project)
+    with A.using_project(proj):
+        ch = character(ref, proj)
+        est = library.fix_estimate(ch) if library.is_drawn(ch) else {"text": "3D-rendered: checked only",
+                                                                      "gpu_min": 0.0, "new_camera": False}
+    if not confirm and redraw and est.get("gpu_min"):
+        return {"needs_confirm": True, "estimate": est,
+                "say": est["text"] + " Call again with confirm=true to go ahead."}
+    return _char_job("character_check", ref, project, wait_s, "Check and fix quality",
+                     gpu=bool(redraw), minutes=float(est.get("gpu_min") or 0.5) + 1.5,
+                     redraw=bool(redraw), _gpu_min=float(est.get("gpu_min") or 0.0))
+
+
+def metrics(n: int = 10, project: str | None = None) -> dict:
+    """How long making a character takes: median / mean minutes per stage over the last n
+    characters (metrics.aggregate; project = only that one)."""
+    from . import metrics as MT
+    root = _project(project).folder if project else None
+    return MT.aggregate(int(n), root)
 
 
 # --------------------------------------------------------------------------- animation

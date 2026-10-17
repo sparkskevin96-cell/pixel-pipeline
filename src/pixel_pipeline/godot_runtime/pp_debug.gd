@@ -204,6 +204,10 @@ func _input(e: InputEvent) -> void:
 			KEY_F5:
 				get_viewport().set_input_as_handled()
 				get_tree().reload_current_scene()
+			KEY_F11:                      # fullscreen <-> window (pixel games keep a whole-number scale)
+				get_viewport().set_input_as_handled()
+				var w := get_window()
+				w.mode = Window.MODE_WINDOWED if w.mode == Window.MODE_FULLSCREEN else Window.MODE_FULLSCREEN
 	elif e is InputEventMouseButton and e.pressed:
 		_log("mouse %d at %s" % [e.button_index, e.position.round()])
 

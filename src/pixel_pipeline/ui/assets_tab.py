@@ -323,8 +323,10 @@ class NewProjectWizard(QDialog):
         self.size.blockSignals(True)
         self.size.clear()
         for s in A.SPRITE_SIZES:
-            px = t["sizes"][s]
-            self.size.addItem(f"{s.title()} (a person is {px} px tall)", s)
+            st_s = A.style_for_type(key, s)
+            px = st_s.person_height
+            more = f", {st_s.tile} px tiles: 2x the pixels" if s == "detailed" else ""
+            self.size.addItem(f"{s.title()} (a person is {px} px tall{more})", s)
         self.size.setCurrentIndex(self.size.findData("normal"))
         self.size.blockSignals(False)
         self._update_summary()

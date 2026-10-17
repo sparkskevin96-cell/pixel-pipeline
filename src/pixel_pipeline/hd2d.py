@@ -44,7 +44,9 @@ config/features=PackedStringArray("4.6", "Forward Plus")
 
 window/size/viewport_width=1920
 window/size/viewport_height=1080
+window/size/mode=3
 window/stretch/mode="canvas_items"
+window/stretch/scale_mode="integer"
 
 [rendering]
 
@@ -70,6 +72,7 @@ MENU_GD = """extends Control
 const LOOKS = [
 	["Real 3D  (HD-2D: lit diorama, tilt-shift)", "res://real3d.tscn"],
 	["Fake 3D  (3D through a 640x360 pixel camera)", "res://fake3d.tscn"],
+	["Pixel-perfect 3D  (one pixel grid: tiles and sprites 1 texel = 1 pixel)", "res://pixel3d.tscn"],
 	["Isometric 2D  (stacked tiles, Tactics Ogre style)", "res://iso/iso.tscn"],
 ]
 
@@ -77,7 +80,7 @@ func _ready() -> void:
 	var win := get_tree().root                   # the iso look switches to 640x360 pixels
 	win.content_scale_size = Vector2i(1920, 1080)
 	win.content_scale_mode = Window.CONTENT_SCALE_MODE_CANVAS_ITEMS
-	win.content_scale_stretch = Window.CONTENT_SCALE_STRETCH_FRACTIONAL
+	win.content_scale_stretch = Window.CONTENT_SCALE_STRETCH_INTEGER   # never a non-integer scale
 	var bg := ColorRect.new()
 	bg.color = Color(0.06, 0.05, 0.09)
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -144,6 +147,55 @@ render_target_update_mode = 4
 script = ExtResource("1")
 mode = "fake"
 """
+
+# Pixel-perfect 3D (board mode "pixel"): the board in a SubViewport of screen / scale pixels
+# (res://pixel.json), shown `scale` times bigger with nearest filtering. pixel_tscn(scale).
+PIXEL_TSCN = """[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://board.gd" id="1"]
+
+[node name="Pixel3D" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Pixels" type="SubViewportContainer" parent="."]
+texture_filter = 1
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+stretch = true
+stretch_shrink = {scale}
+
+[node name="View" type="SubViewport" parent="Pixels"]
+handle_input_locally = false
+size = Vector2i({w}, {h})
+render_target_update_mode = 4
+
+[node name="Board" type="Node3D" parent="Pixels/View"]
+script = ExtResource("1")
+mode = "pixel"
+"""
+
+
+def pixel_tscn(scale: int, screen=(1920, 1080)) -> str:
+    return PIXEL_TSCN.format(scale=int(scale), w=screen[0] // int(scale), h=screen[1] // int(scale))
+
+
+def write_pixel_look(out, tile: int, scale: int, pitch: float) -> list[Path]:
+    """res://pixel.json + res://pixel3d.tscn: the pixel-perfect look of the board (one pixel
+    grid: `tile` texels per tile on screen at 1 texel = 1 pixel, `scale` whole screen pixels per
+    pixel, the camera at `pitch` degrees)."""
+    out = Path(out)
+    pj = out / "pixel.json"
+    pj.write_text(json.dumps({"tile": int(tile), "scale": int(scale), "pitch": float(pitch),
+                              "base": [1920 // int(scale), 1080 // int(scale)]}), encoding="utf-8")
+    ts = out / "pixel3d.tscn"
+    ts.write_text(pixel_tscn(scale), encoding="utf-8")
+    return [pj, ts]
+
 
 # The board's sprite shader is the game runtime's (godot_runtime/pp_sprite3d.gdshader): camera-facing
 # quads lit through the normal maps in toon bands, depth taken at the FEET (no clipping into the
@@ -389,6 +441,13 @@ BOARD_GD = r'''extends Node3D
 # The battle map in 3D, built at runtime from res://map/map.json, and the units on it.
 # mode "real": perspective telephoto + tilt-shift + bloom.  "fake": orthographic, rendered
 # small by the parent SubViewport and scaled up: 3D that reads as pixel art.
+# mode "pixel" (pixel-perfect, 2026-10-17): like fake, but ONE pixel grid: res://pixel.json
+# {tile, scale, pitch} - the SubViewport is the screen / scale (a whole number), the ortho camera
+# shows one world tile as `tile` pixels, and the board is stretched (z by 1/sin(pitch), y by
+# 1/cos(pitch)) so cell tops AND walls are drawn 1 texel = 1 pixel (an oblique 3/4 view, like
+# 16-bit top-down games); sprites are cards of 1 texel = 1 pixel (the sprite shader's
+# whole_texels). The camera keeps yaw 0 and moves in whole pixels. Gameplay coordinates are the
+# board's own (local) ones in every mode.
 
 @export var mode := "real"
 # The game runtime (godot_runtime/pp_motion.gd, res://pp_runtime/): eased movement, turning through
@@ -429,6 +488,7 @@ var fill: DirectionalLight3D
 var lighting := {}       # preset name -> settings
 var light_name := "sunset"
 var bands := 4.0
+var sprite_bands := 3.0  # the sprites' light steps (lighting.json "sprite_bands"; calmer than the ground)
 var terrain_bands := 5.0 # the ground's light steps (lighting.json "terrain_bands"; B toggles both)
 var terrain_mats := []   # the ground's ShaderMaterials (terrain.gdshader)
 var flames := []         # flame materials (brighter at night)
@@ -441,7 +501,11 @@ var weather: Node = null  # res://weather/board_weather.gd (make_hd2d(weather=..
 # autoplay (res://autoplay.gd, `--autoplay[=res://autoplay.json]`): a script drives the board
 var scripted := false    # true: no player input, no automatic turn passing; action_done after each act
 signal action_done
-var cam_pitch := -1.0    # degrees; -1 = the look's default (real 38, fake 30)
+var cam_pitch := -1.0    # degrees; -1 = the look's default (the sheets' drawn elevation, else real 38, fake 30)
+var pixel := {}          # res://pixel.json (mode "pixel"): tile px, scale, pitch
+var tile_px := 32.0      # pixel mode: screen pixels per world tile (= the tile textures' texels)
+var view_pitch := 38.0   # the angle the ground is seen at (pixel mode: 90 - tops are drawn 1:1)
+var sheet_elev := 0.0    # the elevation the unit sheets were drawn at (unit.json, 0 = unknown)
 var cam_turn_rate := 8.0 # how fast the camera eases to cam_yaw_target
 var prop_nodes := {}     # Vector2i -> the nodes a prop on that cell built (autoplay cuts bushes)
 var number_lift := 1.6   # damage numbers start this high over a unit
@@ -457,9 +521,11 @@ var obstacles := {}      # Vector2i -> {"r": radius (0 = the whole cell), "kind"
 var apron := 0           # cells of scenery drawn around the map (map.json "apron")
 var move_speed := 2.2    # tiles/s a tactics unit wants to walk a path (capped by its stride)
 var clock := 0.0
-const BLOCKING := {"crate": 0.4, "barrel": 0.3, "post": 0.12, "tree": 0.3, "rock": 0.36, "house": 0.0,
-	"wall": 0.0, "well": 0.45, "fence": 0.0, "battlement": 0.0, "brazier": 0.3, "crystal": 0.32,
-	"bush": 0.3, "pot": 0.22, "statue": 0.3, "cabin": 0.0}
+# what blocks the FEET (collision radius at the ground, tiles; 0 = the whole cell): trunks, not
+# canopies, so the gaps between props are as wide as they look
+const BLOCKING := {"crate": 0.38, "barrel": 0.26, "post": 0.12, "tree": 0.2, "rock": 0.3, "house": 0.0,
+	"wall": 0.0, "well": 0.4, "fence": 0.0, "battlement": 0.0, "brazier": 0.24, "crystal": 0.26,
+	"bush": 0.24, "pot": 0.2, "statue": 0.26, "cabin": 0.0}
 const LIGHT_ORDER := ["dawn", "noon", "sunset", "night"]
 const SPELL := {"mage": Color(0.72, 0.42, 1.0), "cleric": Color(1.0, 0.84, 0.45), "physician": Color(0.5, 1.0, 0.62)}
 
@@ -473,6 +539,8 @@ func _ready() -> void:
 	rows = int(map["rows"])
 	heights = map["height"]
 	terrain = map["terrain"]
+	if mode == "pixel":
+		_pixel_setup()
 	_environment()
 	_build_terrain()
 	_build_water()
@@ -487,6 +555,21 @@ func _ready() -> void:
 	_hud()
 	apply_lighting(light_name)
 	_start_autoplay()
+
+func _pixel_setup() -> void:
+	if FileAccess.file_exists("res://pixel.json"):
+		pixel = JSON.parse_string(FileAccess.get_file_as_string("res://pixel.json"))
+	tile_px = float(pixel.get("tile", 32))
+	if cam_pitch < 0.0:
+		cam_pitch = float(pixel.get("pitch", 45.0))
+	var pr := deg_to_rad(clampf(cam_pitch, 10.0, 80.0))
+	# oblique: a tile's depth and a level's height both land on whole texels on screen
+	scale = Vector3(1.0, 1.0 / cos(pr), 1.0 / sin(pr))
+	view_pitch = 90.0
+
+func g(p: Vector3) -> Vector3:
+	# board (gameplay) coordinates -> the world the camera sees (the pixel look stretches the board)
+	return to_global(p)
 
 func _start_autoplay() -> void:
 	# --autoplay=res://x.json (or --autoplay = res://autoplay.json), or autoplay.json with "auto": true
@@ -540,6 +623,7 @@ func _environment() -> void:
 			lighting = j.get("presets", {})
 			light_name = j.get("default", light_name)
 			bands = float(j.get("bands", bands))
+			sprite_bands = float(j.get("sprite_bands", sprite_bands))
 			terrain_bands = float(j.get("terrain_bands", terrain_bands))
 	for a in OS.get_cmdline_user_args():            # --light=night --bands=0 (screenshots, tests)
 		if a.begins_with("--light="):
@@ -639,7 +723,8 @@ func apply_lighting(name: String) -> void:
 
 func _sprite_lighting(mat: ShaderMaterial) -> void:
 	var L: Dictionary = lighting.get(light_name, {})
-	mat.set_shader_parameter("bands", bands)
+	mat.set_shader_parameter("bands", sprite_bands if bands > 0.5 else 0.0)
+	mat.set_shader_parameter("band_soft", float(L.get("band_soft", 0.18)))
 	mat.set_shader_parameter("rim", float(L.get("rim", 0.5)))
 	mat.set_shader_parameter("wrap", float(L.get("wrap", 0.35)))
 	var amb := _c(L.get("ambient"), Color(0.45, 0.38, 0.62)) * float(L.get("ambient_energy", 0.55))
@@ -875,13 +960,18 @@ func _build_props() -> void:
 		var pk := str(p["kind"])
 		if BLOCKING.has(pk) or pk in map.get("blocking", []):
 			blocked[Vector2i(c, r)] = true
-			obstacles[Vector2i(c, r)] = {"r": float(BLOCKING.get(pk, 0.0)), "kind": pk}
+			obstacles[Vector2i(c, r)] = {"r": _prop_radius(pk), "kind": pk}
 		_build_prop(p, c, r, i, ext, wood)
 		i += 1
 		var built := []
 		for k in range(before, get_child_count()):
 			built.append(get_child(k))
 		prop_nodes[Vector2i(c, r)] = prop_nodes.get(Vector2i(c, r), []) + built
+
+func _prop_radius(kind: String) -> float:
+	# map.json "radii" (diorama.BLOCKING_RADII, the same numbers the Python gap check uses) wins
+	var over: Dictionary = map.get("radii", {})
+	return float(over.get(kind, BLOCKING.get(kind, 0.0)))
 
 func _build_prop(p: Dictionary, c: int, r: int, i: int, ext, wood: Material) -> void:
 		var base := cell_pos(c, r)
@@ -893,7 +983,7 @@ func _build_prop(p: Dictionary, c: int, r: int, i: int, ext, wood: Material) -> 
 			return
 		if BLOCKING.has(kind) or kind in map.get("blocking", []):
 			blocked[Vector2i(c, r)] = true            # a tree, house, well... (diorama.BLOCKING_PROPS)
-			obstacles[Vector2i(c, r)] = {"r": float(BLOCKING.get(kind, 0.0)), "kind": kind}
+			obstacles[Vector2i(c, r)] = {"r": _prop_radius(kind), "kind": kind}
 		if LIGHT_PROPS.has(kind):
 			_light_prop(kind, base, i, wood)
 			return
@@ -1177,7 +1267,8 @@ func play_effect(name: String, pos: Vector3, loop := false, energy := 1.6, tag :
 		mat.set_shader_parameter("glow", e["gtex"])
 		mat.set_shader_parameter("has_glow", true)
 	mat.set_shader_parameter("glow_energy", 1.3 if loop else 2.2)
-	mat.set_shader_parameter("face_camera_fully", mode == "fake")
+	mat.set_shader_parameter("face_camera_fully", mode != "real")
+	mat.set_shader_parameter("sprite_ppu", e["ppu"] / maxf(0.0001, scale))
 	mat.set_shader_parameter("flat_on_ground", e["ground"])
 	mat.set_shader_parameter("flip_x", flip)
 	_sprite_lighting(mat)
@@ -1253,7 +1344,10 @@ func _load_sheet(name: String) -> Dictionary:
 		"gtex": _tex(base + "_glow.png"),
 		"frames": frames, "w": float(info["frame_w"]), "h": float(info["frame_h"]),
 		"foot": float(info["foot"]), "ppu": float(info["ppu"]), "anims": info["anims"],
-		"stride": info.get("stride", {}), "body": float(info.get("body_px", info["frame_h"] * 0.7)) / float(info["ppu"])}
+		"stride": info.get("stride", {}), "body": float(info.get("body_px", info["frame_h"] * 0.7)) / float(info["ppu"]),
+		"weak": info.get("weak", []), "elevation": float(info.get("elevation", 0.0))}
+	if s["elevation"] > 1.0 and sheet_elev <= 1.0:
+		sheet_elev = s["elevation"]
 	sheets[name] = s
 	return s
 
@@ -1277,7 +1371,8 @@ func _build_units() -> void:
 		if s["gtex"] != null:
 			mat.set_shader_parameter("glow", s["gtex"])
 			mat.set_shader_parameter("has_glow", true)
-		mat.set_shader_parameter("face_camera_fully", mode == "fake")
+		mat.set_shader_parameter("face_camera_fully", mode != "real")
+		mat.set_shader_parameter("sprite_ppu", s["ppu"])
 		mat.set_shader_parameter("tint", Color(1, 1, 1) if int(u["team"]) == 0 else Color(1.0, 0.82, 0.82))
 		mesh.material_override = mat
 		mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -1349,14 +1444,20 @@ func _dir_yaw(name: String) -> float:
 	var i := DIRS.find(name)
 	return deg_to_rad(i * 22.5) if i >= 0 else PI / 2.0
 
-func _sprite_dir(world_yaw: float) -> String:
-	# the world direction, seen from this camera, as one of the 16 sprite directions
+func _sprite_dir(world_yaw: float, elev := -1.0) -> String:
+	# the world direction, seen from this camera, as one of the 16 sprite directions. The sheets
+	# were drawn at `sheet_elev`; the ground is seen at `view_pitch`: the drawing whose ON-SCREEN
+	# direction matches is picked (tan k = tan a * sin(view) / sin(drawn)), so a steeper camera
+	# than the drawings doesn't make walkers drift off their facing.
 	var d := Vector3(cos(world_yaw), 0, sin(world_yaw))
 	var right := cam.global_transform.basis.x
 	var fwd := -cam.global_transform.basis.z
 	fwd.y = 0
 	fwd = fwd.normalized()
 	var a := atan2(-d.dot(fwd), d.dot(right))      # screen angle, y down (toward camera = S)
+	var e := elev if elev > 1.0 else sheet_elev      # this sheet's drawn angle (else the board's)
+	if e > 1.0 and absf(view_pitch - e) > 2.0:
+		a = atan2(sin(a) * sin(deg_to_rad(view_pitch)) / sin(deg_to_rad(e)), cos(a))
 	var idx := int(round(fposmod(a, TAU) / (TAU / 16.0))) % 16
 	return DIRS[idx]
 
@@ -1433,7 +1534,7 @@ func _animate_units(delta: float) -> void:
 		var settling: bool = u["settle"] > 0.0 and anim == "idle"
 		if settling:
 			anim = u["loco"] if u["loco"] in s["anims"] else anim
-		var key := _frame_key(s, anim, u["yaw"])
+		var key := _frame_key(s, anim, u["yaw"], u.has("yaw_target") and absf(angle_difference(u["yaw"], u["yaw_target"])) > 0.05)
 		if key == "":
 			continue
 		var fr: Array = s["frames"][key]
@@ -1470,10 +1571,18 @@ func _animate_units(delta: float) -> void:
 		u["mat"].set_shader_parameter("flash", 0.18 * (0.5 + 0.5 * sin(Time.get_ticks_msec() / 150.0)) if u == selected else u.get("hit", 0.0))
 		u["mat"].set_shader_parameter("tint", u["tint"] * (0.5 if u["done"] else 1.0))
 
-func _frame_key(s: Dictionary, anim: String, yaw: float) -> String:
-	# the sheet row for this facing; a sheet with fewer directions (8, 4) uses its nearest one
-	var name := _sprite_dir(yaw)
+func _frame_key(s: Dictionary, anim: String, yaw: float, turning := false) -> String:
+	# the sheet row for this facing; a sheet with fewer directions (8, 4) uses its nearest one.
+	# While turning, a direction the quality check left weak (unit.json "weak") is passed over
+	# for its neighbour: the in-between facings flash by, so they must not be the broken ones.
+	var name := _sprite_dir(yaw, float(s.get("elevation", -1.0)))
 	var key := "%s_%s" % [anim, name]
+	if turning and name in s.get("weak", []):
+		var j := DIRS.find(name)
+		for step in [1, -1]:
+			var k3 := "%s_%s" % [anim, DIRS[(j + step + 16) % 16]]
+			if s["frames"].has(k3) and not (DIRS[(j + step + 16) % 16] in s.get("weak", [])):
+				return k3
 	if s["frames"].has(key):
 		return key
 	var i := DIRS.find(name)
@@ -1500,9 +1609,14 @@ func _build_camera() -> void:
 	add_child(pivot)
 	cam = Camera3D.new()
 	pivot.add_child(cam)
+	cam.top_level = true                          # placed in world space (the board may be stretched)
 	if mode == "fake":
 		cam.projection = Camera3D.PROJECTION_ORTHOGONAL
 		cam.size = 11.0
+		cam_dist = 40.0
+	elif mode == "pixel":
+		cam.projection = Camera3D.PROJECTION_ORTHOGONAL
+		cam.size = get_viewport().get_visible_rect().size.y / tile_px   # one tile = tile_px pixels
 		cam_dist = 40.0
 	else:
 		cam.fov = 22.0                                # telephoto: the diorama look
@@ -1513,11 +1627,24 @@ func _build_camera() -> void:
 		cam.attributes = attr
 	_place_camera()
 
+func default_pitch() -> float:
+	# the camera looks at the sprites from the angle they were drawn at (unit.json elevation);
+	# old sheets without it: the look's own default
+	if sheet_elev > 1.0:
+		return clampf(sheet_elev, 20.0, 70.0)
+	return 38.0 if mode == "real" else (45.0 if mode == "pixel" else 30.0)
+
 func _place_camera() -> void:
-	var pitch := deg_to_rad(cam_pitch if cam_pitch > 0.0 else (38.0 if mode == "real" else 30.0))
+	var pitch := deg_to_rad(cam_pitch if cam_pitch > 0.0 else default_pitch())
+	if mode == "pixel":
+		cam_yaw = 0.0                             # the oblique stretch is along the board's axes
+		cam_yaw_target = 0.0
+	else:
+		view_pitch = rad_to_deg(pitch)
 	var yaw := deg_to_rad(cam_yaw)
-	cam.position = Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)) * cam_dist
-	cam.look_at(pivot.global_position, Vector3.UP)
+	var at := g(pivot.position)
+	cam.global_position = at + Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)) * cam_dist
+	cam.look_at(at, Vector3.UP)
 	if trauma > 0.0:                                  # shake: offsets on the lens, not the rig
 		var o := M.shake_offset(trauma, clock, 0.32 if mode == "real" else 0.5)
 		cam.h_offset = o.x
@@ -1569,7 +1696,7 @@ func _process(delta: float) -> void:
 		pivot.position += pan.normalized().rotated(Vector3.UP, deg_to_rad(cam_yaw)) * delta * 8.0
 	cam_yaw = lerp(cam_yaw, cam_yaw_target, min(1.0, delta * cam_turn_rate))
 	_place_camera()
-	if mode == "fake":
+	if mode == "fake" or mode == "pixel":
 		_snap_camera()
 	_animate_units(delta)
 	_animate_effects(0.0 if freeze > 0.0 else delta)
@@ -1656,10 +1783,10 @@ func _place_overlay() -> void:
 		if not is_instance_valid(bar):
 			continue
 		var p: Vector3 = u["node"].position + Vector3(0, float(bar.get_meta("lift", 1.2)), 0)
-		var vis: bool = u.get("bar_on", true) and not cam.is_position_behind(p) and u["node"].visible
+		var vis: bool = u.get("bar_on", true) and not cam.is_position_behind(g(p)) and u["node"].visible
 		bar.visible = vis and bar.texture != null
 		if bar.visible:
-			var sp := cam.unproject_position(p)
+			var sp := cam.unproject_position(g(p))
 			var w: float = bar.texture.get_width() * bar.scale.x
 			var h: float = bar.texture.get_height() * bar.scale.y
 			bar.position = (sp - Vector2(w / 2.0, h)).round()
@@ -1673,11 +1800,11 @@ func _place_overlay() -> void:
 			continue
 		var k: float = f["t"] / f["life"]
 		var p3: Vector3 = f["pos"] + Vector3(0, f["rise"] * (1.0 - pow(1.0 - k, 2.0)), 0)
-		if cam.is_position_behind(p3):
+		if cam.is_position_behind(g(p3)):
 			l.visible = false
 			continue
 		l.visible = true
-		l.position = (cam.unproject_position(p3) - l.size / 2.0).round()
+		l.position = (cam.unproject_position(g(p3)) - l.size / 2.0).round()
 		l.modulate.a = 1.0 if k < 0.45 else clampf(1.0 - (k - 0.45) / 0.55, 0.0, 1.0)
 
 func float_text(at: Vector3, text: String, colour := Color(1.0, 0.95, 0.4), life := 0.8, size := -1) -> Label:
@@ -1691,7 +1818,7 @@ func float_text(at: Vector3, text: String, colour := Color(1.0, 0.95, 0.4), life
 	_bars().add_child(l)
 	l.reset_size()
 	floaters.append({"node": l, "pos": at, "t": 0.0, "life": life, "rise": 0.9})
-	l.position = (cam.unproject_position(at) - l.size / 2.0).round()
+	l.position = (cam.unproject_position(g(at)) - l.size / 2.0).round()
 	return l
 
 func _update_bar(u: Dictionary) -> void:
@@ -1717,7 +1844,7 @@ func _cell_under_mouse(pos: Vector2) -> Variant:
 	var hit := get_world_3d().direct_space_state.intersect_ray(PhysicsRayQueryParameters3D.create(from, to))
 	if hit.is_empty():
 		return null
-	var p: Vector3 = hit["position"] - hit["normal"] * 0.01
+	var p: Vector3 = to_local(hit["position"] - hit["normal"] * 0.01)
 	var c := int(floor(p.x)); var r := int(floor(p.z))
 	if c < 0 or r < 0 or c >= cols or r >= rows:
 		return null
@@ -2267,6 +2394,9 @@ def add_unit(project: Path, name: str, sheet_png, ppu: float = 42.0, glow: bool 
     normals = sheet_png.with_name(sheet_png.stem + "_n.png")
     if normals.exists():
         shutil.copyfile(normals, folder / f"{name}_n.png")
+        if not (meta.get("meta") or {}).get("normals_smooth"):   # older sheets: calm the light
+            from .normals import smooth_sheet
+            smooth_sheet(folder / f"{name}.png", folder / f"{name}_n.png")
     from .glow import glow_sheet_path, write_glow_sheet
     own = glow_sheet_path(sheet_png)
     dst = folder / f"{name}_glow.png"
@@ -2289,8 +2419,31 @@ def add_unit(project: Path, name: str, sheet_png, ppu: float = 42.0, glow: bool 
     anims = sorted({f["filename"].split(" ")[0].rsplit("_", 1)[0] for f in frames})
     info = {"frame_w": w, "frame_h": h, "foot": _foot_row(sheet, idle), "ppu": ppu, "anims": anims}
     info.update(unit_stride(sheet_png, meta, ppu))
+    info.update(sheet_view(sheet_png, meta))
     (folder / f"{name}.unit.json").write_text(json.dumps(info), encoding="utf-8")
     return folder
+
+
+def sheet_view(sheet_png, meta: dict | None = None) -> dict:
+    """{elevation the sheet was drawn at, weak: directions its quality check left failing}
+    from the sheet json meta / the character's keys/keys.json (empty when unknown)."""
+    out = {}
+    m = (meta or {}).get("meta") or {}
+    if m.get("elevation") is not None:
+        out["elevation"] = float(m["elevation"])
+    keys = Path(sheet_png).parent / "keys" / "keys.json"
+    if keys.exists():
+        try:
+            kj = json.loads(keys.read_text(encoding="utf-8"))
+        except ValueError:
+            kj = {}
+        cam = kj.get("camera") or {}
+        if "elevation" not in out and cam.get("elevation") is not None:
+            out["elevation"] = float(cam["elevation"])
+        weak = (kj.get("quality") or {}).get("failed") or []
+        if weak:
+            out["weak"] = list(weak)
+    return out
 
 
 def unit_stride(sheet_png, meta: dict, ppu: float) -> dict:
@@ -2372,7 +2525,8 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
               iso: bool = True, tile_px: int = 32, ppu: float = 42.0, lighting: str = "sunset",
               bands: float = 4.0, effects: dict | None = None, place_effects=(),
               tiles=None, weather=None, water: str = "classic", autoplay=None, ui_kit=None,
-              unit_ppu: dict | None = None, apron: int = 0, iso_scale: dict | None = None) -> list[Path]:
+              unit_ppu: dict | None = None, apron: int = 0, iso_scale: dict | None = None,
+              pixel: dict | None = None) -> list[Path]:
     """Write the Godot project: menu, real 3D and fake 3D scenes (and the iso 2D look when
     iso_scene is available). units: {name: sheet.png from turnaround --animate}. lighting: the
     time of day it starts at (LIGHTING: dawn, noon, sunset, night; L cycles them), bands: toon
@@ -2391,7 +2545,10 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
     144x96 sheet next to 96x64 ones: 1.5 x ppu). apron: cells of scenery drawn around the map
     (the land goes on past its edge, so a camera near the edge never shows the void; not
     walkable). iso_scale: {unit: k} the iso look rescales those sheets by (default: the smallest
-    unit_ppu / each one's, so all share one world scale and nothing is enlarged).
+    unit_ppu / each one's, so all share one world scale and nothing is enlarged). pixel:
+    {scale, pitch} for the pixel-perfect look (res://pixel3d.tscn, board mode "pixel"; tile =
+    tile_px); None = assets.pixel_grid of the current project (always written: the menu offers
+    it). Every look draws sprites at whole texels (one texel = k x k screen pixels).
 
     Every project gets the game runtime in res://pp_runtime/ (pp_motion.gd + motion.json): board.gd
     moves, turns, animates (stride-matched feet), hops, hit-stops and follows with it."""
@@ -2411,6 +2568,8 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
     if place_effects:
         mj["effects"] = [{"name": n, "col": int(c), "row": int(r)} for n, c, r in place_effects]
     mj["blocking"] = sorted(BLOCKING_PROPS | {"bush", "pot"})   # board.gd: these props block
+    from .diorama import BLOCKING_RADII
+    mj["radii"] = dict(BLOCKING_RADII)                           # ... with these feet radii
     if apron:
         mj["apron"] = int(apron)
     written[0].write_text(json.dumps(mj), encoding="utf-8")
@@ -2420,6 +2579,10 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
     write_textures(d, out / "map" / "tex", tile_px, look=board_look(tiles, tile_px))
     for uname, sheet in units.items():
         written.append(add_unit(out, uname, sheet, (unit_ppu or {}).get(uname, ppu)))
+    from .assets import pixel_grid
+    grid = pixel_grid(tile=tile_px)
+    px = {"scale": grid["scale"], "pitch": grid["pitch"], **(pixel or {})}
+    written += write_pixel_look(out, tile_px, int(px["scale"]), float(px["pitch"]))
     (out / "shaders").mkdir(exist_ok=True)
     files = {
         "project.godot": PROJECT.format(name=name),

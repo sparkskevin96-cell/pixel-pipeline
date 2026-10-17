@@ -70,6 +70,36 @@ class Sources:
     cards: list[Path] = field(default_factory=list)              # card asset folders
     items: list[Path] = field(default_factory=list)              # item folders (card art)
     props: list[Path] = field(default_factory=list)              # prop folders (card art)
+    tile: int = 32                           # the tiles' pixel size (one grid with the sprites)
+    one_grid: bool = False                   # every sheet is drawn at the tile's texel size
+    side_hero: Path | None = None            # a side-view (2-direction) character for the platformer
+
+    @classmethod
+    def detailed(cls, studio: Path | None = None) -> "Sources | None":
+        """The 2x ("detailed") sample set: 128 px people drawn at 45 deg (project "Pixel 2x
+        test"), the QA tilesets rebuilt at 64 px (staged), the side-view hero ("Pixel 2x test
+        side"). None when the 2x characters aren't there."""
+        p2 = _sample("Pixel 2x test")
+        chars = {"knight": p2 / "characters/knight-2x", "archer": p2 / "characters/elf-2x",
+                 "wolf": p2 / "characters/wolf-2x"}
+        k30 = _sample("Pixel 2x test 30") / "characters/knight-2x30"   # the hero drawn at 30 deg
+        if (k30 / "sheet.png").exists() and not (k30 / "keys" / "keys.json").read_text(
+                encoding="utf-8").count('"partial": true'):
+            chars["knight"] = k30
+        chars = {k: v for k, v in chars.items() if (v / "sheet.png").exists()}
+        if "knight" not in chars:
+            return None
+        chars.setdefault("mage", chars.get("archer", chars["knight"]))
+        chars.setdefault("dwarf", chars.get("archer", chars["knight"]))
+        if "wolf" in chars:
+            chars.setdefault("small_wolf", chars["wolf"])
+        base = cls.samples()
+        tiles = None
+        if base.tiles_project is not None and studio is not None:
+            tiles = tiles_at(base.tiles_project, 64, Path(studio))
+        side = _sample("Pixel 2x test side") / "characters/elf-side-2x"
+        return cls(chars, tiles, base.ui_kit, base.cards, base.items, base.props, tile=64, one_grid=True,
+                   side_hero=side if (side / "sheet.png").exists() else None)
 
     @classmethod
     def samples(cls) -> "Sources":
@@ -158,7 +188,8 @@ def write_readme(game_dir, style: str, about: str, extra: str = "") -> Path:
             "  F12  report: saves a screenshot + the game state (and the last 3 seconds of it,\r\n"
             "       and your recent keys) to reports\\<style>_<date>_<time>.png / .txt.\r\n"
             "       Open the .txt and type what looks wrong under YOUR NOTE.\r\n"
-            "  F5   restart the scene\r\n\r\n"
+            "  F5   restart the scene\r\n"
+            "  F11  fullscreen / window (the games start fullscreen: a whole-number pixel scale)\r\n\r\n"
             f"Play: Play_{style}.bat   Editor: Edit_{style}.bat\r\n"
             f"{extra}")
     p.write_text(text, encoding="utf-8")
@@ -215,7 +246,49 @@ def smoke_test(game_dir, godot: str | None = None, frames: int = 240, scene: str
     return {"ok": not bad, "errors": bad[:40], "log": log[-6000:]}
 
 
+def selftest(game_dir, godot: str | None = None, timeout: float = 400, headless: bool = True) -> dict:
+    """Run the game's own checks (`-- --pp-selftest`: PPDebug calls selftest() of the game's
+    nodes, prints "PPTEST {json}"): {"ok", "result", "errors", "log"}."""
+    exe = _godot_bin(godot)
+    if not exe:
+        return {"ok": False, "log": "no Godot found"}
+    cmd = [exe] + (["--headless"] if headless else []) + ["--path", str(game_dir), "--", "--pp-selftest"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, creationflags=_low_priority())
+    log = r.stdout + r.stderr
+    res = None
+    for ln in log.splitlines():
+        if ln.startswith("PPTEST "):
+            try:
+                res = json.loads(ln[7:])
+            except ValueError:
+                pass
+    bad = [ln for ln in log.splitlines() if any(k in ln for k in ("SCRIPT ERROR", "Parse Error",
+                                                                     "Invalid call", "Invalid access"))]
+    return {"ok": res is not None and not bad, "result": res, "errors": bad[:40], "log": log[-4000:]}
+
+
+def screenshot(game_dir, png, godot: str | None = None, delay: float = 2.5, timeout: float = 300) -> bool:
+    """A real rendered screenshot (`-- --pp-shot=<png>`: shot_setup() of the game's nodes, wait,
+    save, quit). Needs the GPU (not headless)."""
+    exe = _godot_bin(godot)
+    if not exe:
+        return False
+    cmd = [exe, "--path", str(game_dir), "--", f"--pp-shot={png}", f"--pp-shot-delay={delay}"]
+    subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, creationflags=_low_priority())
+    return Path(png).exists()
+
+
 # --------------------------------------------------------------------------- staging
+
+def _clear(folder: Path) -> None:
+    """Empty a game folder for a rebuild (the folder itself stays: it may be open somewhere,
+    e.g. a shell's working directory, and Windows can't remove that)."""
+    for p in Path(folder).iterdir():
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+
 
 def _studio(out: Path) -> Path:
     s = out.parent / "_studio" if out.name in STYLES else out / "_studio"
@@ -292,6 +365,9 @@ def locomotion_copies(src: Sources, studio: Path, frames: int = 12, progress=Non
     out = {}
     for role, folder in src.characters.items():
         folder = Path(folder)
+        if _has_locomotion(folder, frames):           # made with planted feet at these frames
+            out[role] = folder
+            continue
         base = folder.parent.parent
         proj = staging_project(studio, f"loco-{base.name}", base=base)
         dst = Path(proj.folder) / "characters" / folder.name
@@ -312,7 +388,45 @@ def locomotion_copies(src: Sources, studio: Path, frames: int = 12, progress=Non
             shutil.rmtree(dst / "keys" / "old", ignore_errors=True)
             mark.write_text(str(frames), encoding="utf-8")
         out[role] = dst
-    return Sources(out, src.tiles_project, src.ui_kit, src.cards, src.items, src.props)
+    return Sources(out, src.tiles_project, src.ui_kit, src.cards, src.items, src.props, src.tile,
+                   src.one_grid, src.side_hero)
+
+
+def _has_locomotion(folder: Path, frames: int) -> bool:
+    """Its walk already has `frames` frames and a measured stride (a new character)."""
+    try:
+        meta = json.loads((Path(folder) / "sheet.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    n = sum(1 for f in meta.get("frames", []) if str(f.get("filename", "")).startswith("walk_E "))
+    return n == frames and bool((meta.get("meta") or {}).get("stride"))
+
+
+def tiles_at(project_folder: Path, tile: int, studio: Path) -> Path:
+    """A staged copy of a project's tilesets rebuilt at `tile` px on the CPU (tilegen.
+    rebuild_tileset(tile=)): the same pictures drawn with more pixels, one grid with 2x
+    sprites. Made once (studio/projects/tiles-<tile>)."""
+    from . import assets, tilegen
+    dst = Path(studio) / "projects" / f"tiles-{tile}"
+    mark = dst / ".tiles_at"
+    if mark.exists():
+        return dst
+    shutil.rmtree(dst, ignore_errors=True)
+    proj = staging_project(Path(studio), f"tiles-{tile}", base=Path(project_folder), tile=int(tile),
+                           ppu=float(tile))
+    src_sets = Path(project_folder) / "tilesets"
+    shutil.copytree(src_sets, Path(proj.folder) / "tilesets",
+                    ignore=shutil.ignore_patterns("*.tres", "*.import"))
+    if (Path(project_folder) / "palette.hex").exists():
+        shutil.copyfile(Path(project_folder) / "palette.hex", Path(proj.folder) / "palette.hex")
+    for a in assets.list_assets("tileset", project=proj):
+        try:
+            tilegen.rebuild_tileset(a, save=True, tile=int(tile))
+        except Exception as e:  # noqa: BLE001 - a set that can't be redone stays out of the look
+            shutil.rmtree(a.folder, ignore_errors=True)
+            print(f"tiles_at: {a.folder.name} skipped ({type(e).__name__}: {e})")
+    mark.write_text(str(tile), encoding="utf-8")
+    return dst
 
 
 def px_scale_of(sheet_png, name: str) -> float:
@@ -390,7 +504,7 @@ def action_map():
              ("well", 6, 10), ("lantern", 11, 6), ("fence", 0, 7), ("fence", 1, 7), ("fence", 2, 7),
              ("bush", 8, 9), ("bush", 9, 11), ("bush", 7, 7), ("bush", 15, 12), ("bush", 16, 5),
              ("bush", 3, 5), ("bush", 9, 5), ("pot", 0, 11), ("pot", 0, 12), ("pot", 5, 13),
-             ("crate", 4, 13), ("barrel", 3, 13), ("rock", 14, 4), ("rock", 1, 4),
+             ("crate", 4, 13), ("barrel", 2, 13), ("rock", 14, 4), ("rock", 1, 4),
              ("tree", 0, 5), ("tree", 17, 7), ("tree", 17, 10), ("tree", 16, 13), ("tree", 8, 13),
              ("tree", 1, 1), ("tree", 10, 0), ("tree", 16, 1), ("crystal", 4, 1), ("brazier", 15, 2)]
     units = [Unit("knight", 7, 12, 0, "N", hp=24),
@@ -413,7 +527,8 @@ AFTERNOON = {
 
 def _unit_sheets(src: Sources, studio: Path, names: set[str]) -> tuple[dict, dict]:
     """{map unit name: sheet.png} + pixels-per-tile per unit (one scale: a 64 px person ~1.9
-    tiles, frames sized like the library's)."""
+    tiles, frames sized like the library's; one_grid sources: every unit at the tile size, so
+    sprite texels = tile texels)."""
     sheets, ppu = {}, {}
     plain = {"knight": ("knight",), "mage": ("mage",), "archer": ("archer", "dwarf"),
              "wolf": ("wolf", "small_wolf"), "dwarf": ("dwarf", "archer")}
@@ -434,7 +549,10 @@ def _unit_sheets(src: Sources, studio: Path, names: set[str]) -> tuple[dict, dic
         fr = meta["frames"]
         fh = (fr[0] if isinstance(fr, list) else next(iter(fr.values())))["frame"]["h"]
         kind = "animal" if n == "wolf" else "person"
-        ppu[n] = 42.0 * fh / 51.0 if kind == "animal" else 34.0 * fh / 64.0
+        if src.one_grid:
+            ppu[n] = float(src.tile)
+        else:
+            ppu[n] = 42.0 * fh / 51.0 if kind == "animal" else 34.0 * fh / 64.0
     return sheets, ppu
 
 
@@ -457,15 +575,25 @@ def _board_project(style: str, out: Path, src: Sources, d, script: dict, light: 
         shutil.rmtree(tmp_keep[n], ignore_errors=True)
         shutil.move(str(p), str(tmp_keep[n]))
     if out.exists():
-        shutil.rmtree(out)
+        _clear(out)
+    from .assets import Style, pixel_grid
+    grid = pixel_grid(Style(tile=src.tile, project_type="topdown-rpg" if style == "action" else "hd2d"))
+    pitch = _sheet_elevation(next(iter(sheets.values()))) or 45.0
     files = make_hd2d(out, sheets, d, name=TITLES[style], iso=(style == "iso"), lighting=light,
                       effects=effects, tiles=tiles if tiles is not None else False,
                       autoplay=script, ui_kit=src.ui_kit, unit_ppu=ppu, apron=apron,
-                      iso_scale={n: 1.0 / px_scale_of(sh, n) for n, sh in sheets.items()})
+                      iso_scale={n: 1.0 / px_scale_of(sh, n) for n, sh in sheets.items()},
+                      tile_px=src.tile, pixel={"scale": grid["scale"], "pitch": pitch})
     files += install_board_extras(out, 32) or []
     for n, p in tmp_keep.items():
         shutil.move(str(p), str(out / n))
     return [Path(f) for f in files if f]
+
+
+def _sheet_elevation(sheet_png) -> float | None:
+    from .hd2d import sheet_view
+    return sheet_view(sheet_png, json.loads(Path(sheet_png).with_suffix(".json").read_text(encoding="utf-8"))
+                      ).get("elevation")
 
 
 def build_tactics(out, src: Sources | None = None, godot: str | None = None) -> dict:
@@ -520,8 +648,12 @@ def build_action(out, src: Sources | None = None, godot: str | None = None, shot
               "presets": {"afternoon": AFTERNOON}, "poof": "poof", "poof_scale": 1.4, "lean": 0.85,
               "fade_in": 0.0, "camera": {"yaw": 0, "pitch": 58, "dist": 15.5, "rate": 5.0, "dof": 0.015,
                                          "follow": "knight"},
+              "look": "res://real3d.tscn",
               "shot": shot, "ranged": ["bandit"], "sword": 3, "shot_damage": 2, "bite": 2,
               "aggro": 4.5, "foe_speed": 2.4, "speed": 3.1, "steps": []}
+    if src.one_grid:                    # pixel-perfect: one pixel grid, camera = the drawn angle
+        script["look"] = "res://pixel3d.tscn"
+        script["camera"] = {"yaw": 0, "rate": 5.0, "follow": "knight"}
     _board_project("action", out, src, action_map(), script, "noon",
                    ["slash", "spark", "poof", "sparkle", "fireball", "explosion"], apron=8)
     (out / "autoplay.json").replace(out / "action.json")
@@ -688,28 +820,37 @@ def build_platformer(out, src: Sources | None = None, godot: str | None = None, 
     out = Path(out)
     src = src or Sources.samples()
     studio = _studio(out)
-    hero_src = src.character("archer", "dwarf", "knight")
+    hero_src = src.side_hero or src.character("archer", "dwarf", "knight")
     foe_src = src.character("small_wolf", "wolf")
     hero_base = hero_src.parent.parent                  # the hero's own project: its scale + palette
-    proj = staging_project(studio, "platformer", "side-scroller", base=hero_base, directions=2,
-                           elevation=assets.Project("b", hero_base).style.elevation)
+    T = int(src.tile)
+    name = "platformer" if T == 32 else f"platformer-{T}"
+    proj = staging_project(studio, name, "side-scroller", base=hero_base, directions=2,
+                           elevation=assets.Project("b", hero_base).style.elevation, tile=T, ppu=float(T))
     st = proj.style
     made = []
-    hero, note = side_character(hero_src, proj, progress=progress)
+    if src.side_hero is not None:                       # drawn from the side (2 directions, 0 deg)
+        hero = stage_character(src.side_hero, Path(proj.folder))
+        note = "drawn for the side view (E + W at 0 deg, 2x)"
+    else:
+        hero, note = side_character(hero_src, proj, progress=progress)
     made.append(library_character(hero))
     foe = stage_character(foe_src, Path(proj.folder))
     made.append(library_character(foe))
     with assets.using_project(proj):
         sets = assets.list_assets("tileset", project=proj)
         if not sets:
-            sw = tilegen.builtin_swatch("grass", 32, seed=3, style=st)
+            sw = tilegen.builtin_swatch("grass", T, seed=3, style=st)
             gs = tilegen.build_tileset("grass", sw.texture, base="dirt", camera="side", style=st, project=proj,
                                        sources=sw.sources, variants=3)
             sets = [tilegen.save_tileset(gs, "Grass ledge tiles", project=proj, swatch=sw)]
         made += sets[:1]
         bgs = assets.list_assets("background", project=proj)
         if not bgs:
-            bgs = [make_background("forest", "sunset", "Forest sunset", project=proj, width=640, height=384, seed=2)]
+            from .assets import pixel_grid as _pg
+            base = _pg(st)["base"]                   # the background fills the pixel-perfect view
+            bgs = [make_background("forest", "sunset", "Forest sunset", project=proj, width=max(640, base[0]),
+                                   height=max(384, round(base[1] * 1.07)), seed=2)]
         made += bgs[:1]
         fx = {a.name: a for a in assets.list_assets("effect", project=proj)}
         for kind, name in (("smoke", "Poof"), ("hit_spark", "Hit spark"), ("sparkle", "Sparkle")):
@@ -726,8 +867,11 @@ def build_platformer(out, src: Sources | None = None, godot: str | None = None, 
         shutil.rmtree(keep, ignore_errors=True)
         shutil.move(str(out / "reports"), str(keep))
     if out.exists():
-        shutil.rmtree(out)
-    _new_godot_project(out, TITLES["platformer"], 640, 360)
+        _clear(out)
+    from .assets import pixel_grid
+    g = pixel_grid(st)                                  # one pixel grid: tile 64 -> 960x540 x2
+    _new_godot_project(out, TITLES["platformer"], g["base"][0], g["base"][1])
+    godot_runtime.set_setting(out / "project.godot", "display", "window/size/mode", "3")
     rep = gameexport.export_to_game(made, "godot", str(out), "art", project=proj)
     if keep.exists():
         shutil.move(str(keep), str(out / "reports"))
@@ -739,7 +883,7 @@ def build_platformer(out, src: Sources | None = None, godot: str | None = None, 
     lv["effects"] = {"poof": gameexport.asset_id(fx["Poof"]), "spark": gameexport.asset_id(fx["Hit spark"]),
                      "sparkle": gameexport.asset_id(fx["Sparkle"])}
     lv["ui"] = gameexport.asset_id(made[-1]) if src.ui_kit is not None else ""
-    lv["tile"] = 32
+    lv["tile"] = T
     tl = json.loads((Path(made[2].folder) / "tileset.json").read_text(encoding="utf-8"))
     lv["platform_atlas"] = _side_platform_atlas(tl)
     (out / "level.json").write_text(json.dumps(lv, indent=1), encoding="utf-8")
@@ -751,7 +895,7 @@ def build_platformer(out, src: Sources | None = None, godot: str | None = None, 
     install_runtime(out, ["pp_debug.gd", "side_game.gd", "side_player.gd", "side_enemy.gd", "pickup_2d.gd",
                           "pp_manifest.gd"], {"PPDebug": "res://pp_runtime/pp_debug.gd"})
     _playtest_json(out, "platformer", {"hint_at": "bottom-left"})
-    write_readme(out, "platformer", "One short level (72 x 12 tiles of 32 px) through the app's export path: "
+    write_readme(out, "platformer", f"One short level (72 x 12 tiles of {T} px) through the app's export path: "
                  "a side-scroller project's grass-ledge tileset (tilegen, side camera: Godot terrain painting + "
                  "one-way platforms), a forest-sunset parallax background (backgrounds.py), effects (smoke, "
                  "hit spark, sparkle), the UI kit HUD, and the hero " + f"({note}). Enemies: wolves (E/W rows "
@@ -956,7 +1100,7 @@ def build_cards(out, src: Sources | None = None, godot: str | None = None, progr
         shutil.rmtree(keep, ignore_errors=True)
         shutil.move(str(out / "reports"), str(keep))
     if out.exists():
-        shutil.rmtree(out)
+        _clear(out)
     _new_godot_project(out, TITLES["cards"], 1280, 720)
     godot_runtime.set_setting(out / "project.godot", "display", "window/size/window_width_override", "1280")
     godot_runtime.set_setting(out / "project.godot", "display", "window/size/window_height_override", "720")

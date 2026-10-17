@@ -386,7 +386,8 @@ class ModelStudio(QMainWindow):
                 (f"{ch.name}: a draft — only its front is drawn, waiting for your OK. Click it "
                  "to review (or right-click).") if draft else
                 (f"{ch.name}: {ch.kind}, {ch.size}. Class {ch.stats_class}: "
-                 "HP %d  ATK %d  DEF %d  MOV %d  JMP %d  RNG %d" % ch.stats()))
+                 "HP %d  ATK %d  DEF %d  MOV %d  JMP %d  RNG %d" % ch.stats())
+                + self._quality_note(ch).replace("; ", chr(10)))
             if draft:
                 item.setForeground(QColor("#e0a020"))
             self.library.addItem(item)
@@ -454,7 +455,17 @@ class ModelStudio(QMainWindow):
         self._fill_more_anim()
         self.statusBar().showMessage(
             f"{ch.name}: {ch.kind}, {ch.size}, playing {len(self.anim_names)} animations from every "
-            f"direction. It's ready for the Game tab. Files: {ch.folder}")
+            f"direction. It's ready for the Game tab.{self._quality_note(ch)} Files: {ch.folder}")
+
+    @staticmethod
+    def _quality_note(ch) -> str:
+        """' 16/16 directions passed; made in 14 min (11 on the GPU).' (or '')"""
+        from ..library import quality_of
+        from ..metrics import made_in
+        q = quality_of(ch).get("text") or ""
+        t = made_in(ch.folder)
+        bits = [b for b in (q, t) if b]
+        return (" " + "; ".join(bits) + ".") if bits else ""
 
     def _fill_more_anim(self):
         from ..library import _known_motions
@@ -505,9 +516,10 @@ class ModelStudio(QMainWindow):
 
         def job(say):
             # springs go on the rig before anything is drawn or rendered (one render)
+            secs = getattr(self, "_model_seconds", None)
             return add_character(name, model, kind=kind, size=size, picture=picture, progress=say,
                                  prompt=prompt, drawn=drawn, cancel=cancel, preview=preview,
-                                 springs=swing)
+                                 springs=swing, timing={"model": secs} if secs else None)
 
         def done(ch):
             self.refresh_library(select=ch)
@@ -603,13 +615,18 @@ class ModelStudio(QMainWindow):
             if menu.exec(self.library.mapToGlobal(pos)) is finish:
                 self.finish_drawing(ch)
             return
-        if not is_drawn(ch):
-            return
         menu = QMenu(self)
+        check = menu.addAction("Check and fix quality (every direction)…")
+        if not is_drawn(ch):
+            if menu.exec(self.library.mapToGlobal(pos)) is check:
+                self.check_quality(ch)
+            return
         one = menu.addAction("Redraw one direction…")
         every = menu.addAction("Draw it again (every direction)")
         act = menu.exec(self.library.mapToGlobal(pos))
-        if act is one:
+        if act is check:
+            self.check_quality(ch)
+        elif act is one:
             names = direction_names(_drawn_directions(ch))
             d, ok = QInputDialog.getItem(self, "Redraw a direction", f"{ch.name}: which direction "
                                          "looks wrong? (S = facing you, E = facing right)",
@@ -618,6 +635,29 @@ class ModelStudio(QMainWindow):
                 self.redraw_direction(ch, [d])
         elif act is every:
             self.redraw_direction(ch, None)
+
+    def check_quality(self, ch):
+        """Library right-click -> Check and fix quality: the automatic per-direction check on an
+        existing character (library.check_and_fix): CPU re-bend at the project's size / camera,
+        the failing directions drawn again on the GPU (after saying how many GPU minutes)."""
+        from PySide6.QtWidgets import QMessageBox
+        from ..library import check_and_fix, fix_estimate, is_drawn
+        est = fix_estimate(ch) if is_drawn(ch) else {"text": f"Checks every direction of {ch.name} "
+                                                    "(3D-rendered: nothing is redrawn).", "gpu_min": 0}
+        if not self.sync and is_drawn(ch):
+            ok = QMessageBox.question(self, "Check and fix quality", est["text"] + "\n\nGo ahead?")
+            if ok != QMessageBox.Yes:
+                return
+        cancel = self._new_cancel()
+        self.character = ch
+
+        def job(say):
+            q = check_and_fix(ch, progress=say, cancel=cancel)
+            from ..dirquality import summary_text
+            say(f"{ch.name}: {q.get('text') or summary_text(q)}")
+            return ch
+        self._run(job, self.open_character, f"Checking {ch.name}'s directions…",
+                  title=f"Checking {ch.name}")
 
     def finish_drawing(self, ch):
         """Carry on drawing a character whose drawing stopped (GPU crash): the missing
@@ -735,9 +775,12 @@ class ModelStudio(QMainWindow):
                 paint[view] = str(path)
 
         def job(say):
+            import time as _time
+            t_model = _time.time()
             res = prompt_to_model(prompt, out, subject=subject, picture=picture, shape=shape,
                                   client=self.client, seed=seed,
                                   progress=wrap(say), **paint)
+            self._model_seconds = _time.time() - t_model
             say("Rendering the model from every side…")
             return res, *self._sprite_job_body(res.model, say)
         return job

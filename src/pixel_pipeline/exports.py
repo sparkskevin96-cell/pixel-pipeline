@@ -302,8 +302,12 @@ def _godot_hd2d(src: Source, out: Path, ppu: float | None = None, **_) -> list[P
         raise ValueError(f"'{src.name}' is a tileset, not an HD-2D unit: export it with godot-2d "
                          "(TileSet .tres), or use it in Try in a game (the board takes the "
                          "project's tilesets).")
-    if ppu is None:
-        ppu = _project_style_value("ppu", 42.0)
+    if ppu is None:                       # one pixel grid: sprite texels per tile = the tile size
+        try:
+            from .assets import current_project, pixel_grid
+            ppu = pixel_grid(current_project().style)["ppu"]
+        except Exception:  # noqa: BLE001 - no project yet
+            ppu = 32.0
     n = src.file_name
     folder = add_unit(out, n, src.sheet, ppu, glow=src.kind != "effect")
     if src.kind == "effect" and not (folder / f"{n}_glow.png").exists():

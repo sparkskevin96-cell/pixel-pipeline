@@ -108,6 +108,65 @@ class Diorama:
 
 
 BLOCKING_PROPS = {"crate", "barrel", "post", "tree", "rock", "house", "wall", "well", "fence", "brazier", "crystal"}
+# what blocks the FEET of a walker in free-movement games (tiles from the cell centre; 0 = the
+# whole cell): trunks and bases, not canopies (board.gd reads them from map.json "radii")
+BLOCKING_RADII = {"crate": 0.38, "barrel": 0.26, "post": 0.12, "tree": 0.2, "rock": 0.3, "house": 0.0,
+                  "wall": 0.0, "well": 0.4, "fence": 0.0, "battlement": 0.0, "brazier": 0.24,
+                  "crystal": 0.26, "bush": 0.24, "pot": 0.2, "statue": 0.26, "cabin": 0.0}
+FEET = (0.17, 0.11)          # motion.MOTION feet_rx / feet_rz
+
+
+def narrow_gaps(d: "Diorama", feet=FEET, margin: float = 0.04, blocking=None, edges: bool = False,
+                walls: bool = False) -> list[dict]:
+    """Places in a free-movement map where two blockers leave a gap the eye reads as a way
+    through but the feet can't pass (0 < gap < feet width + margin): the "I got stuck" spots.
+    Blockers = blocking props (BLOCKING_RADII circles / whole cells) + cells you can't walk onto
+    from a neighbour (water, a level step of 2+). Returns [{a, b, gap}] (cells), [] = fine."""
+    blocking = set(blocking or (BLOCKING_PROPS | {"bush", "pot"}))
+    width = 2 * feet[0] + margin
+    shapes = []                                   # (kind, cell, radius or None for a box)
+    for kind, c, r in d.props:
+        if kind in blocking:
+            rad = BLOCKING_RADII.get(kind, 0.0)
+            shapes.append((kind, (c, r), rad if rad > 0 else None))
+    h = np.asarray(d.height, int)
+    t = np.asarray(d.terrain, object)
+    R, C = h.shape
+    out = []
+    # a round prop beside a cell its walker can't step onto (water, 2+ levels up/down, the edge)
+    for kind, (c, r), rad in [s for s in shapes if s[2] is not None]:
+        p = np.array([c + 0.5, r + 0.5])
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                cc, rr = c + dc, r + dr
+                if (dc, dr) == (0, 0):
+                    continue
+                edge = not (0 <= cc < C and 0 <= rr < R)
+                if edge and not edges:            # the map edge: a dead end, not a trap
+                    continue
+                if not edge and (not walls or (t[rr, cc] != "water"
+                                               and abs(int(h[rr, cc]) - int(h[r, c])) < 2)):
+                    continue
+                q = np.clip(p, [cc, rr], [cc + 1, rr + 1])
+                gap = float(np.linalg.norm(p - q) - rad)
+                if 0.0 < gap < width:
+                    out.append({"a": [kind, c, r], "b": ["edge" if edge else str(t[rr, cc]), cc, rr],
+                                "gap": round(gap, 3)})
+    for i in range(len(shapes)):
+        for j in range(i + 1, len(shapes)):
+            (ka, (ca, ra), rada), (kb, (cb, rb), radb) = shapes[i], shapes[j]
+            if max(abs(ca - cb), abs(ra - rb)) > 1 or (rada is None and radb is None):
+                continue
+            pa, pb = np.array([ca + 0.5, ra + 0.5]), np.array([cb + 0.5, rb + 0.5])
+            if rada is not None and radb is not None:
+                gap = float(np.linalg.norm(pa - pb) - rada - radb)
+            else:                                 # a circle beside a whole-cell prop
+                circ, rad, box = (pa, rada, (cb, rb)) if rada is not None else (pb, radb, (ca, ra))
+                q = np.clip(circ, [box[0], box[1]], [box[0] + 1, box[1] + 1])
+                gap = float(np.linalg.norm(circ - q) - rad)
+            if 0.0 < gap < width:
+                out.append({"a": [ka, ca, ra], "b": [kb, cb, rb], "gap": round(gap, 3)})
+    return out
 
 
 def place_units(d: Diorama, blue: list[str], red: list[str]) -> Diorama:
@@ -234,3 +293,70 @@ def path_cost(d: Diorama, start: tuple[int, int], move: int = 4, jump: int = 2) 
                     nxt.append(n)
         frontier = nxt
     return best
+
+
+def unreachable_cells(d: "Diorama", start: tuple[int, int], feet=FEET, step: float = 0.05,
+                      blocking=None) -> list[list[int]]:
+    """Cells a tiny walker reaches from `start` but the feet (an ellipse) can't, in free movement
+    (props as BLOCKING_RADII circles / whole cells, water, level steps of 2+, the map edge):
+    spots that look open but are sealed by gaps narrower than the walker. [] = fine."""
+    small = _reach_cells(d, start, (0.02, 0.02), step, blocking)
+    big = _reach_cells(d, start, feet, step, blocking)
+    return [list(c) for c in sorted(small - big)]
+
+
+def _reach_cells(d, start, feet, step, blocking) -> set:
+    from collections import deque
+    blocking = set(blocking or (BLOCKING_PROPS | {"bush", "pot"}))
+    h = np.asarray(d.height, int)
+    t = np.asarray(d.terrain, object)
+    R, C = h.shape
+    n = int(round(1 / step))
+    W, H = C * n, R * n
+    xs = (np.arange(W) + 0.5) * step
+    zs = (np.arange(H) + 0.5) * step
+    X, Z = np.meshgrid(xs, zs)
+    cell_c = np.minimum((X // 1).astype(int), C - 1)
+    cell_r = np.minimum((Z // 1).astype(int), R - 1)
+    lvl = h[cell_r, cell_c]
+    free = t[cell_r, cell_c] != "water"
+    rx, rz = feet
+    # whole-cell blockers + round props: the feet ellipse's centre may not come closer than
+    # its own extent (configuration space)
+    whole = np.zeros((R, C), bool)
+    for kind, c, r in d.props:
+        if kind not in blocking:
+            continue
+        rad = BLOCKING_RADII.get(kind, 0.0)
+        if rad <= 0:
+            whole[r, c] = True
+            continue
+        dx, dz = X - (c + 0.5), Z - (r + 0.5)
+        dist = np.sqrt(dx ** 2 + dz ** 2) + 1e-9
+        reach = rx * rz / np.sqrt((rz * dx / dist) ** 2 + (rx * dz / dist) ** 2)
+        free &= dist >= rad + reach
+    free &= ~whole[cell_r, cell_c]
+    # keep the ellipse off the edge, whole cells and water
+    bad = whole | (t == "water")
+    for r in range(R):
+        for c in range(C):
+            if bad[r, c]:
+                dx = np.maximum(np.maximum(c - X, X - (c + 1)), 0)
+                dz = np.maximum(np.maximum(r - Z, Z - (r + 1)), 0)
+                free &= ~((dx / rx) ** 2 + (dz / rz) ** 2 < 1.0)
+    free &= (X >= rx) & (X <= C - rx) & (Z >= rz) & (Z <= R - rz)
+    seen = np.zeros_like(free)
+    sx, sz = int((start[0] + 0.5) * n), int((start[1] + 0.5) * n)
+    if not free[sz, sx]:
+        return set()
+    q = deque([(sz, sx)])
+    seen[sz, sx] = True
+    while q:
+        z, x = q.popleft()
+        for dz, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            zz, xx = z + dz, x + dx
+            if 0 <= zz < H and 0 <= xx < W and free[zz, xx] and not seen[zz, xx]                     and abs(int(lvl[zz, xx]) - int(lvl[z, x])) <= 1:
+                seen[zz, xx] = True
+                q.append((zz, xx))
+    return {(c, r) for r in range(R) for c in range(C)
+            if seen[r * n:(r + 1) * n, c * n:(c + 1) * n].sum() >= 0.1 * n * n}

@@ -1163,6 +1163,8 @@ def _make_character(plan: Plan, project, say, client=None) -> Made:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "model.glb"
         say(f"Making the {body} model of “{plan.prompt}” on your GPU…")
+        import time as _time
+        t_model = _time.time()
         res = prompt_to_model(plan.prompt or plan.name, out, subject=body, client=client,
                               seed=p.get("seed"), progress=_wrap_progress(say))
         picture = getattr(res, "picture", None)
@@ -1176,7 +1178,8 @@ def _make_character(plan: Plan, project, say, client=None) -> Made:
         ch = library.add_character(plan.name, getattr(res, "model", None) or out, kind=body,
                                    size=size, picture=picture, role=p.get("role", ""),
                                    progress=say, prompt=plan.prompt, drawn=drawn,
-                                   preview=drawn and bool(p.get("review", False)))
+                                   preview=drawn and bool(p.get("review", False)),
+                                   timing={"model": _time.time() - t_model})
     return Made(plan, ch)
 
 

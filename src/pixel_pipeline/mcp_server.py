@@ -1726,6 +1726,31 @@ def character_redraw(
     return _reply(_A.redraw_directions(ref, directions, wait_s, project))
 
 
+@studio_tool(title="Check and fix a character's quality (every direction)")
+def character_check_quality(
+    ref: Annotated[str, Field(description=REF_DOC)],
+    redraw: Annotated[bool, Field(description="Draw failing directions again on the GPU (bounded).")] = True,
+    confirm: Annotated[bool, Field(description="false = only say the GPU minutes it will take (tell the user first).")] = False,
+    wait_s: Annotated[float | None, Field(ge=0, le=3600, description=WAIT_DOC)] = None,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """The same automatic per-direction check new characters get (specks, dark blotches, torn
+    bits, crawling pixels, colour drift vs the front, softness): re-bent on the CPU at the
+    project's size/camera, failing directions redrawn (at most 4, never the approved front),
+    result stored in the character (direction_quality in get_asset)."""
+    return _reply(_A.check_quality(ref, redraw, confirm, wait_s, project))
+
+
+@studio_tool(title="How long making a character takes", read_only=True)
+def character_metrics(
+    n: Annotated[int, Field(ge=1, le=200, description="The last n timed characters.")] = 10,
+    project: Annotated[str | None, Field(description=PROJECT_DOC)] = None,
+) -> ToolOutput:
+    """Median / mean minutes per stage (picture + 3D shape, rig, front, other directions, quality
+    check, redraws, bending), GPU and wall minutes (the wait for the user's OK excluded)."""
+    return _reply(_A.metrics(n, project), False)
+
+
 # --------------------------------------------------------------------------- animation
 
 @studio_tool(title="List animations that can be added", read_only=True)

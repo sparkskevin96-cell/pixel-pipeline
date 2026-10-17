@@ -9,12 +9,20 @@ extends "res://autoplay.gd"
 ## plays res://action.json (the autoplay settings: hero, camera, light, coins, item, presets).
 ## Movement is the game runtime's (pp_motion.gd): velocity eased in and out, facing turned through
 ## the 16 sprite directions, walk/run played at speed / stride (feet planted), feet following the
-## ground over steps; collision = a circle against cliffs, water, buildings (cell boxes) and props
-## (trees, pots, bushes, crates: circles), pushed out so the hero slides along them.
+## ground over steps; collision = the FEET (a small ellipse on the ground, motion.json feet_rx /
+## feet_rz) against cliffs, water, buildings (cell boxes) and props (trees, pots, bushes, crates:
+## circles), pushed out so the hero slides along them. Zelda-style corner correction: blocked but
+## within corner_slip tiles of a way past (a gap, the end of a wall), the hero is nudged sideways
+## into it. Never stuck: whatever overlaps the feet after a knockback / spawn is pushed out (or the
+## hero hops to the nearest free spot).
 
 const CONF := "res://action.json"
 var speed := 3.1                # cells per second
-var radius := 0.24              # the hero's collision half-size (a square on the ground)
+var radius := 0.17              # the hero's feet: half-width (x) of the ground ellipse
+var feet := Vector2(0.17, 0.11) # feet ellipse half-axes (x across, z in depth), tiles
+var corner_slip := 0.32         # tiles: how far the corner correction looks sideways for a way past
+var unstuck := 0                # selftest: times the feet were pushed out of something
+var corrected := 0.0            # selftest: tiles slipped round corners
 var sword_reach := 0.95
 var attack_lock := 0.0
 var invuln := 0.0
@@ -38,8 +46,15 @@ var max_sink := 0.0                 # selftest: deepest the feet went under the 
 
 func _ready() -> void:
 	add_to_group("pp_debug")
-	var b: Node3D = load("res://real3d.tscn").instantiate()
-	add_child(b)
+	# res://action.json "look": real3d (HD-2D) or pixel3d (pixel-perfect: the board in a low-res
+	# SubViewport, one pixel grid); the HUD stays at full resolution on this node
+	var look := "res://real3d.tscn"
+	var j = JSON.parse_string(FileAccess.get_file_as_string(CONF))
+	if j is Dictionary and ResourceLoader.exists(str(j.get("look", look))):
+		look = str(j.get("look", look))
+	var root: Node = load(look).instantiate()
+	add_child(root)
+	var b: Node3D = root if root is Node3D else root.find_child("Board", true, false)
 	start(b, CONF)
 
 
@@ -47,7 +62,9 @@ func start(b: Node3D, path: String) -> void:
 	super.start(b, path)
 	shot = str(data.get("shot", "fireball"))
 	speed = float(data.get("speed", speed))
-	radius = float(board.conf.get("body_radius", radius))
+	feet = Vector2(float(board.conf.get("feet_rx", feet.x)), float(board.conf.get("feet_rz", feet.y)))
+	radius = feet.x
+	corner_slip = float(board.conf.get("corner_slip", corner_slip))
 	follow = hero
 	follow_rate = float(data.get("follow_rate", 5.0))
 	for p in board.map.get("props", []):
@@ -60,6 +77,39 @@ func start(b: Node3D, path: String) -> void:
 				"ranged": str(u["name"]) in data.get("ranged", [])}
 	if data.has("title"):
 		_banner({"text": str(data["title"]), "time": 1.0, "wait": false})
+	for a in OS.get_cmdline_user_args():          # -- --pp-dirs=<folder>: the hero in 16 facings
+		if a.begins_with("--pp-dirs="):
+			_direction_shots.call_deferred(a.substr(10))
+
+
+func _direction_shots(folder: String) -> void:
+	# the hero standing in each of the 16 facings as THIS camera shows them (crops of the real
+	# rendered screen around the hero, 1:1), idle frame 0, then quit: dirs_<i>_<DIR>.png
+	DirAccess.make_dir_recursive_absolute(folder)
+	over = true                                   # foes and input off
+	for id in foes:
+		var t = _u(id)
+		if _alive(t):
+			t["node"].visible = false
+	await _sleep(0.6)
+	for i in 16:
+		var yaw := deg_to_rad(i * 22.5)
+		hero["yaw"] = yaw
+		hero["yaw_target"] = yaw
+		board._play(hero, "idle")
+		hero["t"] = 0.0
+		await get_tree().process_frame
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		var img := get_viewport().get_texture().get_image()
+		var vp: Viewport = board.get_viewport()
+		var k: float = float(get_viewport().get_visible_rect().size.y) / float(vp.get_visible_rect().size.y)
+		var sp: Vector2 = board.cam.unproject_position(board.g(_pos(hero) + Vector3(0, 0.8, 0))) * k
+		var half := Vector2i(150, 170)
+		var r := Rect2i(Vector2i(sp) - half, half * 2).intersection(Rect2i(Vector2i.ZERO, img.get_size()))
+		img.get_region(r).save_png("%s/dirs_%02d_%s.png" % [folder, i, board._sprite_dir(yaw)])
+	print("PPDIRS " + folder)
+	get_tree().quit()
 
 
 func _run() -> void:
@@ -87,10 +137,23 @@ func _level_at(p: Vector3) -> int:
 	return _level(clampi(int(floor(p.x)), 0, board.cols - 1), clampi(int(floor(p.z)), 0, board.rows - 1))
 
 
-func _resolve(p: Vector2, rad: float, from_level: int) -> Vector2:
-	# push a circle out of solid cells (boxes) and round props (circles): what's left of a move
-	# into a wall runs along it (sliding)
-	for _i in 3:
+func _reach(d: Vector2, rad) -> float:
+	# the collider's extent toward d: a circle (float) or the feet ellipse (Vector2 half-axes)
+	if rad is Vector2:
+		var l := d.length()
+		if l < 0.00001:
+			return rad.y
+		var cx := d.x / l
+		var cz := d.y / l
+		return rad.x * rad.y / sqrt(pow(rad.y * cx, 2.0) + pow(rad.x * cz, 2.0))
+	return float(rad)
+
+
+func _resolve(p: Vector2, rad, from_level: int) -> Vector2:
+	# push the collider out of solid cells (boxes) and round props (circles): what's left of a
+	# move into a wall runs along it (sliding)
+	var big: float = maxf(rad.x, rad.y) if rad is Vector2 else float(rad)
+	for _i in 4:
 		var c0 := int(floor(p.x))
 		var r0 := int(floor(p.y))
 		var pushed := false
@@ -102,12 +165,14 @@ func _resolve(p: Vector2, rad: float, from_level: int) -> Vector2:
 					var q := Vector2(clampf(p.x, c, c + 1), clampf(p.y, r, r + 1))
 					var d := p - q
 					var dist := d.length()
-					if dist < rad:
+					if dist < big and dist < _reach(d, rad):
 						if dist > 0.00001:
-							p += d / dist * (rad - dist)
+							p += d / dist * (_reach(d, rad) - dist)
 						else:                       # the centre inside the box: out the short way
-							var outs := [Vector2(c - rad - p.x, 0), Vector2(c + 1 + rad - p.x, 0),
-								Vector2(0, r - rad - p.y), Vector2(0, r + 1 + rad - p.y)]
+							var outs := [Vector2(c - _reach(Vector2(-1, 0), rad) - p.x, 0),
+								Vector2(c + 1 + _reach(Vector2(1, 0), rad) - p.x, 0),
+								Vector2(0, r - _reach(Vector2(0, -1), rad) - p.y),
+								Vector2(0, r + 1 + _reach(Vector2(0, 1), rad) - p.y)]
 							var best: Vector2 = outs[0]
 							for o in outs:
 								if o.length() < best.length():
@@ -120,7 +185,7 @@ func _resolve(p: Vector2, rad: float, from_level: int) -> Vector2:
 						var centre := Vector2(c + 0.5, r + 0.5)
 						var d2 := p - centre
 						var dist2 := d2.length()
-						var need := rad + float(ob["r"])
+						var need := float(ob["r"]) + _reach(d2, rad)
 						if dist2 < need:
 							p += (d2 / dist2 if dist2 > 0.00001 else Vector2(0, 1)) * (need - dist2)
 							pushed = true
@@ -129,15 +194,34 @@ func _resolve(p: Vector2, rad: float, from_level: int) -> Vector2:
 	return p
 
 
-func can_stand(p: Vector3, from: Vector3, rad: float = -1.0) -> bool:
-	var rr := radius if rad < 0.0 else rad
-	var q := _resolve(Vector2(p.x, p.z), rr, _level_at(from))
-	return q.distance_to(Vector2(p.x, p.z)) < 0.002
+func _overlap_free(p: Vector2, rad, from_level: int) -> bool:
+	if not _cell_ok(int(floor(p.x)), int(floor(p.y)), from_level):
+		return false
+	return _resolve(p, rad, from_level).distance_to(p) < 0.002
 
 
-func _slide(u: Dictionary, step: Vector3, rad: float = -1.0) -> bool:
+func _free_spot(p: Vector2, rad, from_level: int) -> Vector2:
+	# the nearest point (rings of 0.1 tiles) where the collider overlaps nothing
+	if _overlap_free(p, rad, from_level):
+		return p
+	for ring in range(1, 16):
+		var rr := ring * 0.1
+		for k in 16:
+			var an := TAU * k / 16.0
+			var q := p + Vector2(cos(an), sin(an)) * rr
+			if _overlap_free(q, rad, from_level):
+				return q
+	return p
+
+
+func can_stand(p: Vector3, from: Vector3, rad = null) -> bool:
+	var rr = feet if rad == null else rad
+	return _overlap_free(Vector2(p.x, p.z), rr, _level_at(from))
+
+
+func _slide(u: Dictionary, step: Vector3, rad = null) -> bool:
 	# move, then push out of whatever it ran into (walls slide it along instead of stopping it)
-	var rr := radius if rad < 0.0 else rad
+	var rr = feet if rad == null else rad
 	var p: Vector3 = _pos(u)
 	var to := _resolve(Vector2(p.x + step.x, p.z + step.z), rr, _level_at(p))
 	if not _cell_ok(int(floor(to.x)), int(floor(to.y)), _level_at(p)):
@@ -210,11 +294,17 @@ func _move_hero(delta: float) -> void:
 		board.face_to(hero, _snap8(atan2(wish.z, wish.x)))     # turns through the facings
 	var c: Dictionary = board.conf
 	hero_vel = M.approach(hero_vel, wish, float(c.get("accel", 14.0)), float(c.get("decel", 18.0)) * (2.0 if busy else 1.0), delta)
+	_unstick(hero, feet)
 	var before: Vector3 = _pos(hero)
 	if hero_vel.length() > 0.001:
 		_slide(hero, hero_vel * delta)
 	var after: Vector3 = _pos(hero)
 	var moved := Vector2(after.x - before.x, after.z - before.z).length()
+	if wish != Vector3.ZERO and moved < wish.length() * delta * 0.5:
+		var slip := _corner_correct(wish, delta)      # Zelda: slip round the corner into the gap
+		corrected += slip
+		moved += slip
+		after = _pos(hero)
 	if moved < hero_vel.length() * delta * 0.3:          # stopped by a wall: lose the speed into it
 		hero_vel *= 0.5
 	var sp := moved / maxf(delta, 0.0001)
@@ -228,6 +318,47 @@ func _move_hero(delta: float) -> void:
 		moving = false
 		if hero["anim"] in ["walk", "run"]:
 			board._play(hero, "idle")                  # settles onto the next footfall
+
+
+func _corner_correct(wish: Vector3, delta: float) -> float:
+	# blocked going `wish`, but a little to one side the way is free: move sideways toward it
+	# (at most the walking speed), the nearer side first. Returns the distance nudged.
+	var dir := Vector2(wish.x, wish.z).normalized()
+	if dir == Vector2.ZERO:
+		return 0.0
+	var side := Vector2(-dir.y, dir.x)
+	var p := Vector2(_pos(hero).x, _pos(hero).z)
+	var lv := _level_at(_pos(hero))
+	var probe := 0.08
+	var o := 0.04
+	while o <= corner_slip + 0.001:
+		for sgn in [1.0, -1.0]:
+			var q: Vector2 = p + side * float(sgn) * o
+			if _overlap_free(q, feet, lv) and _overlap_free(q + dir * probe, feet, lv):
+				var stepv: Vector2 = side * float(sgn) * minf(o, speed * delta)
+				var before := _pos(hero)
+				_slide(hero, Vector3(stepv.x, 0, stepv.y))
+				return Vector2(_pos(hero).x - before.x, _pos(hero).z - before.z).length()
+		o += 0.04
+	return 0.0
+
+
+func _unstick(u: Dictionary, rad) -> void:
+	# a knockback / spawn / prop left the collider overlapping something: push it out (or hop to
+	# the nearest free spot), so nothing ever holds it in place
+	var p := Vector2(_pos(u).x, _pos(u).z)
+	var lv := _level_at(_pos(u))
+	if _overlap_free(p, rad, lv):
+		return
+	var q := _resolve(p, rad, lv)
+	if not _overlap_free(q, rad, lv):
+		q = _free_spot(p, rad, lv)
+	if q.distance_to(p) > 0.0001:
+		u["node"].position.x = q.x
+		u["node"].position.z = q.y
+		_sync_cell(u)
+		if u == hero:
+			unstuck += 1
 
 
 func _front() -> Vector3:
@@ -394,6 +525,7 @@ func _walk_toward(t: Dictionary, dir: Vector3, spd: float, anim: String, delta: 
 	var v: Vector3 = foe_vel.get(t["id"], Vector3.ZERO)
 	v = M.approach(v, dir * minf(spd, board.top_speed(t)), float(c.get("accel", 14.0)), float(c.get("decel", 18.0)), delta)
 	foe_vel[t["id"]] = v
+	_unstick(t, 0.2)
 	var before: Vector3 = _pos(t)
 	if not _slide(t, v * delta, 0.2):
 		foes[t["id"]]["wander"] = Vector3.ZERO
@@ -484,6 +616,7 @@ func debug_state() -> Dictionary:
 		"hero facing": "world %.0f deg -> sprite %s" % [rad_to_deg(hero["yaw"]), board._sprite_dir(hero["yaw"])],
 		"hero anim": _frame_of(hero),
 		"locks": "attack %.2f  shoot %.2f  invulnerable %.2f" % [attack_lock, shoot_cd, invuln],
+		"feet": "ellipse %.2f x %.2f t  free %s  unstuck %d  corner slips %.2f t" % [feet.x, feet.y, str(can_stand(p, p)), unstuck, corrected],
 		"camera": "yaw %.0f pitch %.0f dist %.1f" % [board.cam_yaw, board.cam_pitch, board.cam_dist],
 		"pickups on the ground": pickups.size()}
 	var near = null
@@ -538,14 +671,14 @@ func _debug_update() -> void:
 	for n in dbg.get_children():
 		if n.has_meta("live"):
 			n.free()
-	var list := [[hero, radius, Color(0.3, 1.0, 0.4, 0.6)]]
+	var list := [[hero, feet, Color(0.3, 1.0, 0.4, 0.6)]]
 	for id in foes:
 		var t = _u(id)
 		if _alive(t):
-			list.append([t, 0.2, Color(1.0, 0.5, 0.2, 0.6)])
+			list.append([t, Vector2(0.2, 0.2), Color(1.0, 0.5, 0.2, 0.6)])
 	for e in list:
 		var box := MeshInstance3D.new()
-		var q := QuadMesh.new(); q.size = Vector2(e[1] * 2.0, e[1] * 2.0); q.orientation = PlaneMesh.FACE_Y
+		var q := QuadMesh.new(); q.size = e[1] * 2.0; q.orientation = PlaneMesh.FACE_Y
 		box.mesh = q
 		box.material_override = _dbg_mat(e[2])
 		box.position = _pos(e[0]) + Vector3(0, 0.06, 0)
@@ -602,6 +735,30 @@ func selftest() -> Dictionary:
 	out["stride_" + used] = snappedf(M.stride_of(st, used, hero["sheet"]["body"]), 0.001)
 	out["max_sink"] = snappedf(max_sink, 0.001)
 	out["obstacles"] = board.obstacles.size()
+	# never stuck: walking into a bush a little off its centre slips round it (corner
+	# correction), and feet dropped inside a pot are pushed out
+	var bush := Vector2i(-1, -1)
+	for c in props_at:
+		if props_at[c] == "bush" and _cell_ok(c.x, c.y + 1, _level(c.x, c.y)) and not board.obstacles.has(Vector2i(c.x, c.y + 1)):
+			bush = c
+			break
+	if bush.x >= 0 and _alive(hero):
+		hero["node"].position = Vector3(bush.x + 0.62, _ground(bush.x + 0.62, bush.y + 1.6), bush.y + 1.6)
+		hero_vel = Vector3.ZERO
+		var c0 := corrected
+		await _hold(Vector2(0, -1), 1.1)
+		out["slipped_past_bush"] = _pos(hero).z < bush.y + 0.3
+		out["corner_slip_tiles"] = snappedf(corrected - c0, 0.01)
+	var pot := Vector2i(-1, -1)
+	for c in props_at:
+		if props_at[c] == "pot" and board.obstacles.has(c):
+			pot = c
+			break
+	if pot.x >= 0 and _alive(hero):
+		var u0 := unstuck
+		hero["node"].position = Vector3(pot.x + 0.5, _ground(pot.x + 0.5, pot.y + 0.5), pot.y + 0.55)
+		await _sleep(0.15)
+		out["pushed_out_of_pot"] = unstuck > u0 and can_stand(_pos(hero), _pos(hero))
 	out["cuttable_before"] = bushes
 	out["coins"] = coins
 	out["over"] = over

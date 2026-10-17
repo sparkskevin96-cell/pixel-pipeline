@@ -74,6 +74,13 @@ class Style:
     style_trigger: str = ""        # its trigger word, added to prompts when the LoRA is on
     style_strength: float = 0.8
     locomotion_frames: int = 12    # walk/run frames of NEW characters (12 or 16; other clips 8)
+    # --- one pixel grid (2026-10-17): sprite texels = tile texels, whole-number screen scale
+    pixel_scale: int = 0           # screen pixels per texel at 1080p (0 = auto: pixel_grid)
+    render: str = "auto"           # pixel (pixel-perfect low-res) | hires | auto (by project type)
+
+    def grid(self) -> dict:
+        """The project's pixel grid (pixel_grid)."""
+        return pixel_grid(self)
 
     def person_frame(self) -> tuple[int, int]:
         h = self.person_height
@@ -232,6 +239,39 @@ def with_style(positive: str, negative: str, style: Style | None, kind: str = "s
     return _join(positive, pos), _join(negative, neg)
 
 
+# --------------------------------------------------------------------------- one pixel grid
+# Kevin (2026-10-17): sprites' pixels were a different size from the tiles' pixels and shown at
+# a non-integer scale (mixels). The rule now: a sprite texel IS a tile texel (sprites' pixels per
+# tile = the tile size), and the screen shows texels at a whole number of pixels. Games render at
+# 1080p (4K = exactly 2x), so the pixel-perfect looks are 1920x1080 / scale.
+RENDER_BY_TYPE = {"hd2d": "hires", "topdown-rpg": "pixel", "side-scroller": "pixel",
+                  "isometric": "pixel", "cards-ui": "hires", "custom": "hires"}
+TILES_ACROSS = {"hd2d": 15, "topdown-rpg": 20, "side-scroller": 20, "isometric": 20,
+                "cards-ui": 15, "custom": 15}
+RENDERS = ("auto", "pixel", "hires")
+
+
+def pixel_grid(style: "Style | None" = None, *, tile: int | None = None) -> dict:
+    """The pixel grid every export / game runtime uses for a project: {tile (texels per tile),
+    ppu (sprite texels per tile = tile: ONE grid), scale (screen px per texel at 1080p, whole),
+    base [w, h] (the pixel-perfect render size), render (pixel | hires), pitch (the camera = the
+    angle sprites are drawn at), person_tiles (how tall a person stands in tiles)}.
+    scale auto = the whole number that shows about TILES_ACROSS[type] tiles across 1920 px
+    (32 px tiles in HD-2D -> 4 = 480x270; 64 px tiles -> 2 = 960x540; 16 px top-down -> 6 =
+    320x180). render auto: pixel-perfect for top-down, side-scroller and isometric; hires for
+    HD-2D tactics (perspective + depth of field, sprites still at whole texels)."""
+    st = style if style is not None else project_style()
+    t = int(tile or st.tile or 32)
+    kind = st.project_type if st.project_type in RENDER_BY_TYPE else "custom"
+    scale = int(st.pixel_scale or 0)
+    if scale <= 0:
+        scale = max(1, min(8, round(1920 / (t * TILES_ACROSS[kind]))))
+    render = st.render if st.render in ("pixel", "hires") else RENDER_BY_TYPE[kind]
+    pitch = float(st.elevation) if st.elevation and st.elevation > 1 else 45.0
+    return {"tile": t, "ppu": float(t), "scale": scale, "base": [1920 // scale, 1080 // scale],
+            "render": render, "pitch": pitch, "person_tiles": round(st.person_height / t, 2)}
+
+
 def project_style(project: "Project | None" = None) -> Style:
     """The style a generator uses when its caller gave none: the (current) project's."""
     try:
@@ -263,8 +303,8 @@ PROJECT_TYPES = {
         "label": "HD-2D tactics / RPG",
         "about": "Pixel-art characters standing in a 3D world (Octopath Traveler, Triangle "
                  "Strategy). The camera looks down at 30°; characters face 16 ways.",
-        "sizes": {"small": 48, "normal": 64, "large": 80},
-        "style": dict(elevation=30.0, directions=16, tile=32, ppu=42.0, icon=32, colours=48,
+        "sizes": {"small": 48, "normal": 64, "large": 80, "detailed": 128},
+        "style": dict(elevation=30.0, directions=16, tile=32, ppu=32.0, icon=32, colours=48,
                       outline="selout", shading="soft", light=0.35, camera="perspective",
                       tile_style="hd2d", export="godot-hd2d",
                       style_prompt=neo16("HD-2D JRPG, detailed sprites, glowing light and "
@@ -317,7 +357,7 @@ PROJECT_TYPES = {
         "about": "Cards, icons, portraits and menus (Slay the Spire, Balatro). Big icons and bold "
                  "outlines; characters are mostly art, not walking sprites.",
         "sizes": {"small": 48, "normal": 64, "large": 96},
-        "style": dict(elevation=30.0, directions=4, tile=32, ppu=42.0, icon=64, colours=48,
+        "style": dict(elevation=30.0, directions=4, tile=32, ppu=32.0, icon=64, colours=48,
                       outline="solid", shading="cel", light=0.25, camera="ortho",
                       tile_style="none", export="godot-2d",
                       style_prompt=neo16("card game illustration, bold readable shapes, "
@@ -335,7 +375,11 @@ PROJECT_TYPES = {
         "map": "flat",
     },
 }
-SPRITE_SIZES = ("small", "normal", "large")
+SPRITE_SIZES = ("small", "normal", "large", "detailed")
+# "detailed" (2026-10-17, Kevin chose "more detailed sprites"): twice the normal person height
+# AND twice the tile size, so the pixels stay one grid with more of them (64 px tiles, 128 px
+# people in HD-2D: 960x540 pixel-perfect x2 at 1080p).
+DETAILED = 2
 
 
 def style_for_type(project_type: str = "custom", size: str = "normal", engine: str = "godot",
@@ -349,8 +393,16 @@ def style_for_type(project_type: str = "custom", size: str = "normal", engine: s
         raise ValueError(f"size must be one of {', '.join(SPRITE_SIZES)}")
     t = PROJECT_TYPES[project_type]
     data = dict(t["style"])
-    data.update(project_type=project_type, person_height=t["sizes"][size],
+    sizes = dict(t["sizes"])
+    sizes.setdefault("detailed", sizes["normal"] * DETAILED)
+    data.update(project_type=project_type, person_height=sizes[size],
                 animations=list(t["animations"]), engine=engine)
+    if size == "detailed":                    # more pixels everywhere, one grid
+        base = Style()
+        for k in ("tile", "ppu", "icon"):
+            v = data.get(k, getattr(base, k))
+            data[k] = type(v)(v * DETAILED)
+        data["ppu"] = float(data["tile"])     # one grid
     if engine == "unity":
         data["export"] = "unity"
     data.update({k: v for k, v in overrides.items() if v is not None})

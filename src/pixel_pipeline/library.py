@@ -220,8 +220,14 @@ def annotate_stride(sheet_png, rigged=None, camera_scale: float | None = None, s
         info = measure_sheet(sheet_png, rigged, camera_scale, st.elevation)
     except Exception:  # noqa: BLE001 - a sheet without a readable rig: no stride, nothing breaks
         return {}
-    if info.get("stride"):
-        annotate_sheet(sheet_png, info)
+    info["elevation"] = float(st.elevation)       # games pick facings with the drawn angle
+    from .drawnrig import SMOOTH_NORMALS
+    if SMOOTH_NORMALS and Path(sheet_png).with_name(Path(sheet_png).stem + "_n.png").exists():
+        from .normals import smooth_sheet
+        if rigged is None or not (Path(sheet_png).parent / "keys" / "keys.json").exists():
+            smooth_sheet(sheet_png)               # 3D renders: smoothed here (drawn: while bending)
+        info["normals_smooth"] = True
+    annotate_sheet(sheet_png, info)
     return info
 
 
@@ -236,11 +242,9 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames=None
     if frames is None:
         frames = frames_for(out_png if Path(out_png).with_suffix(".json").exists() else None)
     if drawn:
-        from .drawnrig import drawn_sheets
-        return drawn_sheets(rigged, prompt, out_png=out_png, kind=kind, size=size, frames=frames,
-                            keys_folder=Path(out_png).parent / "keys", reuse=reuse,
-                            redraw=redraw, name=name, cancel=cancel, gpu=gpu,
-                            progress=progress)[2]
+        return drawn_with_quality(rigged, out_png, kind, size, frames, prompt=prompt, reuse=reuse,
+                                  redraw=redraw, name=name, cancel=cancel, gpu=gpu,
+                                  progress=progress)
     from .anim3d import animated_turnaround, write_animated
     from .settings import settings_for
     st = style()
@@ -263,10 +267,255 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames=None
     return written
 
 
+# --------------------------------------------------------------------------- automatic quality
+#
+# Every drawn character goes through this (add_character, approve_preview, finish_drawing, redraw,
+# check_and_fix): the keys are drawn, only idle + walk are bent into a check sheet, every direction
+# is measured as the game shows it (dirquality.py: specks, dark blotches, torn bits, crawling
+# pixels while standing, colour drift / foreign colours vs the approved front, softness, model
+# fit), the worst failing directions are drawn again ONCE with a new seed (at most
+# QUALITY_REDRAWS, never the approved front, never twice for the same reason), a redraw that came
+# out worse is put back, then every animation is bent once. keys.json / asset.json "quality"
+# keep the result ("16/16 directions passed" / redrawn / still weak). PIXEL_QUALITY=0 = off.
+
+QUALITY_REDRAWS = 4
+CHECK_CLIPS = ("idle", "walk")
+# a quality redraw tries ONE candidate per direction (the one that wins most often), not the
+# full candidate set: the failing direction gets a new seed, not three more pictures
+QUALITY_CANDIDATES = (("o", 0.6),)
+QUALITY_BACK_CANDIDATES = (("k", 0.6, 1),)
+
+
+def quality_auto() -> bool:
+    return os.environ.get("PIXEL_QUALITY", "1") != "0"
+
+
+def _check_folder(folder: Path) -> Path:
+    return Path(folder) / "keys" / "_check"
+
+
+def _revert_redraw(keys: Path, d: str) -> None:
+    """Put a direction's previous drawing back (the redraw came out worse)."""
+    rej = keys / "rejected"
+    rej.mkdir(exist_ok=True)
+    for f in keys.glob(f"drawn_{d}_*.png"):
+        f.replace(rej / f.name)
+    old = keys / "old"
+    for f in old.glob(f"drawn_{d}_*.png") if old.exists() else ():
+        f.replace(keys / f.name)
+    if d == "N" and old.exists() and not list(keys.glob("back_*.png")):
+        for f in old.glob("back_*.png"):
+            f.replace(keys / f.name)
+
+
+def _set_keys_fields(keys: Path, **fields) -> None:
+    p = keys / "keys.json"
+    meta = {}
+    if p.exists():
+        try:
+            meta = json.loads(p.read_text(encoding="utf-8"))
+        except ValueError:
+            meta = {}
+    meta.update(fields)
+    p.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+
+
+def _set_asset_extra(folder: Path, **fields) -> None:
+    p = Path(folder) / "asset.json"
+    data = {}
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except ValueError:
+            data = {}
+    data.setdefault("kind", "character")
+    data.setdefault("extra", {}).update(fields)
+    p.write_text(json.dumps(data, indent=1), encoding="utf-8")
+
+
+def quality_of(ch_or_folder) -> dict:
+    """The stored per-direction quality summary of a character ({} = never checked)."""
+    folder = Path(getattr(ch_or_folder, "folder", ch_or_folder))
+    meta = _keys_meta_folder(folder) or {}
+    return dict(meta.get("quality") or {})
+
+
+def _keys_meta_folder(folder: Path) -> dict | None:
+    p = Path(folder) / "keys" / "keys.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def drawn_with_quality(rigged, out_png, kind: str, size: str, frames=None, *, prompt: str = "",
+                       reuse: bool = True, redraw=(), name: str = "", cancel=None, gpu=None,
+                       progress=None, auto: bool | None = None, most: int | None = None) -> list[Path]:
+    """drawnrig.drawn_sheets + the automatic per-direction quality loop (see above). Stage
+    times go to metrics (drawings, quality_check, quality_redraw, bending)."""
+    from . import dirquality, drawnrig, metrics
+    say = progress or (lambda t: None)
+    out_png = Path(out_png)
+    folder = out_png.parent
+    keys = folder / "keys"
+    auto = quality_auto() if auto is None else auto
+    most = QUALITY_REDRAWS if most is None else most
+    common = dict(kind=kind, size=size, keys_folder=keys, name=name, cancel=cancel, gpu=gpu,
+                  progress=say)
+    prev_q = quality_of(folder)
+    quality = None
+    keep_palette = False
+    check_clips = None
+    if auto:
+        from .anim3d import load_rig
+        have = [c.name for c in load_rig([rigged]).clips]
+        check_clips = [c for c in CHECK_CLIPS if c in have] or have[:2]
+    if auto:
+        chk = _check_folder(folder)
+        chk.mkdir(parents=True, exist_ok=True)
+        tmp = chk / "sheet.png"
+        t0 = time.time()
+        _, info, _ = drawnrig.drawn_sheets(rigged, prompt, out_png=tmp, clips=list(check_clips),
+                                  frames=frames, reuse=reuse, redraw=redraw, **common)
+        sec = info.get("seconds") or {}
+        drew = float(sec.get("drawings", 0.0))
+        metrics.merge(folder, {"drawings": drew, "quality_check": time.time() - t0 - drew})
+        t1 = time.time()
+        rep = dirquality.check_sheet(tmp, info.get("keys_report"), kind)
+        tried = {d: tuple(w) for d, w in (prev_q.get("tried") or {}).items()}
+        bad = [d for d in dirquality.to_redraw(rep, most + len(tried))
+               if tried.get(d) != tuple(rep["directions"][d]["why"])][:most]
+        redrawn, reverted = [], []
+        metrics.merge(folder, {"quality_check": time.time() - t1})
+        if bad and not drawnrig._NO_DRAW:
+            say(f"Quality check: {rep['passed']}/{rep['total']} directions passed; drawing "
+                f"{', '.join(bad)} again with new seeds…")
+            before = {d: dict(rep["directions"][d]) for d in bad}
+            for d in bad:                       # keys/old = exactly what is redrawn now
+                for f in (keys / "old").glob(f"drawn_{d}_*.png") if (keys / "old").exists() else ():
+                    f.unlink()
+            t2 = time.time()
+            try:
+                _, info2, _ = drawnrig.drawn_sheets(rigged, prompt, out_png=tmp, clips=list(check_clips),
+                                           frames=frames, reuse=True, redraw=tuple(bad),
+                                           candidates=QUALITY_CANDIDATES,
+                                           back_candidates=QUALITY_BACK_CANDIDATES,
+                                           keep_back=True, **common)   # the checked back picture stays
+            except drawnrig.NeedsDrawing:
+                info2 = None
+            if info2 is not None:
+                drew2 = float((info2.get("seconds") or {}).get("drawings", 0.0))
+                metrics.merge(folder, {"quality_redraw": drew2,
+                                       "quality_check": time.time() - t2 - drew2})
+                t3 = time.time()
+                rep2 = dirquality.check_sheet(tmp, info2.get("keys_report"), kind)
+                for d in bad:
+                    tried[d] = tuple(before[d]["why"])
+                    if dirquality.better(before[d], rep2["directions"][d]):
+                        redrawn.append(d)
+                    else:
+                        reverted.append(d)
+                if reverted:
+                    meta = _keys_meta_folder(folder) or {}
+                    seeds = dict(meta.get("seeds") or {})
+                    for d in reverted:
+                        _revert_redraw(keys, d)
+                        if d in seeds:
+                            seeds[d] = int(seeds[d]) - 7919
+                        rep2["directions"][d] = before[d]
+                    _set_keys_fields(keys, seeds=seeds)
+                    rep2 = dirquality.judge(rep2)
+                rep = rep2
+                keep_palette = True
+                metrics.merge(folder, {"quality_check": time.time() - t3})
+        quality = dirquality.compact(rep)
+        quality.update(redrawn=redrawn, reverted=reverted, tried={d: list(w) for d, w in tried.items()})
+        reuse, redraw = True, ()
+        shutil.rmtree(chk, ignore_errors=True)
+    t4 = time.time()
+    import contextlib
+    # after the check every drawing is on disk: the full bend draws nothing new
+    guard = drawnrig.no_new_drawings() if auto else contextlib.nullcontext()
+    with guard:
+        anim, info, written = drawnrig.drawn_sheets(rigged, prompt, out_png=out_png, frames=frames,
+                                                    reuse=reuse, redraw=redraw, keep_palette=keep_palette,
+                                                    **common)
+    sec = info.get("seconds") or {}
+    drew = float(sec.get("drawings", 0.0))
+    metrics.merge(folder, {"drawings": drew, "bending": time.time() - t4 - drew})
+    if auto:
+        t5 = time.time()
+        final = dirquality.check_sheet(out_png, info.get("keys_report"), kind)
+        q = dirquality.compact(final)
+        q.update(redrawn=quality.get("redrawn", []), reverted=quality.get("reverted", []),
+                 tried=quality.get("tried", {}), checked=time.time())
+        q["text"] = dirquality.summary_text(q)
+        _set_keys_fields(keys, quality=q, timing=metrics.read(folder))
+        _set_asset_extra(folder, quality={k: q[k] for k in ("passed", "total", "failed", "redrawn",
+                                                             "reverted", "text")})
+        metrics.merge(folder, {"quality_check": time.time() - t5})
+        say(f"{name or 'Character'}: {q['text']}")
+    else:
+        _set_keys_fields(keys, timing=metrics.read(folder))
+    return written
+
+
+def check_and_fix(ch: "Character", progress=None, cancel=None, gpu=None, redraw_bad: bool = True,
+                  most: int | None = None) -> dict:
+    """The automatic quality pipeline on an existing character: re-bent on the CPU at the
+    project's current size / camera when its keys fit it, the per-direction check, the failing
+    directions drawn again (GPU) when redraw_bad, then the sheets bent again. A character whose
+    keys were drawn at another camera / size is drawn again (every direction: say the GPU minutes
+    first with fix_estimate). 3D-rendered characters are only checked. Returns the quality."""
+    _not_draft(ch)
+    if not is_drawn(ch):
+        from . import dirquality
+        rep = dirquality.check_sheet(ch.sheet, None, ch.kind)
+        return dirquality.compact(rep)
+    from .drawnrig import no_new_drawings
+    est = fix_estimate(ch)
+    if est["new_camera"]:
+        redraw(ch, None, progress=progress, cancel=cancel, gpu=gpu)
+    elif redraw_bad:
+        drawn_with_quality(ch.rigged, ch.sheet, ch.kind, ch.size, prompt=ch.prompt, name=ch.name,
+                           cancel=cancel, gpu=gpu, progress=progress, most=most)
+    else:
+        with no_new_drawings():
+            drawn_with_quality(ch.rigged, ch.sheet, ch.kind, ch.size, prompt=ch.prompt, name=ch.name,
+                               cancel=cancel, gpu=gpu, progress=progress, most=0)
+    make_thumb(ch.sheet, ch.thumb)
+    ch.save()
+    return quality_of(ch)
+
+
+def fix_estimate(ch: "Character") -> dict:
+    """What check_and_fix will cost: {new_camera (keys drawn at another camera/size than the
+    project's now: every direction drawn again), gpu_min (upper bound), text}."""
+    from .makeany import GPU
+    meta = _keys_meta(ch) or {}
+    cam = meta.get("camera") or {}
+    st = style()
+    w, h = frame_size(ch.kind, ch.size, st)
+    new_camera = bool(cam) and (cam.get("width"), cam.get("height"), cam.get("elevation"),
+                                cam.get("directions")) != (w, h, st.elevation, st.directions)
+    if new_camera:
+        m = GPU["drawn_dir"] * st.directions * 1.6
+        text = (f"{ch.name} was drawn at another size or camera than this project uses now: every "
+                f"direction is drawn again (about {max(1, round(m))} min of GPU) and checked.")
+    else:
+        m = GPU["drawn_dir"] * QUALITY_REDRAWS
+        text = (f"Checks every direction of {ch.name} (CPU, about a minute) and draws only the ones "
+                f"that fail again (at most {QUALITY_REDRAWS}: up to about {max(1, round(m))} min of GPU).")
+    return {"new_camera": new_camera, "gpu_min": round(m, 1), "text": text}
+
+
 def add_character(name: str, model, *, kind: str = "person", size: str | None = None,
                   picture=None, role: str = "", folder: Path | None = None,
                   progress=None, prompt: str = "", drawn: bool | None = None, cancel=None,
-                  gpu=None, preview: bool = False, springs: bool = False) -> Character:
+                  gpu=None, preview: bool = False, springs: bool = False,
+                  timing: dict | None = None) -> Character:
     """A coloured 3D model -> a library character: skeleton + animations (people: idle walk run
     attack hurt death; animals: idle walk run sit happy lie_down death), sheets, thumbnail.
     drawn: None = drawn by the GPU when this PC has ComfyUI (drawnrig.available()), else the 3D
@@ -274,7 +523,11 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
     again carries on where it stopped. preview (drawn only): draw just the front (S; animals
     the side) + a short idle and stop: the character is a draft waiting for the user's OK
     (in_preview; approve_preview draws the rest, redraw_preview / pick_preview change the
-    front). springs: capes/hair/tails swing (springs.add_springs on the rig before drawing)."""
+    front). springs: capes/hair/tails swing (springs.add_springs on the rig before drawing).
+    timing: stage seconds measured before (e.g. {"model": s} for the picture + 3D shape);
+    every stage from here on is timed too (metrics.py, asset.json extra["timing"]).
+    Drawn characters go through the automatic per-direction quality loop (drawn_with_quality)."""
+    from . import metrics
     say = progress or (lambda t: None)
     size = size or DEFAULT_SIZE.get(kind, "normal")
     base = Path(folder) if folder else root()
@@ -288,11 +541,15 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
     shutil.copyfile(model, ch.model)
     if picture is not None and Path(picture).exists():
         shutil.copyfile(picture, ch.picture)
+    metrics.write(ch.folder, {})                          # a new character: timing starts here
+    if timing:
+        metrics.merge(ch.folder, timing)
     say("Adding a skeleton and animations…")
-    auto_rig_cached(ch.model, ch.rigged, kind)
-    add_project_clips(ch.rigged, kind, progress=say)      # house style: the type's clip set
-    if springs:
-        _add_springs(ch, say)
+    with metrics.stage(ch.folder, "rig"):
+        auto_rig_cached(ch.model, ch.rigged, kind)
+        add_project_clips(ch.rigged, kind, progress=say)      # house style: the type's clip set
+        if springs:
+            _add_springs(ch, say)
     if drawn:
         from .generate import ComfyUIUnavailable
         try:
@@ -314,7 +571,8 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
             say(ch.notice.splitlines()[0] + (f" ({kept} finished drawing(s) kept)" if kept else ""))
             drawn = False
     if not drawn:
-        render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, prompt=prompt)
+        with metrics.stage(ch.folder, "sheets"):
+            render_sheets(ch.rigged, ch.sheet, kind, size, progress=say, prompt=prompt)
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
     return ch
@@ -498,11 +756,14 @@ def _draw_preview(ch: Character, say, cancel=None, gpu=None, springs=None) -> di
     prev = dict(meta.get("preview") or {})
     seeds = {d: int(v) for d, v in (meta.get("seeds") or {}).items()}
     prompt = ch.prompt or f"a {ch.name.lower()}"
+    from . import metrics
+    t0 = time.time()
     info = drawn_preview(ch.rigged, prompt, drawn_settings(ch.kind, ch.size, st),
                          directions=st.directions, elevation=st.elevation, style=st,
                          folder=keys, kind=ch.kind, seeds=seeds, cancel=cancel, gpu=gpu,
                          progress=say)
     ref = info["direction"]
+    metrics.merge(ch.folder, {"front": time.time() - t0})
     attempts = list(prev.get("attempts") or [])
     n = max([int(a["n"]) for a in attempts] + [0]) + 1
     box = keys / "attempts" / str(n)

@@ -848,6 +848,83 @@ wants terse answers and fixes over polish.
   scale; per-unit step_time/walk_scale from stride. Platformer hero: speed_scale from stride. Cards:
   sprites at whole scales by px_scale + the hero's painted portrait. Playtests: `locomotion_copies`
   (staged 12-frame planted-feet copies, `_studio/projects/loco-*`). Tests: tests/test_runtime_motion.py.
+- **Pixel quality: one pixel grid, 2x sprites, per-direction quality, no getting stuck (2026-10-17,
+  Kevin played playtest/action: "I got stuck", "skins look so pixely, lots of artifacts", "more at
+  specific angles"; chose "more detailed sprites")**. ALL AUTOMATIC app defaults (Kevin: "build it
+  into the app, I don't want to do this every time"):
+  - One grid (`assets.pixel_grid(style)`, `Style.grid()`, new fields `pixel_scale` (0 = auto) /
+    `render` auto|pixel|hires): sprite texels per tile = `Style.tile` (ppu = tile, presets hd2d/cards
+    42 -> 32), screen scale a whole number at 1080p (auto = ~TILES_ACROSS tiles over 1920 px: 32 px
+    tiles x4 = 480x270, 64 px x2 = 960x540, 16 px top-down x6 = 320x180). Size "detailed" (SPRITE_SIZES)
+    = 2x person AND 2x tile/icon (hd2d: 128 px people on 64 px tiles). render auto: **pixel** for
+    topdown-rpg / side-scroller / isometric, **hires** for hd2d + cards (HD-2D keeps perspective +
+    depth of field, sprites still whole texels). Manifest `pixel_grid`, ppu = grid ppu (godot-hd2d +
+    gameexport), `quality`/`weak_directions` per character.
+  - Board (hd2d.py): mode **pixel** (`pixel3d.tscn` + res://pixel.json {tile, scale, pitch}, menu entry,
+    `write_pixel_look`, make_hd2d(pixel=)): SubViewport = screen/scale, ortho camera size = vp_h/tile
+    (1 tile = tile px), board node scaled (1, 1/cos p, 1/sin p) = oblique 3/4 view so tops AND walls are
+    1 texel = 1 px; camera top_level, yaw 0, snapped to whole pixels; gameplay stays in board-local
+    coords (`g(p)` = to_global for unproject; mouse ray to_local). Sprite shader (pp_sprite3d.gdshader)
+    `whole_texels` (default on, every look): card faces the camera, scaled so one texel = k x k screen px
+    (k = round, >= 1; `texel_px` forces), every corner on a pixel corner; `texel_light`: LIGHT_VERTEX at
+    the texel centre (one light value per sprite pixel); `band_soft` soft toon edges; board `sprite_bands`
+    3 (lighting.json) vs ground 5. Projects: fullscreen + scale_mode integer (menu: STRETCH_INTEGER);
+    PPDebug F11 toggles. Camera pitch default = the sheets' drawn elevation (unit.json "elevation" from
+    sheet meta / keys camera; `default_pitch()`); `_sprite_dir` picks the drawing whose ON-SCREEN
+    direction matches (tan k = tan a sin(view)/sin(drawn)); while turning, unit.json "weak" directions
+    (quality failed) are skipped for a neighbour. unit.json `sheet_view()`.
+  - Per-direction quality (`dirquality.py`): every direction's idle frames + walk 0 vs the reference (S;
+    animals E) and the character's own medians: specks (1-2 px islands /100 px), blotch (big near-black
+    clusters), bits (torn pieces), flicker (pixels changing while standing), colour (histogram distance),
+    foreign (colours not in the reference), sharp, + keys_report iou/off_model/miss/grey; LIMITS = abs AND
+    x median. `library.drawn_with_quality` (render_sheets drawn path = add_character / approve_preview /
+    finish_drawing / redraw / check_and_fix): keys drawn -> only idle+walk bent into keys/_check -> check ->
+    worst failing (<= QUALITY_REDRAWS 4, never the approved front, never again for the same reason:
+    keys.json quality.tried) redrawn ONCE with new seeds and ONE candidate (QUALITY_CANDIDATES) -> re-check
+    -> a redraw that is not better is put back (`_revert_redraw`: keys/rejected, keys/old restored, seed
+    -7919) -> full bend under no_new_drawings (keep_palette) -> final check stored in keys.json "quality"
+    (+ text "14/16 directions passed (redrawn: ...; still weak: ...)") and asset.json extra.quality. UI:
+    Library tooltip + status line; right-click **Check and fix quality** (`check_and_fix`, `fix_estimate`
+    says GPU minutes first; keys at another size/camera -> full redraw); agent `check_quality(confirm=)`,
+    MCP `character_check_quality`. PIXEL_QUALITY=0 off (conftest sets 0; tests/test_pixel_quality turn it on).
+  - Clean-up: `pixelclean.art_clean` on the drawn KEYS (every frame copies them): palette colours < 7 Lab
+    merge, cluster smoothing (a pixel whose 8 neighbours mostly share one same-material colour takes it),
+    islands <= 3, crumbs <= max(6, 1.5% body), selout reshaded (PIXEL_ART_CLEAN=0 off). Normals:
+    `normals.smooth_by_material` (neighbours of the same hue/lightness bin only, folds kept) while bending
+    (drawnrig.SMOOTH_NORMALS) and for 3D renders (annotate_stride) / older sheets at add_unit
+    (meta.normals_smooth marks done).
+  - Movement (godot_runtime/action_play.gd, motion.json feet_rx 0.17 / feet_rz 0.11 / corner_slip 0.32 in
+    every export): the FEET ellipse collides (not a 0.24 body circle), props by trunk radii
+    (`diorama.BLOCKING_RADII`, map.json "radii", board `_prop_radius`), Zelda corner correction
+    (`_corner_correct`), `_unstick` every frame (push out / nearest free spot). Checks:
+    `diorama.narrow_gaps` (prop-prop gaps the eye reads as passable), `unreachable_cells` (cells a point
+    reaches but the feet can't); old collision sealed 11 cells of the action map, now 0 (barrel moved).
+    Selftest adds slipped_past_bush / pushed_out_of_pot. `-- --pp-dirs=<folder>` = the hero in 16 facings
+    as the game camera shows them. playtest.selftest()/screenshot() helpers.
+  - Timing (`metrics.py`): stages model/rig/front/drawings/quality_check/quality_redraw/bending/sheets in
+    asset.json extra.timing + keys.json; wall excludes the review wait; `aggregate(n)`, CLI `pixel-pipeline
+    metrics --json`, agent `metrics`, MCP `character_metrics`, review panel "So far", Library tooltip
+    "made in N min". add_character(timing={"model": s}) from makeany / jobqueue / ModelStudio. docs/metrics.md.
+  - Platformer runtime scales speeds/jump/gravity by tile/32 (`u`); 2x platformer = 960x540, 64 px tiles.
+    tilegen.rebuild_tileset(tile=) redraws a saved set at another size (playtest.tiles_at: QA sets at 64).
+  - Sheets taller than export.MAX_SHEET 8192 wrap into column blocks (pack_rows; the 2x knight was 18432 px
+    tall = over the GPU's 16384: it rendered invisible) and are cropped to their frames (meta size = image).
+    Sprite shader: abs(PROJECTION_MATRIX[1][1]) (Vulkan's y flip made k/tp negative -> sprites vanished).
+  - 2x test characters ("Pixel 2x test": 128 px, 45 deg, 64 px tiles; "Pixel 2x test 30": the knight at
+    30 deg; "Pixel 2x test side": 0 deg, E/W): knight-2x, knight-2x30 (the playtest hero), elf-2x, wolf-2x,
+    elf-side-2x; playtests use them (`Sources.detailed`, tiles = the QA sets rebuilt at 64 in
+    _studio/projects/tiles-64) for action (pixel look x2), tactics (hires) and platformer (960x540 x2);
+    iso + cards keep the 1x samples. All 5 self-tests pass (action: slipped_past_bush, pushed_out_of_pot).
+    Results: 45 deg drawings put only ~86 px of body in the 128 frame (smaller in game than the old 96 px
+    knight) -> the hero was redrawn at 30 deg (~110 px body, 15/16 directions passed); drawn elevation
+    need not match the game camera any more. Timing (docs/metrics.md): X 18-25 min (1x) -> Y wolf 18.2,
+    knight 29.0, elf ~28 (2x + check + bounded redraws); speed cuts: quality redraws 1 candidate, keep the
+    back picture, BACK_RETRY o0.66 dropped (never won). Shots: Pictures/PixelPipeline/pixel_quality_ab.png,
+    directions_quality_ab.png. Weak: the knight's back views still flat/dark (W fails), the elf model
+    (ribbon arcs, floating bow pieces -> 8/16), wolves small next to people (animal frame SIZES, one grid
+    means no per-unit enlarging), 64 px tile rebuilds keep 32-px-sized details (grass tufts look tiny),
+    the 2x action view shows ~15 x 8 tiles (smaller sprites on screen than Kevin's old zoomed camera:
+    Style.pixel_scale=3 = 640x360 if he wants them bigger).
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

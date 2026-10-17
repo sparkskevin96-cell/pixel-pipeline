@@ -926,6 +926,14 @@ def _cmd_palettes(_a) -> int:
     return 0
 
 
+def _cmd_metrics(a) -> int:
+    import json as _json
+    from .metrics import aggregate, format_report
+    rep = aggregate(a.n)
+    print(_json.dumps(rep, indent=1) if a.json else format_report(rep))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pixel-pipeline", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -948,6 +956,10 @@ def main(argv: list[str] | None = None) -> int:
     _add_sheet(sub)
     _add_tileset(sub)
     sub.add_parser("palettes", help="list built-in palettes").set_defaults(func=_cmd_palettes)
+    mp = sub.add_parser("metrics", help="how long making a character takes (median/mean per stage)")
+    mp.add_argument("-n", type=int, default=10, help="the last n timed characters")
+    mp.add_argument("--json", action="store_true")
+    mp.set_defaults(func=_cmd_metrics)
     from .cli_agent import add_parsers as _add_studio      # make / character / jobs / library /
     _add_studio(sub)                                        # project / export (asset studio)
     args = parser.parse_args(argv)

@@ -469,7 +469,7 @@ func _camera(s: Dictionary) -> void:
 		any = true
 	if s.has("pitch"):
 		if board.cam_pitch < 0.0:
-			board.cam_pitch = 38.0 if board.mode == "real" else 30.0
+			board.cam_pitch = board.default_pitch()
 		tw.tween_property(board, "cam_pitch", float(s["pitch"]), time)
 		any = true
 	if s.has("dist"):
@@ -893,8 +893,8 @@ func _projectile(s: Dictionary, from: Vector3, to: Vector3, col: Color) -> void:
 		light = OmniLight3D.new(); light.light_color = col; light.light_energy = 1.2; light.omni_range = 2.0
 		board.add_child(light)
 	else:
-		var a2: Vector2 = board.cam.unproject_position(from)
-		var b2: Vector2 = board.cam.unproject_position(to)
+		var a2: Vector2 = board.cam.unproject_position(board.g(from))
+		var b2: Vector2 = board.cam.unproject_position(board.g(to))
 		fx = board.play_effect(kind, from, true, float(s.get("projectile_light", 0.9)), str(s.get("projectile_tag", "fly")),
 			float(s.get("projectile_scale", 0.85)), b2.x < a2.x)
 		if fx.is_empty():
