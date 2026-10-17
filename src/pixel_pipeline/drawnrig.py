@@ -35,14 +35,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from .anim3d import (Action, AnimatedSet, Clip, Rig, clip_times, load_rig, sample_surface,
+from .anim3d import (Action, AnimatedSet, Clip, Rig, clip_times, frames_of, load_rig, sample_surface,
                      select_clips, surface_pose, write_animated)
 from .pipeline import Sprite
 from .turnaround import direction_names
@@ -52,6 +54,17 @@ DEPTH_EPS = 2.0                 # px: samples this close behind the nearest are 
 TIGHT_EPS = 0.6                 # px: the points a rest-view pixel takes its 3D data from
 OCCLUDE_EPS = 3.0               # px: a hidden part must be this much nearer to cover the drawing
 MIN_COVER = 5                   # of SS*SS samples: a pixel needs this many to be drawn
+
+
+def _kd_workers() -> int:
+    """Threads for the nearest-point searches below (scipy cKDTree.query `workers`). 1 (the
+    default) = as always; PIXEL_KD_WORKERS=-1 = every core (same answers: each query point is
+    searched on its own). The tests set -1: on the test robot's flat boxes a search for far
+    points is slow (~9 s for 200k points) and it was most of every drawn-character test."""
+    try:
+        return int(os.environ.get("PIXEL_KD_WORKERS", "1") or 1)
+    except ValueError:
+        return 1
 
 # what each facing looks like, in words the image model knows (screen: E = facing right)
 DIRECTION_WORDS = {
@@ -271,7 +284,7 @@ def clip_poses(body: Body, clips: list[Clip], frames: int, in_place: bool = True
             moved = rig.centroid(clip, clip.end) - rig.centroid(clip, clip.start)
             drift = moved * np.array([1.0, 0.0, 1.0]) / clip.duration
         row = []
-        for t in clip_times(clip, frames):
+        for t in clip_times(clip, frames_of(frames, clip.name)):
             w = rig.worlds(clip, t)
             row.append(Pose(body.mats(w), body.centre + drift * (t - clip.start), w))
         out.append(row)
@@ -1176,7 +1189,7 @@ def reference_parts(body: Body, view: RestView, rgb: np.ndarray, mask: np.ndarra
             have = seen
         hi, ni = np.nonzero(have)[0], np.nonzero(need)[0]
         kk = min(near, len(hi))
-        _, nn = cKDTree(pts[hi]).query(pts[ni], k=kk)
+        _, nn = cKDTree(pts[hi]).query(pts[ni], k=kk, workers=_kd_workers())
         nn = nn.reshape(len(ni), kk)
         best = np.empty(len(ni), np.int64)
         for c0 in range(0, len(ni), 50_000):
@@ -1445,6 +1458,26 @@ def view_refs(d: str, angle: float, done, reference: str = REFERENCE) -> list[st
     return refs
 
 
+_NO_DRAW = False
+
+
+class NeedsDrawing(RuntimeError):
+    """no_new_drawings() is on and a direction has no drawing on disk (it would need the GPU)."""
+
+
+@contextmanager
+def no_new_drawings():
+    """Inside: drawnrig only re-uses key drawings already on disk - no GPU request at all (CPU
+    re-bends: more frames, new clips; the quality loop doesn't retry); a direction with no
+    drawing raises NeedsDrawing."""
+    global _NO_DRAW
+    old, _NO_DRAW = _NO_DRAW, True
+    try:
+        yield
+    finally:
+        _NO_DRAW = old
+
+
 def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestView], rest: Pose,
                      prompt: str, settings, *, seed: int = 1234, style=None, client=None,
                      folder: Path | None = None, reuse: bool = True, candidates=CANDIDATES,
@@ -1536,7 +1569,7 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
             from scipy.spatial import cKDTree
             if "pts" not in ps:
                 ps["pts"], ps["nrm"] = body.pose(rest.worlds)
-            ps["near"] = cKDTree(ps["pts"]).query(cloud[0])[1]
+            ps["near"] = cKDTree(ps["pts"]).query(cloud[0], workers=_kd_workers())[1]
             ps["cloud_base"] = cloud[2]
         near = ps["near"]
         cols = np.where(ps["changed"][near][:, None], body.colours[near], ps["cloud_base"])
@@ -1570,7 +1603,7 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
         region, kpx = grid_region(views[kb], 1024)
         P = region[2] * kpx
         pm = view_parts(views[kb], labels)
-        may_draw = bool(missing(kb))         # a back view will be drawn: worth the GPU
+        may_draw = bool(missing(kb)) and not _NO_DRAW    # a back view will be drawn: worth the GPU
         text, neg = view_prompt(words, "back", kind if kind in ("person", "animal") else "person",
                                 st)
         if absent:
@@ -1725,6 +1758,8 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
             if path is not None and reuse and path.exists():
                 drawing = Image.open(path).convert("RGB")
             else:
+                if _NO_DRAW:                       # CPU only: just the drawings on disk
+                    continue
                 if cancel is not None and cancel():
                     raise Cancelled(f"Stopped before drawing {d}; {len(preps)} directions done "
                                     "(they are kept: drawing again carries on from here)")
@@ -1799,7 +1834,7 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
                     say(f"{d}: {tag}{den} is good, keeping it")
                     left -= len(missing(k, queue[qi:]))
                 break
-            if qi == len(queue) and ps["on"] and _is_back(a) and not retried and BACK_RETRY:
+            if qi == len(queue) and ps["on"] and _is_back(a) and not retried and BACK_RETRY and not _NO_DRAW:
                 b = best[2]                  # a back view still off: a few more tries
                 if (b["part_miss"] > BACK_OK["miss"] or b["grey"] > BACK_OK["grey"]
                         or b["sharp"] < BACK_OK["sharp"] * ref_sharp):
@@ -1808,6 +1843,8 @@ def draw_keys_paired(rig: Rig, body: Body, cams: list[Camera], views: list[RestV
                     left += len(missing(k, BACK_RETRY))
                     say(f"{d}: still muddled (parts off {b['part_miss']:.0%}, grey "
                         f"{b['grey']:.0%}, sharp {b['sharp']:.1f}): trying again")
+        if best is None:
+            raise NeedsDrawing(f"{d}: no key drawing on disk (drawing it needs the GPU)")
         preps[d] = best[1]
         report[d] = best[2]
         keyrgba[d] = clean_sprite(finish(preps[d], s_plain, None), outline_style).rgba
@@ -1898,6 +1935,8 @@ def draw_keys(rig: Rig, body: Body, cams: list[Camera], views: list[RestView], r
                 view, view_neg = direction_words(d)
                 text, neg = with_style(KEY_PROMPT.format(prompt=prompt, view=view),
                                        f"{KEY_NEGATIVE}, {view_neg}", st, "character")
+                if _NO_DRAW:
+                    raise NeedsDrawing(f"{d}: no key drawing on disk (drawing it needs the GPU)")
                 if client is None:             # the real GPU: let it cool between drawings
                     pace(say=say)
                 say(f"Drawing the knight facing {d} (seed {s_k})…".replace("the knight", "it"))
@@ -1964,7 +2003,7 @@ def _point_colours(body: Body, views: list[RestView], keys: KeySet, key_pose: Po
         if missing.any() and (~missing).any():
             if last is None or not np.array_equal(last[0], missing):
                 tree = cKDTree(rest_pts[~missing])
-                _, near = tree.query(rest_pts[missing])
+                _, near = tree.query(rest_pts[missing], workers=_kd_workers())
                 last = (missing, near)
             idx[missing] = idx[~missing][last[1]]
         out.append(idx)
@@ -2388,7 +2427,8 @@ def drawn_preview(rigged, prompt: str, settings, *, directions: int = 16, frames
                       clean, False, outline)
     rows, _, _ = bend_direction(state, 0)
     c = clips[a]
-    frame_ms = max(16, int(round(1000 * c.duration / max(1, frames if c.loop else frames - 1))))
+    n = frames_of(frames, c.name)
+    frame_ms = max(16, int(round(1000 * c.duration / max(1, n if c.loop else n - 1))))
     return {"direction": ref, "key": sp, "frames": rows[0], "frame_ms": frame_ms, "clip": c.name,
             "seed": int(keys.seeds[0]), "report": keys.report.get(ref, {}),
             "absent": list(absent or ()), "camera": camera,
@@ -2461,7 +2501,7 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
     colours = _point_colours(body, views, keys, rest)
     outline = settings.outline_style if settings.outline else "none"
     say("Bending the drawings for every frame…")
-    sprites = [[[None] * frames for _ in names] for _ in clips]
+    sprites = [[[None] * frames_of(frames, c.name) for _ in names] for c in clips]
     torso = _torso_node(rig)
     held, arm = _held_slots(body)
     fallback, refaced = 0, 0
@@ -2482,8 +2522,8 @@ def drawn_animation(rigged, prompt: str, settings, *, directions: int = 8, frame
         fallback += fb
         refaced += rf
     actions = [Action(c.name, c.loop, max(16, int(round(1000 * c.duration
-                                                         / max(1, frames if c.loop else frames - 1)))))
-               for c in clips]
+                                                         / max(1, n if c.loop else n - 1)))))
+               for c, n in ((c, frames_of(frames, c.name)) for c in clips)]
     info = {"keys": keys, "seconds": {"setup": t_keys - t0, "drawings": t_bend - t_keys,
                                       "bending": time.time() - t_bend},
             "ious": dict(zip(keys.names, keys.ious)), "seeds": dict(zip(keys.names, keys.seeds)),
@@ -2622,7 +2662,7 @@ def drawn_settings(kind: str, size: str, st):
 
 
 def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None,
-                 directions: int | None = None, clips: list[str] | None = None, frames: int = 8,
+                 directions: int | None = None, clips: list[str] | None = None, frames=None,
                  seed: int = 1234, denoise: float = 0.6, kind: str | None = None,
                  blocky: bool = True, candidates=CANDIDATES, back_candidates=BACK_CANDIDATES,
                  absent=None, size: str | None = None, client=None, keys_folder=None,
@@ -2673,6 +2713,9 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
                 for f in keys_folder.glob("back_*.png"):
                     f.replace(bin_ / f.name)
     s = drawn_settings(kind, size, st)
+    if frames is None:                    # the sheet's own counts, new clips the house default
+        from .library import frames_for
+        frames = frames_for(out_png if Path(out_png).with_suffix(".json").exists() else None, st)
     anim, info = drawn_animation(rigged, prompt, s, directions=directions or st.directions,
                                  frames=frames, animations=clips, elevation=st.elevation,
                                  seed=seed, denoise=denoise, style=st, client=client,
@@ -2687,6 +2730,8 @@ def drawn_sheets(character_or_rigged, prompt: str | None = None, *, out_png=None
                                  else None,
                                  progress=progress)
     written = write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
+    from .library import annotate_stride           # stride for the games (feet planted)
+    annotate_stride(out_png, rigged, (info.get("camera") or {}).get("scale"), st)
     meta = {k: v for k, v in info.items() if k != "keys"}
     meta["prompt"] = prompt
     saved.write_text(json.dumps(meta, indent=1), encoding="utf-8")

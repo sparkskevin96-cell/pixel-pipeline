@@ -41,6 +41,21 @@ def blob_png(tmp_path):
     return path
 
 
+def pytest_configure(config):
+    """Tests run at idle priority (Windows; nice 10 elsewhere) so the laptop stays usable while
+    they go; child processes (Godot, worker pools) inherit it. PIXEL_TEST_PRIORITY=normal keeps
+    the normal priority."""
+    import os
+    if os.environ.get("PIXEL_TEST_PRIORITY", "").lower() == "normal":
+        return
+    try:
+        import psutil
+        p = psutil.Process()
+        p.nice(psutil.IDLE_PRIORITY_CLASS if os.name == "nt" else 10)
+    except Exception:       # no psutil / not allowed: run as is
+        pass
+
+
 _QAPP = []
 
 
@@ -67,6 +82,8 @@ def _own_library(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("PIXEL_WORKERS", "1")     # in-process (tests/test_speed.py tries workers)
     monkeypatch.setenv("PIXEL_GPU_RETRIES", "0")  # a dead fake ComfyUI fails at once (test_robust
     #                                               turns retries on with a dying fake)
+    monkeypatch.setenv("PIXEL_KD_WORKERS", "-1")  # drawnrig nearest-point searches on every core
+    #                                               (same answers; the app's default is 1)
 
 
 _EXIT = [0]

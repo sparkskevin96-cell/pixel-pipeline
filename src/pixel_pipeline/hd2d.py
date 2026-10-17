@@ -145,105 +145,12 @@ script = ExtResource("1")
 mode = "fake"
 """
 
-SPRITE_SHADER = """shader_type spatial;
-// A frame of a sprite sheet on a quad that stands up and faces the camera (turning about
-// the vertical axis only, like HD-2D), lit by every scene light through the sheet's normal map.
-// Pixel-stable lighting: each light's diffuse term is snapped to `bands` steps (a toon ramp), so
-// a torch passing by moves whole bands over the pixel art instead of smearing it. Rim light on
-// the silhouette and on edges turned toward a light (strongest when the light is behind).
-// <sheet>_glow.png (alpha x max(rgb)) makes those pixels EMISSIVE: only they bloom.
-render_mode cull_disabled, depth_prepass_alpha;
+# The board's sprite shader is the game runtime's (godot_runtime/pp_sprite3d.gdshader): camera-facing
+# quads lit through the normal maps in toon bands, depth taken at the FEET (no clipping into the
+# ground, walls, stairs or each other) and pixel-snapped (no shimmer while they walk).
+from .godot_runtime import source as _runtime_source  # noqa: E402
 
-uniform sampler2D sheet : source_color, filter_nearest;
-uniform sampler2D normals : hint_normal, filter_nearest;
-uniform sampler2D glow : hint_default_black, filter_nearest;
-uniform bool has_normals = false;
-uniform bool has_glow = false;
-uniform float glow_energy = 3.5;
-uniform vec4 frame = vec4(0.0, 0.0, 1.0, 1.0);   // uv x, y, w, h
-uniform bool face_camera_fully = false;           // fake 3D: no foreshortening
-uniform bool shadow_caster = false;               // the shadow-only twin (see vertex)
-uniform bool flat_on_ground = false;             // ground effects: the quad lies as placed
-uniform vec3 tint = vec3(1.0);
-uniform float flash = 0.0;                        // selection glow
-uniform float bands = 4.0;                        // toon ramp steps per light, 0 = smooth
-uniform float wrap = 0.35;                        // half-lambert wrap: the dark side stays readable
-uniform float rim = 0.5;                          // rim / backlight strength
-uniform vec3 lift = vec3(0.0);                    // extra sky light on sprites (stay readable at night)
-
-varying float edge;
-
-void vertex() {
-	if (!flat_on_ground) {
-		vec3 up = face_camera_fully ? INV_VIEW_MATRIX[1].xyz : vec3(0.0, 1.0, 0.0);
-		vec3 right = normalize(INV_VIEW_MATRIX[0].xyz);
-		vec3 back = normalize(cross(right, up));
-		if (face_camera_fully) { back = normalize(INV_VIEW_MATRIX[2].xyz); }
-		float sx = length(MODEL_MATRIX[0].xyz);
-		float sy = length(MODEL_MATRIX[1].xyz);
-		MODELVIEW_MATRIX = VIEW_MATRIX * mat4(vec4(right * sx, 0.0), vec4(up * sy, 0.0),
-											  vec4(back, 0.0), MODEL_MATRIX[3]);
-		if (shadow_caster) {
-			// rendered only into shadow maps, where the "camera" is the light: pushed away from the
-			// light along its rays, so the ground shadow is the same but the visible sprite (in front)
-			// no longer shadows itself
-			MODELVIEW_MATRIX[3].z -= 0.45;
-		}
-		MODELVIEW_NORMAL_MATRIX = mat3(MODELVIEW_MATRIX);
-	}
-}
-
-void fragment() {
-	vec2 uv = frame.xy + UV * frame.zw;
-	vec4 c = texture(sheet, uv);
-	if (c.a < 0.5) { discard; }
-	ALBEDO = c.rgb * tint + vec3(flash);
-	ROUGHNESS = 0.85;
-	SPECULAR = 0.0;
-	if (has_normals) {
-		NORMAL_MAP = texture(normals, uv).rgb;
-		NORMAL_MAP_DEPTH = 1.0;
-	}
-	// silhouette pixels (a transparent neighbour inside the frame): the rim light's home
-	vec2 px = 1.0 / vec2(textureSize(sheet, 0));
-	vec2 lo = frame.xy;
-	vec2 hi = frame.xy + frame.zw;
-	float e = 0.0;
-	for (int k = 0; k < 4; k++) {
-		vec2 d = k == 0 ? vec2(px.x, 0.0) : k == 1 ? vec2(-px.x, 0.0) : k == 2 ? vec2(0.0, px.y) : vec2(0.0, -px.y);
-		vec2 q = uv + d;
-		bool inside = all(greaterThanEqual(q, lo)) && all(lessThan(q, hi));
-		e = max(e, (!inside || texture(sheet, q).a < 0.5) ? 1.0 : 0.0);
-	}
-	edge = e;
-	EMISSION = ALBEDO * lift;
-	if (has_glow) {
-		vec4 g = texture(glow, uv);
-		float m = g.a * max(g.r, max(g.g, g.b));
-		EMISSION += c.rgb * tint * m * glow_energy;
-	}
-}
-
-void light() {
-	float d = clamp((dot(NORMAL, LIGHT) + wrap) / (1.0 + wrap), 0.0, 1.0) * ATTENUATION;
-	if (bands > 0.5) {
-		d = ceil(d * bands - 0.3) / bands;           // rounds up: dim lights keep a band
-	}
-	DIFFUSE_LIGHT += LIGHT_COLOR * d / PI;
-	// rim: edges whose normal (in screen space) points toward the light
-	vec2 n2 = NORMAL.xy;
-	vec2 l2 = LIGHT.xy;
-	float side = 0.0;
-	if (length(n2) > 0.001 && length(l2) > 0.001) {
-		side = clamp(dot(normalize(n2), normalize(l2)), 0.0, 1.0);
-	}
-	float back = clamp(-dot(LIGHT, VIEW), 0.0, 1.0);
-	float outer = max(edge, smoothstep(0.45, 0.85, 1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0)));
-	float r = rim * outer * side * (0.3 + 0.7 * back) * ATTENUATION;
-	r = r > 0.12 ? (bands > 0.5 ? ceil(r * 2.0) / 2.0 : r) : 0.0;  // crisp, not a smear
-	SPECULAR_LIGHT += LIGHT_COLOR * r * 0.35 / PI;
-}
-"""
+SPRITE_SHADER = _runtime_source("pp_sprite3d.gdshader")
 
 TERRAIN_SHADER = """shader_type spatial;
 // The board's ground (cell tops and walls): the pixel texture + its per-texel normal map, lit
@@ -314,9 +221,21 @@ uniform sampler2D ripples : filter_linear, repeat_enable;
 uniform vec3 deep : source_color = vec3(0.04, 0.10, 0.30);
 uniform vec3 shallow : source_color = vec3(0.10, 0.28, 0.62);
 uniform float sparkle = 2.5;
+uniform float spec = 0.8;          // sun highlight strength (lighting.json "water_spec")
+uniform float glare = 0.6;         // the highlight never goes brighter than this (no white-out at noon)
 
 void vertex() {
 	VERTEX.y += sin(TIME * 1.3 + VERTEX.x * 0.9) * 0.02 + cos(TIME * 1.1 + VERTEX.z * 0.7) * 0.02;
+}
+
+void light() {
+	// diffuse + a CAPPED, banded sun highlight: a high sun mirrored into a steep camera used to
+	// blow the whole pond out to white (the action map at noon)
+	DIFFUSE_LIGHT += LIGHT_COLOR * clamp(dot(NORMAL, LIGHT), 0.0, 1.0) * ATTENUATION / PI;
+	vec3 h = normalize(LIGHT + VIEW);
+	float sp = pow(clamp(dot(NORMAL, h), 0.0, 1.0), 90.0) * spec * ATTENUATION;
+	sp = min(floor(sp * 4.0) / 4.0, glare);
+	SPECULAR_LIGHT += LIGHT_COLOR * sp;
 }
 
 void fragment() {
@@ -472,6 +391,11 @@ BOARD_GD = r'''extends Node3D
 # small by the parent SubViewport and scaled up: 3D that reads as pixel art.
 
 @export var mode := "real"
+# The game runtime (godot_runtime/pp_motion.gd, res://pp_runtime/): eased movement, turning through
+# the 16 facings, stride-matched walk/run (feet planted), settle on stop, hops on steps, hit-stop,
+# shake, critically damped camera. Sprites: res://shaders/sprite.gdshader = pp_sprite3d.gdshader
+# (depth at the feet: no clipping into walls, stairs, props or each other; pixel-snapped).
+const M := preload("res://pp_runtime/pp_motion.gd")
 
 const DIRS := ["E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW", "N", "NNE", "NE", "ENE"]
 const MOVE := 4
@@ -514,12 +438,37 @@ var water_mat: ShaderMaterial
 var effects := {}        # name -> effect sheet (res://effects/<name>/)
 var live_effects := []   # playing effects: {node, mat, e, t, loop, light, energy}
 var weather: Node = null  # res://weather/board_weather.gd (make_hd2d(weather=...))
+# autoplay (res://autoplay.gd, `--autoplay[=res://autoplay.json]`): a script drives the board
+var scripted := false    # true: no player input, no automatic turn passing; action_done after each act
+signal action_done
+var cam_pitch := -1.0    # degrees; -1 = the look's default (real 38, fake 30)
+var cam_turn_rate := 8.0 # how fast the camera eases to cam_yaw_target
+var prop_nodes := {}     # Vector2i -> the nodes a prop on that cell built (autoplay cuts bushes)
+var number_lift := 1.6   # damage numbers start this high over a unit
+var conf := {}           # motion tunables (res://pp_runtime/motion.json over pp_motion DEFAULTS)
+var freeze := 0.0        # hit-stop: sprites, movers and effects hold while > 0
+var trauma := 0.0        # camera shake (0..1, squared)
+var cam_target = null    # Vector3 the camera follows (critically damped), null = stays
+var cam_vel := Vector3.ZERO
+var cam_smooth := 0.28
+var bars_layer: CanvasLayer   # HP bars + damage numbers drawn in 2D over the 3D view (no DOF blur)
+var floaters := []       # [{node, pos, t, life, rise}] 2D labels that follow a 3D point
+var obstacles := {}      # Vector2i -> {"r": radius (0 = the whole cell), "kind"} (props that block)
+var apron := 0           # cells of scenery drawn around the map (map.json "apron")
+var move_speed := 2.2    # tiles/s a tactics unit wants to walk a path (capped by its stride)
+var clock := 0.0
+const BLOCKING := {"crate": 0.4, "barrel": 0.3, "post": 0.12, "tree": 0.3, "rock": 0.36, "house": 0.0,
+	"wall": 0.0, "well": 0.45, "fence": 0.0, "battlement": 0.0, "brazier": 0.3, "crystal": 0.32,
+	"bush": 0.3, "pot": 0.22, "statue": 0.3, "cabin": 0.0}
 const LIGHT_ORDER := ["dawn", "noon", "sunset", "night"]
 const SPELL := {"mage": Color(0.72, 0.42, 1.0), "cleric": Color(1.0, 0.84, 0.45), "physician": Color(0.5, 1.0, 0.62)}
 
 func _ready() -> void:
+	conf = M.settings()
+	cam_smooth = float(conf.get("cam_smooth", 0.28))
 	map = JSON.parse_string(FileAccess.get_file_as_string("res://map/map.json"))
 	level = map.get("level", 0.5)
+	apron = int(map.get("apron", 0))
 	cols = int(map["cols"])
 	rows = int(map["rows"])
 	heights = map["height"]
@@ -537,6 +486,26 @@ func _ready() -> void:
 	_build_weather()
 	_hud()
 	apply_lighting(light_name)
+	_start_autoplay()
+
+func _start_autoplay() -> void:
+	# --autoplay=res://x.json (or --autoplay = res://autoplay.json), or autoplay.json with "auto": true
+	var path := ""
+	for a in OS.get_cmdline_user_args():
+		if a == "--autoplay":
+			path = "res://autoplay.json"
+		elif a.begins_with("--autoplay="):
+			path = a.substr(11)
+	if path == "" and FileAccess.file_exists("res://autoplay.json"):
+		var j = JSON.parse_string(FileAccess.get_file_as_string("res://autoplay.json"))
+		if j is Dictionary and bool(j.get("auto", false)):
+			path = "res://autoplay.json"
+	if path == "" or not FileAccess.file_exists("res://autoplay.gd"):
+		return
+	var ap: Node = load("res://autoplay.gd").new()
+	ap.name = "Autoplay"
+	add_child(ap)
+	ap.start(self, path)
 
 # ------------------------------------------------------------------ helpers
 
@@ -661,6 +630,8 @@ func apply_lighting(name: String) -> void:
 		water_mat.set_shader_parameter("deep", _c(L.get("water_deep"), Color(0.04, 0.10, 0.30)))
 		water_mat.set_shader_parameter("shallow", _c(L.get("water_shallow"), Color(0.10, 0.28, 0.62)))
 		water_mat.set_shader_parameter("sparkle", float(L.get("sparkle", 2.5)))
+		water_mat.set_shader_parameter("spec", float(L.get("water_spec", 0.8)))
+		water_mat.set_shader_parameter("glare", float(L.get("glare", 0.6)))
 	if weather != null:
 		weather.apply(L)
 	if hud != null:
@@ -757,6 +728,10 @@ func _variant(name: String, c: int, r: int) -> int:
 			return i
 	return w.size() - 1
 
+func _cell_src(c: int, r: int) -> Vector2i:
+	# apron cells (outside the map) copy the nearest edge cell: the land goes on past the edge
+	return Vector2i(clampi(c, 0, cols - 1), clampi(r, 0, rows - 1))
+
 func _build_terrain() -> void:
 	var mats := _materials()
 	var tops := {}
@@ -765,12 +740,16 @@ func _build_terrain() -> void:
 	var used := {}
 	var body := StaticBody3D.new()
 	add_child(body)
-	for r in rows:
-		for c in cols:
-			var t: String = terrain[r][c]
+	for r in range(-apron, rows + apron):
+		for c in range(-apron, cols + apron):
+			var src := _cell_src(c, r)
+			var outside := src != Vector2i(c, r)
+			var t: String = terrain[src.y][src.x]
 			if t == "water":
 				continue
-			var y := top_y(c, r)
+			if outside and t == "planks":
+				t = "grass" if tex_info.has("grass") or mats.has("grass") else t
+			var y := top_y(src.x, src.y)
 			if not tops.has(t):
 				tops[t] = SurfaceTool.new()
 				tops[t].begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -791,8 +770,10 @@ func _build_terrain() -> void:
 				var nc: int = c + nb[0]
 				var nr: int = r + nb[1]
 				var ny := -1.0
-				if nc >= 0 and nr >= 0 and nc < cols and nr < rows and terrain[nr][nc] != "water":
-					ny = top_y(nc, nr)
+				var nsrc := _cell_src(nc, nr)
+				var inside := nc >= -apron and nr >= -apron and nc < cols + apron and nr < rows + apron
+				if inside and terrain[nsrc.y][nsrc.x] != "water":
+					ny = top_y(nsrc.x, nsrc.y)
 				if ny >= y:
 					continue
 				var n := Vector3(nb[0], 0, nb[1])
@@ -823,6 +804,8 @@ func _build_terrain() -> void:
 					var off := n * 0.004
 					_quad(lips[t], p0 + Vector3(0, y, 0) + off, p1 + Vector3(0, y, 0) + off, p1 + Vector3(0, y - lh, 0) + off,
 						p0 + Vector3(0, y - lh, 0) + off, n, [Vector2(u0, 0), Vector2(u1, 0), Vector2(u1, lh / full), Vector2(u0, lh / full)])
+			if outside:
+				continue                               # scenery only: no picking, no walking
 			var shape := CollisionShape3D.new()
 			var box := BoxShape3D.new()
 			box.size = Vector3(1, y + 1.0, 1)
@@ -859,7 +842,7 @@ func _build_terrain() -> void:
 func _build_water() -> void:
 	var water := MeshInstance3D.new()
 	var pm := PlaneMesh.new()
-	pm.size = Vector2(cols + 40, rows + 40) if map.get("sea", true) else Vector2(cols, rows)
+	pm.size = Vector2(cols + 40, rows + 40) if map.get("sea", true) else Vector2(cols + 2 * apron, rows + 2 * apron)
 	pm.subdivide_width = 60
 	pm.subdivide_depth = 60
 	water.mesh = pm
@@ -888,17 +871,32 @@ func _build_props() -> void:
 		ext = load("res://map/props3d.gd").new()
 	for p in map.get("props", []):
 		var c := int(p["col"]); var r := int(p["row"])
+		var before := get_child_count()
+		var pk := str(p["kind"])
+		if BLOCKING.has(pk) or pk in map.get("blocking", []):
+			blocked[Vector2i(c, r)] = true
+			obstacles[Vector2i(c, r)] = {"r": float(BLOCKING.get(pk, 0.0)), "kind": pk}
+		_build_prop(p, c, r, i, ext, wood)
+		i += 1
+		var built := []
+		for k in range(before, get_child_count()):
+			built.append(get_child(k))
+		prop_nodes[Vector2i(c, r)] = prop_nodes.get(Vector2i(c, r), []) + built
+
+func _build_prop(p: Dictionary, c: int, r: int, i: int, ext, wood: Material) -> void:
 		var base := cell_pos(c, r)
 		var kind: String = p["kind"]
 		if ext != null and ext.build(self, kind, c, r, base, i):
-			i += 1
-			continue
-		if kind in ["crate", "barrel", "post", "brazier", "crystal"]:
-			blocked[Vector2i(c, r)] = true
+			return
+		if kind in ["bush", "pot", "cave"]:
+			_small_prop(kind, base, c, r)
+			return
+		if BLOCKING.has(kind) or kind in map.get("blocking", []):
+			blocked[Vector2i(c, r)] = true            # a tree, house, well... (diorama.BLOCKING_PROPS)
+			obstacles[Vector2i(c, r)] = {"r": float(BLOCKING.get(kind, 0.0)), "kind": kind}
 		if LIGHT_PROPS.has(kind):
 			_light_prop(kind, base, i, wood)
-			i += 1
-			continue
+			return
 		var mi := MeshInstance3D.new()
 		match kind:
 			"crate":
@@ -915,7 +913,46 @@ func _build_props() -> void:
 				mi.position = base + Vector3(0, 0.3, 0)
 		mi.material_override = wood
 		add_child(mi)
-		i += 1
+
+func _small_prop(kind: String, base: Vector3, c: int, r: int) -> void:
+	# a bush (cuttable leaves), a clay pot (low things a hero can cut or lift), or a cave mouth
+	# in the wall on the cell's north side
+	if kind == "cave":
+		var hole := _std(Color(0.02, 0.015, 0.03), Color.BLACK, 0.0, 0.0, 1.0)
+		var bm := BoxMesh.new(); bm.size = Vector3(0.78, 0.82, 0.06)
+		_mesh(bm, hole, base + Vector3(0, 0.41, -0.49))
+		var arch := CylinderMesh.new(); arch.top_radius = 0.39; arch.bottom_radius = 0.39; arch.height = 0.06
+		arch.radial_segments = 16
+		_mesh(arch, hole, base + Vector3(0, 0.82, -0.49), Vector3(PI / 2.0, 0, 0))
+		var rock := _std(Color(0.42, 0.4, 0.44), Color.BLACK, 0.0, 0.0, 0.95)
+		for x in [-0.46, 0.46]:
+			var post := BoxMesh.new(); post.size = Vector3(0.16, 1.0, 0.16)
+			_mesh(post, rock, base + Vector3(x, 0.5, -0.44))
+		var lintel := BoxMesh.new(); lintel.size = Vector3(1.08, 0.16, 0.18)
+		_mesh(lintel, rock, base + Vector3(0, 1.08, -0.44))
+		return
+	blocked[Vector2i(c, r)] = true
+	var k := fposmod(sin(float(c) * 3.7 + float(r) * 9.1) * 437.5, 1.0)
+	if kind == "bush":
+		var greens := [Color(0.18, 0.42, 0.16), Color(0.24, 0.5, 0.2), Color(0.3, 0.58, 0.22)]
+		var offs := [Vector3(0, 0.22, 0), Vector3(0.16, 0.17, 0.1), Vector3(-0.15, 0.16, 0.08), Vector3(0.02, 0.15, -0.16)]
+		for j in offs.size():
+			var sm := SphereMesh.new()
+			sm.radius = 0.24 if j == 0 else 0.2
+			sm.height = sm.radius * 1.6
+			sm.radial_segments = 8; sm.rings = 4
+			_mesh(sm, _std(greens[(j + int(k * 3.0)) % 3], Color.BLACK, 0.0, 0.0, 0.95), base + offs[j])
+		var dot := SphereMesh.new(); dot.radius = 0.04; dot.height = 0.08; dot.radial_segments = 6; dot.rings = 3
+		for j in 3:                                    # a few berries / flowers
+			var a := TAU * (float(j) / 3.0 + k)
+			_mesh(dot, _std(Color(0.95, 0.85, 0.5) if j % 2 == 0 else Color(0.9, 0.35, 0.4)),
+				base + Vector3(cos(a) * 0.2, 0.32, sin(a) * 0.2))
+	else:
+		var clay := _std(Color(0.62, 0.36, 0.22), Color.BLACK, 0.0, 0.0, 0.7)
+		var body := SphereMesh.new(); body.radius = 0.22; body.height = 0.38; body.radial_segments = 10; body.rings = 5
+		_mesh(body, clay, base + Vector3(0, 0.19, 0))
+		var neck := CylinderMesh.new(); neck.top_radius = 0.12; neck.bottom_radius = 0.1; neck.height = 0.1
+		_mesh(neck, _std(Color(0.5, 0.28, 0.17)), base + Vector3(0, 0.4, 0))
 
 # ------------------------------------------------------------------ light sources
 # Torches, braziers, lanterns and crystals light the board: a flickering OmniLight3D
@@ -1063,6 +1100,7 @@ func spell_light(pos: Vector3, colour: Color, energy := 4.0, time := 0.6, reach 
 	l.omni_attenuation = 1.4
 	l.light_energy = 0.0
 	l.light_specular = 0.1
+	l.light_cull_mask = 0xFFFFF & ~2                 # not the effect sprites (layer 2)
 	l.position = pos
 	add_child(l)
 	var tw := create_tween()
@@ -1092,7 +1130,8 @@ func _load_effect(name: String) -> Variant:
 		rects.append({"rect": Rect2(f[0] / size.x, f[1] / size.y, f[2] / size.x, f[3] / size.y), "ms": float(f[4])})
 	var e := {"tex": tex, "gtex": _tex(base + "_glow.png"), "frames": rects, "w": float(info["frame_w"]),
 		"h": float(info["frame_h"]), "ppu": float(info.get("ppu", 42.0)), "loop": bool(info.get("loop", false)),
-		"light": _c(info.get("light"), Color(1.0, 0.8, 0.5)), "ground": bool(info.get("ground", false))}
+		"light": _c(info.get("light"), Color(1.0, 0.8, 0.5)), "ground": bool(info.get("ground", false)),
+		"tags": info.get("tags", {})}
 	effects[name] = e
 	return e
 
@@ -1112,13 +1151,18 @@ func _build_effects() -> void:
 		var c := int(p["col"]); var r := int(p["row"])
 		play_effect(str(p["name"]), cell_pos(c, r), true)
 
-func play_effect(name: String, pos: Vector3, loop := false, energy := 1.6) -> void:
+func play_effect(name: String, pos: Vector3, loop := false, energy := 1.6, tag := "", scale := 1.0, flip := false) -> Dictionary:
+	# tag: play only that animation of the sheet (e.g. a fireball's "fly" loop, then "impact")
 	var e = _load_effect(name)
 	if e == null:
-		return
+		return {}
+	var frames: Array = e["frames"]
+	if tag != "" and e["tags"].has(tag):
+		var span: Array = e["tags"][tag]
+		frames = frames.slice(int(span[0]), int(span[1]) + 1)
 	var mi := MeshInstance3D.new()
 	var q := QuadMesh.new()
-	q.size = Vector2(e["w"] / e["ppu"], e["h"] / e["ppu"])
+	q.size = Vector2(e["w"] / e["ppu"], e["h"] / e["ppu"]) * scale
 	if e["ground"]:
 		q.orientation = PlaneMesh.FACE_Y
 		q.size = Vector2(q.size.x, q.size.y * 1.6)     # drawn foreshortened: flat again
@@ -1135,9 +1179,11 @@ func play_effect(name: String, pos: Vector3, loop := false, energy := 1.6) -> vo
 	mat.set_shader_parameter("glow_energy", 1.3 if loop else 2.2)
 	mat.set_shader_parameter("face_camera_fully", mode == "fake")
 	mat.set_shader_parameter("flat_on_ground", e["ground"])
+	mat.set_shader_parameter("flip_x", flip)
 	_sprite_lighting(mat)
 	mi.material_override = mat
 	mi.position = pos + Vector3(0, 0.02, 0)
+	mi.layers = 2                                     # effects: lit by the scene, not by spell lights
 	add_child(mi)
 	var l := OmniLight3D.new()
 	l.light_color = e["light"]
@@ -1147,15 +1193,26 @@ func play_effect(name: String, pos: Vector3, loop := false, energy := 1.6) -> vo
 	l.light_volumetric_fog_energy = 2.0
 	l.light_specular = 0.0
 	l.position = pos + Vector3(0, 0.5 if e["ground"] else max(0.4, q.size.y * 0.5), 0)
+	l.light_cull_mask = 0xFFFFF & ~2                 # lights the board, not the effects (no self-lit white-out)
 	add_child(l)
-	live_effects.append({"node": mi, "mat": mat, "e": e, "t": 0.0, "loop": loop, "light": l, "energy": energy})
+	var fx := {"node": mi, "mat": mat, "e": e, "t": 0.0, "loop": loop, "light": l, "energy": energy, "frames": frames}
+	live_effects.append(fx)
+	return fx
+
+func stop_effect(fx: Dictionary) -> void:
+	if fx.is_empty() or not live_effects.has(fx):
+		return
+	fx["node"].queue_free()
+	fx["light"].queue_free()
+	live_effects.erase(fx)
 
 func _animate_effects(delta: float) -> void:
 	for fx in live_effects.duplicate():
 		var e: Dictionary = fx["e"]
+		var frames: Array = fx.get("frames", e["frames"])
 		fx["t"] += delta
 		var total := 0.0
-		for f in e["frames"]: total += f["ms"]
+		for f in frames: total += f["ms"]
 		var ms: float = fx["t"] * 1000.0
 		if not fx["loop"] and ms >= total:
 			fx["node"].queue_free()
@@ -1163,8 +1220,8 @@ func _animate_effects(delta: float) -> void:
 			live_effects.erase(fx)
 			continue
 		var k := fmod(ms, total)
-		var pick = e["frames"][0]
-		for f in e["frames"]:
+		var pick = frames[0]
+		for f in frames:
 			if k < f["ms"]:
 				pick = f
 				break
@@ -1195,7 +1252,8 @@ func _load_sheet(name: String) -> Dictionary:
 	var s := {"tex": tex, "ntex": _tex(base + "_n.png") if FileAccess.file_exists(base + "_n.png") else null,
 		"gtex": _tex(base + "_glow.png"),
 		"frames": frames, "w": float(info["frame_w"]), "h": float(info["frame_h"]),
-		"foot": float(info["foot"]), "ppu": float(info["ppu"]), "anims": info["anims"]}
+		"foot": float(info["foot"]), "ppu": float(info["ppu"]), "anims": info["anims"],
+		"stride": info.get("stride", {}), "body": float(info.get("body_px", info["frame_h"] * 0.7)) / float(info["ppu"])}
 	sheets[name] = s
 	return s
 
@@ -1248,24 +1306,43 @@ func _build_units() -> void:
 		var c := int(u["col"]); var r := int(u["row"])
 		node.position = cell_pos(c, r)
 		var hp := int(u.get("hp", 28))
-		var bar := Sprite3D.new()
-		bar.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-		bar.no_depth_test = true
-		bar.shaded = false
-		bar.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-		bar.pixel_size = 0.035 if mode == "real" else 0.03
-		bar.render_priority = 10
-		bar.position = Vector3(0, q.size.y + q.center_offset.y - q.size.y / 2.0 + 0.15, 0)
-		node.add_child(bar)
+		# the HP bar is drawn in 2D over the view (a 3D bar got blurred by the depth of field into
+		# a soft blob above each unit - the "cyan blobs" over the blue team: blue frame + green fill)
+		var bar := TextureRect.new()
+		bar.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		bar.scale = Vector2.ONE * (3.0 if mode == "real" else 1.0)
+		bar.set_meta("lift", q.size.y + q.center_offset.y - q.size.y / 2.0 + 0.12)
+		_bars().add_child(bar)
 		var unit := {"node": node, "mesh": mesh, "mat": mat, "shadow_mat": tmat, "sheet": s, "col": c, "row": r,
 			"team": int(u["team"]), "yaw": _dir_yaw(u.get("facing", "S")), "anim": "idle", "t": randf() * 2.0,
-			"name": u["name"], "hp": hp, "max_hp": hp, "atk": int(u.get("attack", 10)),
+			"name": u["name"], "id": _unit_id(str(u.get("id", u["name"]))), "hp": hp, "max_hp": hp, "atk": int(u.get("attack", 10)),
 			"def": int(u.get("defence", 5)), "move": int(u.get("move", MOVE)), "jump": int(u.get("jump", JUMP)),
 			"reach": int(u.get("reach", 1)), "done": false, "bar": bar, "hold": false,
-			"tint": Color(1, 1, 1) if int(u["team"]) == 0 else Color(1.0, 0.82, 0.82)}
+			"tint": Color(1, 1, 1) if int(u["team"]) == 0 else Color(1.0, 0.82, 0.82),
+			"phase": randf(), "rate": 0.0, "speed": 0.0, "vel": Vector3.ZERO, "vy": 0.0, "mover": null,
+			"settle": 0.0, "settle_to": 0.0, "loco": "walk", "frozen": 0.0, "offset": Vector3.ZERO}
+		unit["yaw_target"] = unit["yaw"]
+		mat.set_shader_parameter("depth_bias", float(conf.get("depth_bias", 0.35)))
 		units.append(unit)
 		_update_bar(unit)
 		blocked[Vector2i(c, r)] = true
+
+func _bars() -> CanvasLayer:
+	if bars_layer == null:
+		bars_layer = CanvasLayer.new()
+		bars_layer.layer = 2
+		add_child(bars_layer)
+	return bars_layer
+
+func _unit_id(want: String) -> String:
+	# a unique id per unit: its name, the 2nd of the same name "wolf#2", ...
+	var n := 1
+	var id := want
+	while units.any(func(x): return x["id"] == id):
+		n += 1
+		id = "%s#%d" % [want, n]
+	return id
 
 func _dir_yaw(name: String) -> float:
 	# map directions: N = toward row 0 (-z), E = +x, S = +z
@@ -1283,31 +1360,133 @@ func _sprite_dir(world_yaw: float) -> String:
 	var idx := int(round(fposmod(a, TAU) / (TAU / 16.0))) % 16
 	return DIRS[idx]
 
+const LOCO := ["walk", "run", "sneak"]
+
+func face_to(u: Dictionary, yaw: float, snap := false) -> void:
+	# turn a unit toward a world yaw: through the facings in between (conf.turn_rate), or at once
+	u["yaw_target"] = yaw
+	if snap:
+		u["yaw"] = yaw
+
+func strides(u: Dictionary) -> Dictionary:
+	return u["sheet"].get("stride", {})
+
+func has_clip(u: Dictionary, clip: String) -> bool:
+	return clip in u["sheet"]["anims"]
+
+func measured(u: Dictionary) -> bool:
+	for v in strides(u).values():
+		if v is Dictionary and str(v.get("source", "")) in ["rig", "frames"]:
+			return true
+	return false
+
+func top_speed(u: Dictionary) -> float:
+	# the fastest this unit moves with its feet planted (its run, else walk, at the top cadence);
+	# a sheet with no measured stride isn't held back (its feet can't be matched anyway)
+	if not measured(u):
+		return 99.0
+	return M.max_speed(strides(u), has_clip(u, "run"), u["sheet"]["body"])
+
+func clip_length(u: Dictionary, anim: String) -> float:
+	var s: Dictionary = u["sheet"]
+	var key := "%s_%s" % [anim, _sprite_dir(u["yaw"])]
+	if not s["frames"].has(key):
+		for k in s["frames"]:
+			if str(k).begins_with(anim + "_"):
+				key = k
+				break
+	if not s["frames"].has(key):
+		return 0.0
+	var total := 0.0
+	for f in s["frames"][key]: total += f["ms"]
+	return total / 1000.0
+
+func set_locomotion(u: Dictionary, speed: float) -> void:
+	# a moving unit: walk or run by speed, played at speed / stride cycles per second
+	u["speed"] = speed
+	if speed < 0.02:
+		return
+	var lc := M.locomotion(speed, strides(u), has_clip(u, "run"), u["sheet"]["body"], str(u["loco"]))
+	var clip: String = lc["clip"] if has_clip(u, lc["clip"]) else "walk"
+	u["loco"] = clip
+	u["rate"] = lc["rate"]
+	if u["anim"] != clip:
+		var was_loco: bool = u["anim"] in LOCO
+		var keep: float = u["phase"]                 # walk <-> run keeps the step's phase
+		_play(u, clip)
+		if was_loco:
+			u["phase"] = keep
+	u["settle"] = 0.0
+
 func _animate_units(delta: float) -> void:
+	var turn_rate := float(conf.get("turn_rate", 900.0))
 	for u in units:
 		var s: Dictionary = u["sheet"]
-		u["t"] += delta
+		var d := delta
+		if freeze > 0.0 or u.get("frozen", 0.0) > 0.0:
+			d = 0.0                                    # hit-stop: the frame holds
+			u["frozen"] = maxf(0.0, u.get("frozen", 0.0) - delta)
+		u["t"] += d * float(u.get("anim_speed", 1.0))
+		if u.has("yaw_target"):
+			u["yaw"] = M.turn(u["yaw"], u["yaw_target"], turn_rate, d)
 		var anim: String = u["anim"] if u["anim"] in s["anims"] else "idle"
-		var key := "%s_%s" % [anim, _sprite_dir(u["yaw"])]
-		if not s["frames"].has(key):
+		var settling: bool = u["settle"] > 0.0 and anim == "idle"
+		if settling:
+			anim = u["loco"] if u["loco"] in s["anims"] else anim
+		var key := _frame_key(s, anim, u["yaw"])
+		if key == "":
 			continue
 		var fr: Array = s["frames"][key]
-		var total := 0.0
-		for f in fr: total += f["ms"]
-		var t := fmod(u["t"] * 1000.0, total)
-		if u["hold"]:
-			t = min(u["t"] * 1000.0, total - 1.0)
 		var pick = fr[0]
-		for f in fr:
-			if t < f["ms"]:
-				pick = f
-				break
-			t -= f["ms"]
+		if anim in LOCO:
+			# stride-matched: the cycle advances by distance travelled (rate = speed / stride), so
+			# the planted foot stays put; a unit walking with no speed set plays the clip's own rate
+			var rate: float = u["rate"] if u["rate"] > 0.0 else 1000.0 / maxf(1.0, _total(fr))
+			if settling:                                # finish the step: to the next contact pose
+				u["settle"] -= d
+				var to: float = u["settle_to"]
+				var left: float = to - u["phase"]
+				u["phase"] = minf(to, u["phase"] + maxf(rate * 0.7, left / maxf(u["settle"], 0.016)) * d)
+				if u["phase"] >= to - 0.0001 or u["settle"] <= 0.0:
+					u["settle"] = 0.0
+					u["phase"] = fposmod(to, 1.0)
+					u["t"] = 0.0
+			else:
+				u["phase"] = fposmod(u["phase"] + rate * d, 1.0)
+			pick = fr[M.frame_at(u["phase"], fr.size())]
+		else:
+			var total := _total(fr)
+			var t := fmod(u["t"] * 1000.0, total)
+			if u["hold"]:
+				t = min(u["t"] * 1000.0, total - 1.0)
+			for f in fr:
+				if t < f["ms"]:
+					pick = f
+					break
+				t -= f["ms"]
 		var r: Rect2 = pick["rect"]
 		u["mat"].set_shader_parameter("frame", Vector4(r.position.x, r.position.y, r.size.x, r.size.y))
 		u["shadow_mat"].set_shader_parameter("frame", Vector4(r.position.x, r.position.y, r.size.x, r.size.y))
 		u["mat"].set_shader_parameter("flash", 0.18 * (0.5 + 0.5 * sin(Time.get_ticks_msec() / 150.0)) if u == selected else u.get("hit", 0.0))
 		u["mat"].set_shader_parameter("tint", u["tint"] * (0.5 if u["done"] else 1.0))
+
+func _frame_key(s: Dictionary, anim: String, yaw: float) -> String:
+	# the sheet row for this facing; a sheet with fewer directions (8, 4) uses its nearest one
+	var name := _sprite_dir(yaw)
+	var key := "%s_%s" % [anim, name]
+	if s["frames"].has(key):
+		return key
+	var i := DIRS.find(name)
+	for step in [1, -1, 2, -2, 3, -3, 4, -4]:
+		var k2 := "%s_%s" % [anim, DIRS[(i + step + 16) % 16]]
+		if s["frames"].has(k2):
+			return k2
+	return ""
+
+func _total(fr: Array) -> float:
+	var total := 0.0
+	for f in fr: total += f["ms"]
+	return total
 
 # ------------------------------------------------------------------ camera
 
@@ -1335,10 +1514,17 @@ func _build_camera() -> void:
 	_place_camera()
 
 func _place_camera() -> void:
-	var pitch := deg_to_rad(38.0 if mode == "real" else 30.0)
+	var pitch := deg_to_rad(cam_pitch if cam_pitch > 0.0 else (38.0 if mode == "real" else 30.0))
 	var yaw := deg_to_rad(cam_yaw)
 	cam.position = Vector3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)) * cam_dist
 	cam.look_at(pivot.global_position, Vector3.UP)
+	if trauma > 0.0:                                  # shake: offsets on the lens, not the rig
+		var o := M.shake_offset(trauma, clock, 0.32 if mode == "real" else 0.5)
+		cam.h_offset = o.x
+		cam.v_offset = o.y
+	elif cam.h_offset != 0.0 or cam.v_offset != 0.0:
+		cam.h_offset = 0.0
+		cam.v_offset = 0.0
 	if mode == "real" and cam.attributes:
 		# tilt-shift: sharp in a band around the focus (wide enough that the near and mid ground
 		# keep their pixel detail), blurred toward the far edge and the very front
@@ -1347,20 +1533,47 @@ func _place_camera() -> void:
 		cam.attributes.dof_blur_near_distance = cam_dist - 7.0
 		cam.attributes.dof_blur_near_transition = 4.0
 
+func add_trauma(k: float) -> void:
+	trauma = clampf(trauma + k, 0.0, 1.0)
+
+func hit_stop(t := -1.0) -> void:
+	freeze = maxf(freeze, float(conf.get("hitstop", 0.075)) if t < 0.0 else t)
+
+func follow_point(p) -> void:
+	cam_target = p
+
+func _clamp_view(p: Vector3) -> Vector3:
+	# the camera looks inside the map (with the apron around it the screen edge is never empty)
+	var m := 1.0 if apron > 0 else 0.0
+	return Vector3(clampf(p.x, -m, cols + m), p.y, clampf(p.z, -m, rows + m))
+
 func _process(delta: float) -> void:
+	clock += delta
+	if freeze > 0.0:
+		freeze = maxf(0.0, freeze - delta)
+	trauma = maxf(0.0, trauma - float(conf.get("shake_decay", 2.6)) * delta)
+	_move_units(delta)
+	if cam_target != null:
+		var sd := M.smooth_damp(pivot.position, _clamp_view(cam_target), cam_vel, cam_smooth, delta)
+		pivot.position = sd[0]
+		cam_vel = sd[1]
 	var pan := Vector3.ZERO
 	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP): pan.z -= 1
 	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN): pan.z += 1
 	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT): pan.x -= 1
 	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT): pan.x += 1
+	if scripted:
+		pan = Vector3.ZERO
 	if pan != Vector3.ZERO:
+		cam_target = null                             # the player pans: stop following
 		pivot.position += pan.normalized().rotated(Vector3.UP, deg_to_rad(cam_yaw)) * delta * 8.0
-	cam_yaw = lerp(cam_yaw, cam_yaw_target, min(1.0, delta * 8.0))
+	cam_yaw = lerp(cam_yaw, cam_yaw_target, min(1.0, delta * cam_turn_rate))
 	_place_camera()
 	if mode == "fake":
 		_snap_camera()
 	_animate_units(delta)
-	_animate_effects(delta)
+	_animate_effects(0.0 if freeze > 0.0 else delta)
+	_place_overlay()
 	if overlay.get_child_count() > 0:
 		for o in overlay.get_children():
 			o.material_override.albedo_color.a = 0.42 + 0.12 * sin(Time.get_ticks_msec() / 220.0)
@@ -1432,6 +1645,55 @@ func _update_hud(extra: String = "") -> void:
 	hud.text = "%s team's turn%s\n%s %s\nSpace: end turn   Q/E: turn camera   Wheel: zoom   L: light (%s)   B: pixel bands   Esc: menu" % [
 		_team_name(active_team), sel, help, extra, light_name]
 
+func _place_overlay() -> void:
+	# HP bars and damage numbers follow their 3D points in whole pixels
+	if bars_layer != null:
+		for b in bars_layer.get_children():
+			if b.has_meta("lift"):
+				b.visible = false
+	for u in units:
+		var bar: Control = u["bar"]
+		if not is_instance_valid(bar):
+			continue
+		var p: Vector3 = u["node"].position + Vector3(0, float(bar.get_meta("lift", 1.2)), 0)
+		var vis: bool = u.get("bar_on", true) and not cam.is_position_behind(p) and u["node"].visible
+		bar.visible = vis and bar.texture != null
+		if bar.visible:
+			var sp := cam.unproject_position(p)
+			var w: float = bar.texture.get_width() * bar.scale.x
+			var h: float = bar.texture.get_height() * bar.scale.y
+			bar.position = (sp - Vector2(w / 2.0, h)).round()
+	for f in floaters.duplicate():
+		var l: Label = f["node"]
+		f["t"] += get_process_delta_time()
+		if f["t"] >= f["life"] or not is_instance_valid(l):
+			if is_instance_valid(l):
+				l.queue_free()
+			floaters.erase(f)
+			continue
+		var k: float = f["t"] / f["life"]
+		var p3: Vector3 = f["pos"] + Vector3(0, f["rise"] * (1.0 - pow(1.0 - k, 2.0)), 0)
+		if cam.is_position_behind(p3):
+			l.visible = false
+			continue
+		l.visible = true
+		l.position = (cam.unproject_position(p3) - l.size / 2.0).round()
+		l.modulate.a = 1.0 if k < 0.45 else clampf(1.0 - (k - 0.45) / 0.55, 0.0, 1.0)
+
+func float_text(at: Vector3, text: String, colour := Color(1.0, 0.95, 0.4), life := 0.8, size := -1) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", size if size > 0 else (44 if mode == "real" else 16))
+	l.add_theme_color_override("font_color", colour)
+	l.add_theme_color_override("font_outline_color", Color(0.05, 0.02, 0.05))
+	l.add_theme_constant_override("outline_size", 12 if mode == "real" else 4)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_bars().add_child(l)
+	l.reset_size()
+	floaters.append({"node": l, "pos": at, "t": 0.0, "life": life, "rise": 0.9})
+	l.position = (cam.unproject_position(at) - l.size / 2.0).round()
+	return l
+
 func _update_bar(u: Dictionary) -> void:
 	var w := 22
 	var img := Image.create(w + 2, 4, false, Image.FORMAT_RGBA8)
@@ -1468,6 +1730,8 @@ func _unit_at(cell: Vector2i) -> Variant:
 	return null
 
 func _unhandled_input(event: InputEvent) -> void:
+	if scripted:
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_ESCAPE:
@@ -1556,6 +1820,7 @@ func _overlay_cell(cell: Vector2i, colour: Color, glow: Color) -> void:
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.emission_enabled = true
 	mat.emission = glow
+	mat.emission_energy_multiplier = 0.3        # tinted, not blown out to white by the bloom
 	m.material_override = mat
 	m.position = cell_pos(cell.x, cell.y) + Vector3(0, 0.02, 0)
 	overlay.add_child(m)
@@ -1598,34 +1863,162 @@ func _path_to(cell: Vector2i) -> Array:
 	return path
 
 func _walk(u: Dictionary, path: Array) -> void:
+	# along the grid path: eased start and stop, corners rounded, turning through the facings,
+	# hops on level changes, walk/run by speed at the stride's rate (pp_motion)
 	phase = "busy"
 	_clear_range()
 	blocked.erase(Vector2i(u["col"], u["row"]))
-	_play(u, "walk")
-	var tw := create_tween()
-	for i in range(1, path.size()):
-		var a: Vector2i = path[i - 1]
-		var b: Vector2i = path[i]
-		var to := cell_pos(b.x, b.y)
-		var hop := absf(top_y(b.x, b.y) - top_y(a.x, a.y)) > 0.01
-		tw.tween_callback(func(): u["yaw"] = atan2(float(b.y - a.y), float(b.x - a.x)))
-		if hop:
-			var mid := (cell_pos(a.x, a.y) + to) / 2.0 + Vector3(0, 0.6, 0)
-			tw.tween_property(u["node"], "position", mid, 0.13)
-			tw.tween_property(u["node"], "position", to, 0.13)
-		else:
-			tw.tween_property(u["node"], "position", to, 0.26)
-	tw.tween_callback(func():
+	var pts := []
+	for c in path:
+		pts.append(Vector2(c.x + 0.5, c.y + 0.5))
+	move_along(u, pts, minf(move_speed, top_speed(u)), func():
 		var last: Vector2i = path[path.size() - 1]
 		u["col"] = last.x; u["row"] = last.y
 		blocked[last] = true
+		if scripted:
+			action_done.emit()
+		else:
+			_enter_act(u))
+
+func ground_at(x: float, z: float, radius := 0.0) -> float:
+	# the ground under a point: the highest map cell its foot circle touches (water: its level)
+	var best := -INF
+	var pts := [Vector2(x, z)]
+	if radius > 0.0:
+		pts += [Vector2(x - radius, z), Vector2(x + radius, z), Vector2(x, z - radius), Vector2(x, z + radius)]
+	for q in pts:
+		var c := clampi(int(floor(q.x)), 0, cols - 1)
+		var r := clampi(int(floor(q.y)), 0, rows - 1)
+		if terrain[r][c] == "water":
+			continue
+		best = maxf(best, top_y(c, r))
+	if best == -INF:
+		best = float(map.get("water_level", 0.15))
+	return best
+
+func _round_path(pts: Array, radius: float) -> Array:
+	# corners cut by a quadratic curve `radius` before and after each turn (sampled)
+	if pts.size() < 3 or radius <= 0.0:
+		return pts
+	var out := [pts[0]]
+	for i in range(1, pts.size() - 1):
+		var a: Vector2 = pts[i - 1]
+		var b: Vector2 = pts[i]
+		var c: Vector2 = pts[i + 1]
+		var din := (b - a).normalized()
+		var dout := (c - b).normalized()
+		if din.dot(dout) > 0.995:
+			out.append(b)
+			continue
+		var r := minf(radius, minf(a.distance_to(b), b.distance_to(c)) * 0.5)
+		var p0 := b - din * r
+		var p2 := b + dout * r
+		for k in 7:
+			var t := float(k) / 6.0
+			out.append(p0.lerp(b, t).lerp(b.lerp(p2, t), t))
+	out.append(pts[pts.size() - 1])
+	return out
+
+func move_along(u: Dictionary, pts: Array, speed: float, done: Callable = Callable(), round_corners := true) -> void:
+	# move a unit through ground points (Vector2 x, z) at up to `speed` tiles/s; done() at the end.
+	# Its height follows the ground (hops over steps); the facing turns toward the way it goes.
+	var p0: Vector3 = u["node"].position
+	var line := [Vector2(p0.x, p0.z)]
+	for q in pts:
+		var v: Vector2 = q if q is Vector2 else Vector2(q.x, q.z)
+		if v.distance_to(line[line.size() - 1]) > 0.01:
+			line.append(v)
+	if round_corners:
+		line = _round_path(line, float(conf.get("corner", 0.32)))
+	var lens := [0.0]
+	for i in range(1, line.size()):
+		lens.append(lens[i - 1] + line[i].distance_to(line[i - 1]))
+	var total: float = lens[lens.size() - 1]
+	if total < 0.01:
+		if done.is_valid():
+			done.call()
+		return
+	# level changes along the way (where the feet cross a cell border onto other ground)
+	var steps := []
+	var n := int(ceil(total / 0.04))
+	var prev_y := ground_at(line[0].x, line[0].y)
+	for i in range(1, n + 1):
+		var s := total * float(i) / float(n)
+		var q := _line_at(line, lens, s)
+		var y := ground_at(q.x, q.y)
+		if absf(y - prev_y) > 0.01:
+			steps.append([s, prev_y, y])
+		prev_y = y
+	u["mover"] = {"line": line, "lens": lens, "total": total, "s": 0.0, "want": speed, "steps": steps,
+		"done": done, "y0": ground_at(line[0].x, line[0].y)}
+	u["vy"] = 0.0
+	if u["speed"] < 0.05:
+		u["speed"] = 0.0
+
+func stop_moving(u: Dictionary) -> void:
+	u["mover"] = null
+	u["speed"] = 0.0
+	if u["anim"] in LOCO:
 		_play(u, "idle")
-		_enter_act(u))
+
+func _line_at(line: Array, lens: Array, s: float) -> Vector2:
+	for i in range(1, line.size()):
+		if s <= lens[i] or i == line.size() - 1:
+			var seg: float = lens[i] - lens[i - 1]
+			var k := 0.0 if seg < 0.0001 else clampf((s - lens[i - 1]) / seg, 0.0, 1.0)
+			return line[i - 1].lerp(line[i], k)
+	return line[line.size() - 1]
+
+func _path_y(m: Dictionary, s: float, q: Vector2) -> float:
+	var hop := float(conf.get("hop", 0.14))
+	var w := 0.32                                     # the hop starts/ends this far from the border
+	for st in m["steps"]:
+		var d: float = s - float(st[0])
+		if absf(d) < w:
+			return M.hop_y((d + w) / (2.0 * w), float(st[1]), float(st[2]), hop)
+	return ground_at(q.x, q.y)
+
+func _move_units(delta: float) -> void:
+	if freeze > 0.0:
+		return
+	for u in units:
+		var m = u["mover"]
+		if m == null:
+			continue
+		var remaining: float = m["total"] - m["s"]
+		var sp := M.path_speed(u["speed"], m["want"], remaining, float(conf.get("accel", 14.0)),
+			float(conf.get("decel", 18.0)), delta)
+		sp = maxf(sp, 0.35 if remaining > 0.02 else 0.0)  # never stalls short of the end
+		m["s"] = minf(m["total"], m["s"] + sp * delta)
+		var q := _line_at(m["line"], m["lens"], m["s"])
+		var ahead := _line_at(m["line"], m["lens"], minf(m["total"], m["s"] + 0.12))
+		if ahead.distance_to(q) > 0.01:
+			face_to(u, atan2(ahead.y - q.y, ahead.x - q.x))
+		u["node"].position = Vector3(q.x, _path_y(m, m["s"], q), q.y) + u.get("offset", Vector3.ZERO)
+		set_locomotion(u, sp)
+		if m["s"] >= m["total"] - 0.0001:
+			u["mover"] = null
+			u["speed"] = 0.0
+			_play(u, "idle")
+			var cb: Callable = m["done"]
+			if cb.is_valid():
+				cb.call()
 
 func _play(u: Dictionary, anim: String, once := false) -> void:
+	if anim == "idle" and u["anim"] in LOCO and u["anim"] in u["sheet"]["anims"] and not once:
+		# stopping: the walk finishes its step onto the next contact pose, then idles
+		u["settle"] = float(conf.get("settle", 0.16))
+		u["settle_to"] = M.settle_target(u["phase"])
+		if u["settle_to"] < u["phase"]:
+			u["settle_to"] += 1.0
+	elif anim != "idle":
+		u["settle"] = 0.0
+	if anim in LOCO and u["anim"] not in LOCO:
+		u["phase"] = 0.0
 	u["anim"] = anim
 	u["t"] = 0.0
 	u["hold"] = once
+	u["anim_speed"] = 1.0
 
 func _enter_act(u: Dictionary) -> void:
 	attack_cells = {}
@@ -1649,32 +2042,49 @@ func _damage(a: Dictionary, t: Dictionary) -> int:
 		dmg = int(dmg * 5 / 4)
 	return max(1, dmg)
 
-func _attack(a: Dictionary, t: Dictionary) -> void:
+func _attack(a: Dictionary, t: Dictionary, dmg := -1, fx := "", fx_colour := Color(0, 0, 0, 0)) -> void:
+	# dmg / fx: autoplay overrides (the blow's damage; an effect played on the target as it lands)
 	phase = "busy"
 	_clear_range()
-	var dmg := _damage(a, t)
-	a["yaw"] = atan2(float(t["row"] - a["row"]), float(t["col"] - a["col"]))
-	t["yaw"] = atan2(float(a["row"] - t["row"]), float(a["col"] - t["col"]))
+	if dmg < 0:
+		dmg = _damage(a, t)
+	face_to(a, atan2(float(t["row"] - a["row"]), float(t["col"] - a["col"])))
+	face_to(t, atan2(float(a["row"] - t["row"]), float(a["col"] - t["col"])))
 	var tw := create_tween()
 	var magic: Color = SPELL.get(a["name"], Color(0, 0, 0, 0))
+	var clip := "cast" if magic.a > 0.0 and "cast" in a["sheet"]["anims"] else "attack"
+	var home: Vector3 = a["node"].position
+	var toward: Vector3 = t["node"].position - home
+	toward.y = 0.0
+	toward = toward.normalized() if toward.length() > 0.001 else Vector3(0, 0, 1)
+	# anticipation: a short wind-up lean away from the target (and the turn finishes)
+	tw.tween_property(a["node"], "position", home - toward * 0.07, float(conf.get("anticipation", 0.12))) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	if magic.a > 0.0:                             # casters: a charge light in their hands
-		spell_light(a["node"].position + Vector3(0, 0.9, 0), magic, 2.5, 0.6, 3.0, 0)
-	if "attack" in a["sheet"]["anims"]:
-		_play(a, "attack", true)
-		tw.tween_interval(0.45)
+		spell_light(home + Vector3(0, 0.9, 0), magic, 2.5, 0.6, 3.0, 0)
+	if clip in a["sheet"]["anims"]:
+		tw.tween_callback(func(): _play(a, clip, true))
+		# the blow lands on the clip's strike frame (the cast pose for spells), not on a timer
+		var hit_at := M.hit_time(clip, clip_length(a, clip))
+		tw.tween_property(a["node"], "position", home + toward * 0.1, maxf(0.05, hit_at)) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
 	else:                                         # no attack clip: lunge at the target
-		var home: Vector3 = a["node"].position
-		var toward: Vector3 = (t["node"].position - home).normalized() * 0.35
-		tw.tween_property(a["node"], "position", home + toward, 0.12)
-		tw.tween_property(a["node"], "position", home, 0.16)
+		tw.tween_property(a["node"], "position", home + toward * 0.35, 0.12).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
 	tw.tween_callback(func():
+		hit_stop()                                 # both freeze a moment: the hit lands
+		a["frozen"] = float(conf.get("hitstop", 0.075))
+		add_trauma(float(conf.get("shake", 0.06)) * (2.2 if magic.a > 0.0 else 3.0))
+		_knockback(t, toward)
 		t["hp"] = max(0, t["hp"] - dmg)
 		var at: Vector3 = t["node"].position + Vector3(0, 0.7, 0)
-		if magic.a > 0.0:
+		if fx != "":
+			play_effect(fx, t["node"].position + Vector3(0, 0.1, 0), false, 2.5)
+			spell_light(at, fx_colour if fx_colour.a > 0.0 else Color(1.0, 0.85, 0.6), 2.4, 0.35, 3.0, 10)
+		elif magic.a > 0.0:
 			spell_light(at, magic, 5.0, 0.8, 5.0, 18)
-			var fx := _effect_for(a)
-			if fx != "":
-				play_effect(fx, t["node"].position, false, 3.0)
+			var cfx := _effect_for(a)
+			if cfx != "":
+				play_effect(cfx, t["node"].position, false, 3.0)
 		else:
 			spell_light(at, Color(1.0, 0.78, 0.45), 1.6, 0.25, 2.5, 8)
 		_update_bar(t)
@@ -1682,8 +2092,11 @@ func _attack(a: Dictionary, t: Dictionary) -> void:
 		t["hit"] = 0.6
 		if "hurt" in t["sheet"]["anims"] and t["hp"] > 0:
 			_play(t, "hurt", true))
-	tw.tween_method(func(v): t["hit"] = v, 0.6, 0.0, 0.35)
-	tw.tween_interval(0.25)
+	tw.tween_interval(float(conf.get("hitstop", 0.075)))
+	tw.tween_method(func(v): t["hit"] = v, 0.6, 0.0, 0.3)
+	# follow-through: the attacker eases back home while its clip plays out
+	tw.parallel().tween_property(a["node"], "position", home, 0.3).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	tw.tween_interval(float(conf.get("follow_through", 0.18)))
 	tw.tween_callback(func():
 		if t["hp"] > 0:
 			_play(t, "idle")
@@ -1691,6 +2104,23 @@ func _attack(a: Dictionary, t: Dictionary) -> void:
 			_finish(a)
 		else:
 			_kill(t, a))
+
+func _knockback(t: Dictionary, dir: Vector3) -> void:
+	# pushed back a little by the blow, then it steps back onto its cell
+	if not is_instance_valid(t["node"]):
+		return
+	var k := float(conf.get("knockback", 0.22))
+	var tw := create_tween()
+	tw.tween_method(func(v):
+		if is_instance_valid(t["node"]):
+			t["offset"] = dir * v
+			var base := cell_pos(int(t["col"]), int(t["row"]))
+			t["node"].position = base + t["offset"], 0.0, k, 0.1).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT).set_delay(float(conf.get("hitstop", 0.075)))
+	tw.tween_method(func(v):
+		if is_instance_valid(t["node"]):
+			t["offset"] = dir * v
+			var base := cell_pos(int(t["col"]), int(t["row"]))
+			t["node"].position = base + t["offset"], k, 0.0, 0.28).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
 
 func _effect_for(a: Dictionary) -> String:
 	if effects.has(a["name"]):
@@ -1710,27 +2140,15 @@ func _kill(t: Dictionary, a: Dictionary) -> void:
 	tw.tween_callback(func():
 		blocked.erase(Vector2i(t["col"], t["row"]))
 		units.erase(t)
+		if is_instance_valid(t["bar"]):
+			t["bar"].queue_free()
 		t["node"].queue_free()
 		_play(a, "idle")
 		_finish(a))
 
-func _number(t: Dictionary, dmg: int) -> void:
-	var l := Label3D.new()
-	l.text = str(dmg)
-	l.font_size = 64 if mode == "real" else 40
-	l.pixel_size = 0.008 if mode == "real" else 0.012
-	l.outline_size = 14
-	l.modulate = Color(1.0, 0.95, 0.4)
-	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	l.no_depth_test = true
-	l.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST if mode == "fake" else BaseMaterial3D.TEXTURE_FILTER_LINEAR
-	l.position = t["node"].position + Vector3(0, 1.6, 0)
-	add_child(l)
-	var tw := create_tween()
-	tw.set_parallel(true)
-	tw.tween_property(l, "position", l.position + Vector3(0, 0.9, 0), 0.8)
-	tw.tween_property(l, "modulate:a", 0.0, 0.8).set_delay(0.35)
-	tw.chain().tween_callback(l.queue_free)
+func _number(t: Dictionary, dmg: int, text := "", colour := Color(1.0, 0.95, 0.4)) -> void:
+	# a damage number in 2D over the view (crisp: no depth-of-field blur), rising from the unit
+	float_text(t["node"].position + Vector3(0, number_lift, 0), text if text != "" else str(dmg), colour)
 
 func _finish(u: Dictionary) -> void:
 	_clear_range()
@@ -1738,6 +2156,9 @@ func _finish(u: Dictionary) -> void:
 		u["done"] = true
 	selected = null
 	phase = "select"
+	if scripted:                       # the script passes turns and calls the winner
+		action_done.emit()
+		return
 	for team in [0, 1]:
 		var alive := units.filter(func(x): return x["team"] == team)
 		if alive.is_empty():
@@ -1785,7 +2206,8 @@ LIGHTING = {
         "fog": [0.6, 0.72, 0.9], "fog_density": 0.0015, "volumetric": 0.0,
         "torches": 0.2, "rim": 0.25, "blob": 0.5, "exposure": 0.93, "white": 1.6, "glow": 0.55,
         "saturation": 1.12, "contrast": 1.05,
-        "water_deep": [0.03, 0.16, 0.36], "water_shallow": [0.1, 0.4, 0.7], "sparkle": 3.0},
+        "water_deep": [0.03, 0.16, 0.36], "water_shallow": [0.1, 0.4, 0.7], "sparkle": 3.0,
+        "water_spec": 0.35, "glare": 0.35},
     "sunset": {
         "sun": [1.0, 0.6, 0.32], "sun_energy": 1.3, "sun_angle": [-20, -60],
         "fill": [0.42, 0.5, 1.0], "fill_energy": 0.35, "fill_angle": [-55, 120],
@@ -1866,8 +2288,29 @@ def add_unit(project: Path, name: str, sheet_png, ppu: float = 42.0, glow: bool 
     idle = [f for f in frames if f["filename"].startswith("idle_")] or frames
     anims = sorted({f["filename"].split(" ")[0].rsplit("_", 1)[0] for f in frames})
     info = {"frame_w": w, "frame_h": h, "foot": _foot_row(sheet, idle), "ppu": ppu, "anims": anims}
+    info.update(unit_stride(sheet_png, meta, ppu))
     (folder / f"{name}.unit.json").write_text(json.dumps(info), encoding="utf-8")
     return folder
+
+
+def unit_stride(sheet_png, meta: dict, ppu: float) -> dict:
+    """{"stride": {clip: {units, px, cycle_ms, frames}}, "body_px"} for unit.json: the sheet's
+    measured stride (motion.py; sheet json meta.stride) in tiles at this ppu, or one measured
+    from the frames now (else a default from the body height). board.gd plays walk/run at
+    speed / stride cycles per second, so the feet stay planted."""
+    from .motion import measure_sheet
+    m = meta.get("meta", {}) or {}
+    stride, body = dict(m.get("stride") or {}), m.get("body_px")
+    if not stride:
+        try:
+            got = measure_sheet(sheet_png)
+            stride, body = got["stride"], got["body_px"]
+        except Exception:  # noqa: BLE001 - odd sheets: the runtime's default stride
+            stride = {}
+    out = {k: {"units": round(float(v["px"]) / ppu, 4), "px": v["px"], "cycle_ms": v.get("cycle_ms"),
+               "frames": v.get("frames"), "source": v.get("source", "")}
+           for k, v in stride.items() if v.get("px")}
+    return {"stride": out, "body_px": body}
 
 
 def add_effect(project, name: str, sheet_png, ppu: float = 42.0, loop: bool | None = None,
@@ -1906,7 +2349,8 @@ def add_effect(project, name: str, sheet_png, ppu: float = 42.0, loop: bool | No
         loop = bool(spec[3]) if loop is None and spec else bool(loop)
         ground = kind in ("magic_circle", "dust", "heal") if ground is None else ground
     info = {"frame_w": frames[0][2], "frame_h": frames[0][3], "frames": frames, "ppu": ppu,
-            "loop": loop, "ground": ground, "light": glow_colour(png, glow) or [1.0, 0.8, 0.5]}
+            "loop": loop, "ground": ground, "light": glow_colour(png, glow) or [1.0, 0.8, 0.5],
+            "tags": {t["name"]: [int(t["from"]), int(t["to"])] for t in tags if "name" in t}}
     (folder / f"{name}.effect.json").write_text(json.dumps(info), encoding="utf-8")
     return folder
 
@@ -1927,7 +2371,8 @@ def board_look(tiles, tile_px: int):
 def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str = "HD-2D Tactics",
               iso: bool = True, tile_px: int = 32, ppu: float = 42.0, lighting: str = "sunset",
               bands: float = 4.0, effects: dict | None = None, place_effects=(),
-              tiles=None, weather=None, water: str = "classic") -> list[Path]:
+              tiles=None, weather=None, water: str = "classic", autoplay=None, ui_kit=None,
+              unit_ppu: dict | None = None, apron: int = 0, iso_scale: dict | None = None) -> list[Path]:
     """Write the Godot project: menu, real 3D and fake 3D scenes (and the iso 2D look when
     iso_scene is available). units: {name: sheet.png from turnaround --animate}. lighting: the
     time of day it starts at (LIGHTING: dawn, noon, sunset, night; L cycles them), bands: toon
@@ -1939,7 +2384,17 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
     False = the procedural neo 16-bit look. weather: rain | storm | snow | fog | god_rays | leaves |
     ... (weather.py kinds, a saved weather asset, or a list): the effect over the board + matching
     light (weather_hd2d.install; needs `godot --import`). water: classic | pixel (WATER_SHADER_PIXEL:
-    banded pixel ripples, shore foam, reflections)."""
+    banded pixel ripples, shore foam, reflections). autoplay: a timeline (dict or .json path,
+    hd2d_autoplay) written to res://autoplay.json; the game plays it with `--autoplay` (or on its
+    own when it has "auto": true). ui_kit: a UI kit folder (uikit.py) whose pieces the autoplay HUD
+    uses (res://ui/). unit_ppu: {unit name: pixels per tile} for sheets drawn at another scale (a
+    144x96 sheet next to 96x64 ones: 1.5 x ppu). apron: cells of scenery drawn around the map
+    (the land goes on past its edge, so a camera near the edge never shows the void; not
+    walkable). iso_scale: {unit: k} the iso look rescales those sheets by (default: the smallest
+    unit_ppu / each one's, so all share one world scale and nothing is enlarged).
+
+    Every project gets the game runtime in res://pp_runtime/ (pp_motion.gd + motion.json): board.gd
+    moves, turns, animates (stride-matched feet), hops, hit-stops and follows with it."""
     if water not in WATER_LOOKS:
         raise ValueError(f"Unknown water look '{water}' (use {', '.join(WATER_LOOKS)})")
     out = Path(out_dir)
@@ -1951,16 +2406,20 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
             raise ValueError(f"The map has a unit '{u.name}' but no sprite sheet for it "
                              f"(given: {', '.join(sorted(known)) or 'none'}).")
     written = [d.save(out / "map" / "map.json")]
+    from .diorama import BLOCKING_PROPS
+    mj = json.loads(written[0].read_text(encoding="utf-8"))
     if place_effects:
-        mj = json.loads(written[0].read_text(encoding="utf-8"))
         mj["effects"] = [{"name": n, "col": int(c), "row": int(r)} for n, c, r in place_effects]
-        written[0].write_text(json.dumps(mj), encoding="utf-8")
+    mj["blocking"] = sorted(BLOCKING_PROPS | {"bush", "pot"})   # board.gd: these props block
+    if apron:
+        mj["apron"] = int(apron)
+    written[0].write_text(json.dumps(mj), encoding="utf-8")
     written.append(write_lighting(out, lighting, bands))
     for ename, sheet in (effects or {}).items():
         written.append(add_effect(out, ename, sheet, ppu))
     write_textures(d, out / "map" / "tex", tile_px, look=board_look(tiles, tile_px))
     for uname, sheet in units.items():
-        written.append(add_unit(out, uname, sheet, ppu))
+        written.append(add_unit(out, uname, sheet, (unit_ppu or {}).get(uname, ppu)))
     (out / "shaders").mkdir(exist_ok=True)
     files = {
         "project.godot": PROJECT.format(name=name),
@@ -1976,6 +2435,19 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
         p = out / rel
         p.write_text(text, encoding="utf-8")
         written.append(p)
+    from .godot_runtime import install as install_runtime
+    from .motion import write_motion_json
+    written += install_runtime(out, ["pp_motion.gd"])          # res://pp_runtime/
+    written.append(write_motion_json(out / "pp_runtime"))
+    from .hd2d_autoplay import install as install_autoplay
+    if autoplay is not None:
+        from .hd2d_autoplay import validate, unit_ids
+        script = autoplay if isinstance(autoplay, dict) else json.loads(Path(autoplay).read_text(encoding="utf-8"))
+        errs = validate(script, unit_ids([u.name for u in d.units]))
+        if errs:
+            raise ValueError("Autoplay script: " + "; ".join(errs[:6]))
+        autoplay = script
+    written += install_autoplay(out, autoplay, ui_kit)
     if weather:
         from .weather_hd2d import install
         written += install(out, weather, tod=lighting, ppu=ppu)
@@ -1986,5 +2458,8 @@ def make_hd2d(out_dir, units: dict, diorama: Diorama | None = None, *, name: str
             write_iso_scene = None
         if write_iso_scene is not None:
             sheets = {n: out / "units" / n / f"{n}.png" for n in units}
-            written += write_iso_scene(d, out, sheets, tile=tile_px)
+            own = {n: float((unit_ppu or {}).get(n, ppu)) for n in units}
+            base = min(own.values()) if own else ppu              # one world scale: only shrink
+            scale = iso_scale or {n: base / own[n] for n in units}
+            written += write_iso_scene(d, out, sheets, tile=tile_px, unit_scale=scale)
     return written

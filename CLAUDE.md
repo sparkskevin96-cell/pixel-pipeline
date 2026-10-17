@@ -777,6 +777,77 @@ wants terse answers and fixes over polish.
   is make_terrain_tiles since make_tileset exists); CLI `cli_agent.py`: make/character/jobs/library/
   project/export with --json. Tests tests/test_agent.py (fake ComfyUI, robot draft, temp Godot/Unity
   projects, stdio).
+- **HD-2D autoplay (2026-10-16, Kevin: "a video of fake gameplay, one iso and one top-down")**
+  (`hd2d_autoplay.py`, make_hd2d(autoplay=dict|json, ui_kit=folder, unit_ppu={name: ppu})): a deterministic
+  timeline in res://autoplay.json run by res://autoplay.gd when the game starts with `--autoplay` (or
+  "auto": true); `--autoplay-quit` quits at the end (Movie Maker), `--autoplay-log` prints steps. board.gd:
+  `scripted` (no input, no auto turn pass, `action_done` signal after walk/attack/finish), cam_pitch /
+  cam_turn_rate / number_lift vars, unit ids (name, name#2..), prop_nodes per cell, bush/pot/cave props,
+  play_effect(tag=, scale=, flip=) returns the fx (+stop_effect), effect.json "tags" from frameTags, effects
+  on layer 2 out of spell/effect lights (no self-lit white-outs), _attack(dmg=, fx=), sprite shader lean +
+  flip_x. Modes: tactics (select/range/move/attack/cast/heal/end_turn banners, UI-kit unit panel + turn
+  plate) and action (goto waypoints 8-way, swing+knockback, hurt+blink, die+poof+drops, cut bushes,
+  spawn/pickup hearts/coins/gems, ALttP HUD from the kit). Steps documented in the module docstring;
+  points are cell coords ([c, r] = centre); "when" = wait for the clock. Tests tests/test_hd2d_autoplay.py
+  (headless runs twice, same HP/time). Sample: Pictures/PixelPipeline/hd2d_gameplay/{iso,action} (+ _make/
+  build.py render.py encode.py; QA v3 tiles, QA/Neo16 characters + re-skins) -> hd2d_gameplay_iso.mp4 (48 s)
+  / hd2d_gameplay_action.mp4 (31 s) + _small.mp4 (720p). Movie Maker 1080p: ~70 s per 48 s clip.
+- **Playtests (2026-10-16, Kevin: "a tiny map for each style" he can PLAY to point out issues; "game play in
+  the long run")** (`playtest.py`, `godot_runtime/`): `build_playtest(style, out_dir, Sources)` / `build_all(root)`
+  for tactics | action | platformer | iso | cards -> Pictures/PixelPipeline/playtest/<style>/ + Play_/Edit_<style>.bat
+  + README.txt. Built through the app's own paths: make_hd2d (tactics = real3d.tscn main scene, 10x8 river crossing;
+  iso = res://iso/iso.tscn of the same map; action = play_action.tscn running godot_runtime/action_play.gd, which
+  EXTENDS res://autoplay.gd and reuses its HUD/swing/hit/die/drops/pickups/projectiles with live input), and
+  gameexport.export_to_game + manifest into fresh Godot projects (platformer: side-scroller staging project, tilegen
+  side set (terrain painting + one-way platforms), backgrounds parallax, effects, UI kit, hero re-rendered E/W + jump by
+  drawnrig.drawn_sheets(directions=2) bending the EXISTING keys on the CPU (a _NoGPU client makes any draw request
+  fail -> falls back to the 16-dir sheet); cards: 17 cards made with cards.py on the CPU (set_art from characters'
+  painted pictures, items, a prop, effect peak frames, the QA Fire card), exported Card.tscn per card, enemies = library
+  characters + reskin.py re-skins staged as characters). Sources are read only; staging projects live in
+  <root>/_studio/projects (not the user's project list). Runtime (package data `godot_runtime/*.gd`, spec DATAS):
+  pp_debug.gd autoload PPDebug (F1 hint, F3 overlay = FPS + debug_state() of nodes in group "pp_debug" + 2D collision
+  shapes / debug_draw(), F12 report -> res://reports/<style>_<time>.png/.txt with the last 3 s of state + inputs, F5
+  restart; `--pp-selftest` runs selftest() coroutines -> "PPTEST {json}", `--pp-shot=<png>` shot_setup() + screenshot),
+  pp_tactics.gd autoload PPTactics (AI for team != 0 on board.gd via `scripted` + action_done, and on iso.gd via its
+  select/move_selected/attack API; blocks input while it plays), side_game/side_player/side_enemy/pickup_2d (platformer:
+  coyote + buffer + variable jump, stomp, arrows, pits), card_game.gd (map fight -> fight|rest|shop -> elite|rest ->
+  boss, draw/discard/exhaust, energy, block, strength, poison/burn, intents, pick 1 of 3, deck viewer, shop/remove),
+  pp_manifest.gd (manifest by id/name). All five pass headless selftests (AI turns, movement, a whole card run).
+  Tests tests/test_playtest.py. Known then (iso scale, cyan blobs, pond glare: fixed by the game runtime below): iso sprites at native sheet size (knight 144x96
+  vs elf 96x64 look different sizes), side hero drawn at the keys' 30 deg (true side view needs GPU drawings), soft cyan
+  blobs float above the blue units on the tactics board (cause not checked), pond glare at noon in the action map.
+- **Game runtime: clipping + footsteps + smooth motion (2026-10-17, Kevin: "bad clipping, footsteps
+  don't work well, looks very clunky"; gameplay matters long term)**. One runtime, used by the HD-2D
+  board, autoplay, the playtests and shipped with every export (`gameexport.install_runtime` ->
+  `<subdir>/pp_runtime/` + manifest "runtime"/"motion"): `godot_runtime/pp_motion.gd` (static: approach
+  accel/decel, path_speed, turn at 900 deg/s through the 16 facings, locomotion = walk/run by speed at
+  speed/stride cycles/s with cadence caps, settle to the next contact pose, hop_y, ground_follow,
+  smooth_damp camera, shake_offset, hit_time), `pp_sprite3d.gdshader` (= hd2d.SPRITE_SHADER: every
+  pixel takes the FEET's depth + depth_bias 0.35 toward the camera -> no cutting into ground/walls/
+  stairs/props/each other, still hidden by what's in front; whole-screen-pixel snap), `motion.json`
+  (`motion.MOTION`; Unity gets the json + the algorithms in docs/FOR_CLAUDE.md). board.gd: units have
+  yaw_target/phase/rate/speed/mover; `move_along` (rounded corners, eased, hops on level changes via
+  ground_at), `_walk` uses it; attacks = anticipation lean, blow on the clip's strike frame
+  (`hit_time`), hit-stop (`freeze`), knockback offset, trauma shake, follow-through; damped camera
+  (`cam_target`, autoplay/pp_tactics use it); HP bars + damage numbers in 2D (the floating "soft cyan
+  blobs" were the 3D Sprite3D HP bars (blue frame + green fill) blurred by depth of field); props in
+  map.json "blocking" (diorama.BLOCKING_PROPS + bush/pot: trees/houses/wells no longer walk-through)
+  + `obstacles` radii; `apron` (scenery cells past the map edge, make_hd2d(apron=)); water light()
+  with capped banded glare ("water_spec"/"glare" per preset). action_play.gd: velocity hero, circle
+  collision vs cell boxes + prop circles with push-out sliding, foes the same. Strides: `motion.py`
+  (rig_stride: planted ankle/paw speed x cycle; measure_sheet rig|frames|default; px_per_unit = keys
+  camera scale or idle height) -> sheet json meta.stride/body_px (library.annotate_stride after every
+  render), unit.json stride (tiles), manifest animations[clip].stride + px_scale/world_ppu/body_px.
+  Footsteps at the source: autorig walk/run = planted-feet 2-bone IK gait (`_Moves.gait`, GAIT reach/
+  duty; the old sine swing slid the feet), quadruped strides 0.2/0.36 -> 0.34/0.5 leg; per-clip frame
+  counts everywhere (anim3d.frames_of / dict frames, export.pack_rows, normals rows=, AnimatedSet.
+  counts), `Style.locomotion_frames` 12 (new characters; old sheets keep their counts: library.
+  frames_for), `library.rerender_locomotion(ch, 12|16)` (CPU only: `drawnrig.no_new_drawings()` makes
+  any GPU request skip/raise NeedsDrawing - without it the quality loop RETRIED a muddled back view on
+  the GPU). Iso: `rescale_sheet`/`downscale_pixel_art` + make_hd2d(iso_scale=) put all units on one
+  scale; per-unit step_time/walk_scale from stride. Platformer hero: speed_scale from stride. Cards:
+  sprites at whole scales by px_scale + the hero's painted portrait. Playtests: `locomotion_copies`
+  (staged 12-frame planted-feet copies, `_studio/projects/loco-*`). Tests: tests/test_runtime_motion.py.
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 
@@ -807,6 +878,12 @@ wants terse answers and fixes over polish.
 - Images are numpy uint8 RGBA (H, W, 4); sprite alpha is binary (0/255).
 - Perceptual maths in Lab via `color.py`.
 - Run `pytest` before pushing; the UI test runs headless (`QT_QPA_PLATFORM=offscreen`).
+  Faster: `python tools/run_tests.py [--jobs 4] [-- pytest args]` = several pytest processes over
+  file groups balanced by tests/file_times.json (`--update-times` refreshes it; CI runs
+  `--split 2 --part N`, 2 jobs per OS). conftest sets PIXEL_KD_WORKERS=-1 (drawnrig's cKDTree
+  queries on every core, same answers; app default 1): those searches were ~60% of the
+  drawn-character tests (2026-10-16: serial suite 36 -> ~24 min). Tests run at idle priority
+  (conftest; PIXEL_TEST_PRIORITY=normal off); the runner defaults to <= 3 processes.
 - Keep workflows lean (Actions minutes are free while the repo is public).
 
 ## Repo and builds

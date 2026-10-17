@@ -327,11 +327,57 @@ def _describe(asset, kind: str, files: list[Path], base: Path, root: Path, engin
             pass
     if kind == "character":
         entry["body"] = extra.get("body", "person")
+        entry.update(_motion_info(asset, sheet, entry, float(st.ppu)))
     if kind == "effect":
         entry["effect"] = {k: extra.get(k) for k in ("effect", "theme", "blend") if extra.get(k)}
     entry["has_normal_map"] = "normal_map" in roles
     entry["has_glow_map"] = "glow_map" in roles
     return entry
+
+
+def _motion_info(asset, sheet: Path, entry: dict, ppu: float) -> dict:
+    """World scale + stride for a character (motion.py): px_scale (how much bigger than the
+    library's 64 px-person scale its sheet is drawn), world_ppu (= ppu x px_scale: sprite px
+    per tile so every character shares one world scale), body_px, and per locomotion clip
+    animations[clip].stride {px, units (tiles), cycle_ms}: play it at speed / units cycles/s."""
+    from .motion import px_scale, sheet_stride
+    out: dict = {}
+    fh = (entry.get("frame") or {}).get("h")
+    if fh:
+        k = px_scale(int(fh), getattr(asset, "kind", "person") if getattr(asset, "kind", "") in
+                     ("person", "animal") else "person", getattr(asset, "size", None))
+        out["px_scale"] = round(k, 4)
+        out["world_ppu"] = round(ppu * k, 3)
+    stride, body = sheet_stride(sheet.with_suffix(".json")) if sheet.exists() else ({}, None)
+    if body:
+        out["body_px"] = body
+    anims = entry.get("animations") or {}
+    wp = out.get("world_ppu", ppu)
+    for clip, v in stride.items():
+        if clip in anims and v.get("px"):
+            anims[clip]["stride"] = {"px": v["px"], "units": round(float(v["px"]) / wp, 4),
+                                     "cycle_ms": v.get("cycle_ms"), "source": v.get("source", "")}
+    return out
+
+
+RUNTIME_FILES = ("pp_motion.gd", "pp_manifest.gd", "pp_sprite3d.gdshader")
+
+
+def install_runtime(engine: str, base: Path) -> list[Path]:
+    """The game runtime that ships with an export: Godot gets res://<subdir>/pp_runtime/ (pp_motion.gd:
+    acceleration, turning through the 16 facings, stride-matched walk/run, settle, hops, hit-stop,
+    shake, critically damped camera; pp_manifest.gd; pp_sprite3d.gdshader: billboard sprites whose
+    depth is their feet) + motion.json (the tunables); Unity gets motion.json (the same keys) for
+    a C# port of docs/FOR_CLAUDE.md's algorithms."""
+    from . import godot_runtime
+    from .motion import write_motion_json
+    out = base / "pp_runtime"
+    files = []
+    if engine == "godot":
+        files += godot_runtime.install(base, [n for n in RUNTIME_FILES if (godot_runtime.HERE / n).exists()],
+                                       subdir="pp_runtime")
+    files.append(write_motion_json(out))
+    return files
 
 
 def _godot_imports(files: list[Path], root: Path) -> list[Path]:
@@ -410,9 +456,11 @@ def load_manifest(path: Path) -> dict:
 def export_to_game(items, engine: str, project_path, subdir: str = "", *, project=None,
                    force: bool = False, models: bool = False, build_models: bool = False,
                    pixel_filter: bool = True, preset: str | None = None, ppu: float | None = None,
-                   map_target: str | None = None, progress=None) -> dict:
+                   map_target: str | None = None, runtime: bool = True, progress=None) -> dict:
     """Write assets (assets.Asset / library Characters) into a Godot or Unity project; returns a
-    report dict (exported / unchanged / skipped, manifest path, warnings)."""
+    report dict (exported / unchanged / skipped, manifest path, warnings). runtime: also ship the
+    game runtime (install_runtime: <subdir>/pp_runtime/ + motion.json, listed as manifest
+    "runtime")."""
     from . import assets as A
     from .exports import file_name
     say = progress or (lambda t: None)
@@ -494,6 +542,13 @@ def export_to_game(items, engine: str, project_path, subdir: str = "", *, projec
            "res_root": f"res://{sub}" if engine == "godot" else sub, "project": proj.name,
            "updated": round(time.time()), "assets": dict(sorted(entries.items())),
            "by_name": dict(sorted(by_name.items()))}
+    from .motion import MOTION
+    man["motion"] = dict(MOTION)
+    if runtime:
+        rt = install_runtime(engine, base)
+        man["runtime"] = {Path(f).name: (f"res://{sub}/pp_runtime/{Path(f).name}" if engine == "godot"
+                                         else f"{sub}/pp_runtime/{Path(f).name}") for f in rt}
+        report["runtime"] = [str(f) for f in rt]
     man_path.write_text(json.dumps(man, indent=1), encoding="utf-8")
     if engine == "unity":
         _unity_text_meta(man_path, f"pixel-pipeline/manifest/{sub}")

@@ -579,6 +579,80 @@ class _Moves:
         """Hips drop that keeps a straight stance leg on the ground at this swing angle."""
         return -self.leg * (1 - math.cos(math.radians(abs(angle))))
 
+    # -- walk / run with PLANTED feet (2026-10-16, game runtime): each ankle follows a footfall
+    # path - on the ground moving back at one steady speed (stance), then an arc forward (swing)
+    # - and two-bone IK in the side plane bends thigh + shin to reach it. The body travels
+    # STRIDE = 2 * reach / duty per cycle, so a game that moves the sprite at stride per cycle
+    # keeps the drawn foot still on the ground (motion.rig_stride measures it back). The old
+    # sine thigh swing (24/40 deg) slid the stance foot and covered ~0.4 body heights a cycle.
+    # bob/sway: the body rises over each stance foot and shifts its weight onto it (a walk with a
+    # still pelvis reads stiff and gives capes nothing to swing from)
+    GAIT = {"walk": {"duty": 0.58, "reach": 0.42, "lift": 0.1, "bob": 0.02, "sway": 0.012, "lean": 3,
+                     "arm": 22, "bend": -15, "twist": 5},
+            "run": {"duty": 0.36, "reach": 0.7, "lift": 0.24, "bob": 0.03, "sway": 0.008, "lean": 12,
+                    "arm": 42, "bend": -75, "twist": 7}}
+
+    def _leg(self, s):
+        j = self.sk.joints
+        hip, knee, ankle = (np.asarray(j[f"{n}_{s}"], np.float64) for n in ("thigh", "shin", "foot"))
+
+        def ang(a, b):                  # world angle of b - a from straight down, + = backward (-z)
+            d = b - a
+            return math.atan2(-d[2], -d[1])
+        l1 = max(math.hypot(knee[1] - hip[1], knee[2] - hip[2]), 1e-6)
+        l2 = max(math.hypot(ankle[1] - knee[1], ankle[2] - knee[2]), 1e-6)
+        return hip, ankle, l1, l2, ang(hip, knee), ang(knee, ankle)
+
+    def leg_ik(self, s, hip_dy: float, dz: float, dy: float):
+        """x rotations (degrees) of thigh, shin and foot that put leg s's ankle at its rest spot
+        + (dz forward, dy up) with the hips moved up by hip_dy; the foot stays level."""
+        hip, ankle, l1, l2, a1, a2 = self._leg(s)
+        tz = ankle[2] + dz - hip[2]
+        ty = ankle[1] + dy - (hip[1] + hip_dy)
+        D = min(max(math.hypot(tz, ty), abs(l1 - l2) + 1e-6), 0.999 * (l1 + l2))
+        psi = math.atan2(-tz, -ty)
+        beta = math.acos(max(-1.0, min(1.0, (l1 * l1 + D * D - l2 * l2) / (2 * l1 * D))))
+        bend = math.acos(max(-1.0, min(1.0, (D * D - l1 * l1 - l2 * l2) / (2 * l1 * l2))))
+        thigh = psi - beta                 # the knee bends forward of the hip-ankle line
+        shin = thigh + bend
+        return (math.degrees(thigh - a1), math.degrees(shin - a2 - (thigh - a1)),
+                math.degrees(-(shin - a2)))
+
+    def gait_info(self, run: bool) -> dict:
+        g = self.GAIT["run" if run else "walk"]
+        legs = [self._leg(s) for s in "lr"]
+        L = float(np.mean([l1 + l2 for _, _, l1, l2, _, _ in legs]))
+        S = g["reach"] * L
+        R = 0.99 * L
+        drop = max(max(h[1] - a[1] for h, a, *_ in legs) - math.sqrt(max(R * R - S * S, 1e-9)), 0.0)
+        return {**g, "L": L, "S": S, "drop": drop, "stride": 2 * S / g["duty"]}
+
+    def gait(self, p: float, run: bool):
+        g = self.gait_info(run)
+        S, L, duty = g["S"], g["L"], g["duty"]
+        bob = g["bob"] * L * math.cos(4 * math.pi * p)        # high at mid-stance
+        if run:                                                # pushed up off each foot
+            bob = g["bob"] * L * (1 + math.cos(4 * math.pi * (p - 0.1)))
+        hip_dy = -g["drop"] + bob
+        rot = {}
+        for s, ph in (("l", 0.0), ("r", 0.5)):
+            q = (p - ph) % 1.0
+            if q < duty:                                       # planted: back at one speed
+                u = q / duty
+                dz, dy = S * (1 - 2 * u), 0.0
+            else:                                              # swing: arc forward
+                u = (q - duty) / (1 - duty)
+                dz, dy = S * (-1 + 2 * _smooth(u)), g["lift"] * L * math.sin(math.pi * u)
+            th, sh, ft = self.leg_ik(s, hip_dy, dz, dy)
+            rot[f"thigh_{s}"] = [("x", th)]
+            rot[f"shin_{s}"] = [("x", sh)]
+            rot[f"foot_{s}"] = [("x", ft)]
+        c = math.cos(2 * math.pi * p)                          # left foot forward at p = 0
+        rot.update({"hips": [("y", g["twist"] * c)], "spine": [("y", -g["twist"] * c), ("x", g["lean"])],
+                    **self.arm("l", g["arm"] * c, 0, g["bend"]), **self.arm("r", -g["arm"] * c, 0, g["bend"])})
+        sway = g.get("sway", 0.0) * L * math.cos(2 * math.pi * (p - duty / 2))   # over the planted foot
+        return rot, np.array([sway, hip_dy, 0])
+
     def pose(self, action: str, p: float):
         s, c = math.sin(2 * math.pi * p), math.cos(2 * math.pi * p)
         if action == "idle":
@@ -587,16 +661,7 @@ class _Moves:
                      **self.arm("l", 2 * b, 1 * b, -8), **self.arm("r", 2 * b, 1 * b, -8)},
                     np.array([0, -0.006 * self.H * b, 0]))
         if action in ("walk", "run"):
-            run = action == "run"
-            amp, knee, arm, bend = (40, 75, 40, -75) if run else (24, 45, 18, -15)
-            th = amp * s
-            rot = {"thigh_l": [("x", -th)], "thigh_r": [("x", th)],
-                   "shin_l": [("x", 5 + knee * max(0.0, c) ** 2)],
-                   "shin_r": [("x", 5 + knee * max(0.0, -c) ** 2)],
-                   "hips": [("y", 4 * s)], "spine": [("y", -4 * s), ("x", 12 if run else 2)],
-                   **self.arm("l", arm * s, 0, bend), **self.arm("r", -arm * s, 0, bend)}
-            lift = 0.012 * self.H * abs(c) if run else 0.0
-            return rot, np.array([0, self.drop(th) + lift, 0])
+            return self.gait(p, action == "run")
         if action not in ACTIONS:
             from .motions import human_pose
             return human_pose(self, action, p)

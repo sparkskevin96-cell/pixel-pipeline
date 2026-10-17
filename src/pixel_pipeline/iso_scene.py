@@ -334,7 +334,83 @@ def unit_metrics(png, js) -> dict:
     return {"foot": foot, "body": body, "size": [fw, fh]}
 
 
-def _copy_unit(name: str, sheet, folder: Path) -> tuple[dict, list[Path]]:
+def downscale_pixel_art(rgba: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """A pixel-art frame at another (smaller) size without new colours: box-averaged with alpha
+    weighting, every opaque pixel snapped to the nearest colour the frame already has, alpha
+    kept binary (half covered = opaque)."""
+    w, h = size
+    if (w, h) == (rgba.shape[1], rgba.shape[0]):
+        return rgba.copy()
+    a = rgba[..., 3:4].astype(np.float32) / 255.0
+    pre = np.concatenate([rgba[..., :3].astype(np.float32) * a, a * 255.0], -1)
+    small = np.asarray(Image.fromarray(np.clip(pre, 0, 255).astype(np.uint8), "RGBA").resize((w, h), Image.BOX),
+                       np.float32)
+    al = small[..., 3] / 255.0
+    rgb = small[..., :3] / np.maximum(al[..., None], 1e-6)
+    on = al >= 0.45
+    out = np.zeros((h, w, 4), np.uint8)
+    pal = np.unique(rgba[rgba[..., 3] >= 128][:, :3], axis=0).astype(np.float32)
+    if len(pal) and on.any():
+        q = rgb[on]
+        d = ((q[:, None, :] - pal[None, :, :]) ** 2).sum(-1)
+        out[on, :3] = pal[d.argmin(1)].astype(np.uint8)
+        out[on, 3] = 255
+    return out
+
+
+def rescale_sheet(sheet_png, js, dst: Path, k: float) -> tuple[Path, Path]:
+    """A copy of a sheet (+ its json) with every frame scaled by k (downscale_pixel_art): for
+    sheets drawn at another scale (a 144x96 knight next to 96x64 people: k = 2/3), so every unit
+    on the iso board shares one world scale. The json keeps its names, durations and meta."""
+    img = np.asarray(Image.open(sheet_png).convert("RGBA"))
+    meta = json.loads(Path(js).read_text(encoding="utf-8"))
+    items = list(meta["frames"].values()) if isinstance(meta["frames"], dict) else meta["frames"]
+    fw, fh = items[0]["frame"]["w"], items[0]["frame"]["h"]
+    nw, nh = max(1, round(fw * k)), max(1, round(fh * k))
+    cols = max(1, round(img.shape[1] / fw))
+    rows = max(1, round(img.shape[0] / fh))
+    out = np.zeros((rows * nh, cols * nw, 4), np.uint8)
+    for f in items:
+        r = f["frame"]
+        cx, cy = r["x"] // fw, r["y"] // fh
+        out[cy * nh:(cy + 1) * nh, cx * nw:(cx + 1) * nw] = downscale_pixel_art(
+            img[r["y"]:r["y"] + r["h"], r["x"]:r["x"] + r["w"]], (nw, nh))
+        f["frame"] = {"x": cx * nw, "y": cy * nh, "w": nw, "h": nh}
+        if "sourceSize" in f:
+            f["sourceSize"] = {"w": nw, "h": nh}
+        if "spriteSourceSize" in f:
+            f["spriteSourceSize"] = {"x": 0, "y": 0, "w": nw, "h": nh}
+    m = meta.setdefault("meta", {})
+    m["size"] = {"w": out.shape[1], "h": out.shape[0]}
+    m["scaled"] = k
+    if m.get("stride"):
+        m["stride"] = {c: {**v, "px": round(float(v["px"]) * k, 2)} for c, v in m["stride"].items()}
+    if m.get("body_px"):
+        m["body_px"] = round(float(m["body_px"]) * k, 1)
+    dst.mkdir(parents=True, exist_ok=True)
+    png, jo = dst / Path(sheet_png).name, dst / Path(js).name
+    Image.fromarray(out).save(png)
+    jo.write_text(json.dumps(meta), encoding="utf-8")
+    return png, jo
+
+
+def walk_timing(meta: dict, tile: int, step_time: float = 0.28) -> dict:
+    """How long a unit takes per cell and how fast its walk plays so its feet stay planted on the
+    iso board: one cell moves the sprite ~0.56 tile widths on screen; a walk cycle covers the
+    sheet's stride (px, seen ~0.79 on the diagonal facings). The step time is picked so the walk
+    plays near its own rate (x1.25), within 0.2-0.6 s. {} when the sheet has no stride."""
+    st = (meta.get("meta") or {}).get("stride") or {}
+    w = st.get("walk")
+    if not w or not w.get("px") or not w.get("cycle_ms"):
+        return {}
+    eff = float(w["px"]) * 0.79
+    natural = 1000.0 / float(w["cycle_ms"])
+    cell = 0.559 * tile
+    step = min(0.6, max(0.2, cell / (eff * natural * 1.25)))
+    return {"step_time": round(step, 3), "walk_scale": round((cell / step) / eff / natural, 3)}
+
+
+def _copy_unit(name: str, sheet, folder: Path, scale: float = 1.0, tile: int = 32) -> tuple[dict, list[Path]]:
     sheet = Path(sheet)
     if not sheet.exists():
         raise FileNotFoundError(f"unit sheet for '{name}' not found: {sheet}")
@@ -346,13 +422,20 @@ def _copy_unit(name: str, sheet, folder: Path) -> tuple[dict, list[Path]]:
         shutil.rmtree(dst)                       # no stale sheets from an earlier unit
     dst.mkdir(parents=True)
     written = []
-    for src in (sheet, js, sheet.with_suffix(".tres")):
-        if src.exists():
-            written.append(Path(shutil.copyfile(src, dst / src.name)))
     res = f"res://iso/units/{name}/"
-    tres = sheet.with_suffix(".tres")
-    entry = {"png": res + sheet.name, "json": res + js.name,
-             "tres": res + tres.name if tres.exists() else "", **unit_metrics(sheet, js)}
+    if abs(scale - 1.0) > 0.01:                 # one world scale: the frames scaled, no .tres
+        png, jo = rescale_sheet(sheet, js, dst, scale)
+        written += [png, jo]
+        entry = {"png": res + png.name, "json": res + jo.name, "tres": "", "scale": round(scale, 4),
+                 **unit_metrics(png, jo)}
+    else:
+        for src in (sheet, js, sheet.with_suffix(".tres")):
+            if src.exists():
+                written.append(Path(shutil.copyfile(src, dst / src.name)))
+        tres = sheet.with_suffix(".tres")
+        entry = {"png": res + sheet.name, "json": res + js.name,
+                 "tres": res + tres.name if tres.exists() else "", **unit_metrics(sheet, js)}
+    entry.update(walk_timing(json.loads((dst / js.name).read_text(encoding="utf-8")), tile))
     return entry, written
 
 
@@ -730,6 +813,7 @@ func _build_units(list: Array) -> void:
 		var b: Array = d["body"]
 		var hp := _stat(u, 0)
 		var unit := {"node": node, "sprite": spr, "ring": ring, "name": uname, "team": team,
+			"step_time": float(d.get("step_time", STEP_TIME)), "walk_scale": float(d.get("walk_scale", 1.0)),
 			"cell": cell, "from": cell, "path": [], "t": 0.0, "facing": 4, "action": "idle",
 			"body": Rect2(b[0], b[1], b[2] - b[0], b[3] - b[1]),
 			"hp": hp, "max_hp": hp, "atk": _stat(u, 1), "def": _stat(u, 2), "move": _stat(u, 3),
@@ -797,6 +881,8 @@ func face(u: Dictionary, v: Vector2) -> void:
 
 func act(u: Dictionary, action: String) -> void:
 	u["action"] = action
+	# the walk plays at the speed that keeps its feet planted at this unit's step time
+	u["sprite"].speed_scale = float(u.get("walk_scale", 1.0)) if action == "walk" else 1.0
 	_show(u, action in ONCE)
 
 
@@ -1178,7 +1264,7 @@ func _number(t: Dictionary, dmg: int) -> void:
 
 
 func _step(u: Dictionary, delta: float) -> void:
-	u["t"] = float(u["t"]) + delta / STEP_TIME
+	u["t"] = float(u["t"]) + delta / float(u.get("step_time", STEP_TIME))
 	while float(u["t"]) >= 1.0 and not u["path"].is_empty():
 		u["t"] = float(u["t"]) - 1.0
 		u["cell"] = u["path"].pop_front()
@@ -1491,13 +1577,16 @@ func _process(delta: float) -> void:
 
 
 def write_iso_scene(diorama: Diorama, project_dir, units: dict | None = None, tile: int = 32, *,
-                    seed: int = 0, zoom: int = 1, overwrite_map: bool = False) -> list[Path]:
+                    seed: int = 0, zoom: int = 1, overwrite_map: bool = False,
+                    unit_scale: dict | None = None) -> list[Path]:
     """Write the isometric scene into `project_dir/iso/` (see the module doc).
     units: {map unit name: sprite sheet .png} (with its .json frame list and, if there, the
     SpriteFrames .tres beside it); map units without a sheet get a plain stand-in. Unit stats
     (hp attack defence move jump reach) come from map.json, else diorama.CLASSES by name.
-    Sprites are drawn at their native sheet pixel size (no per-unit scaling).
-    Returns the written files."""
+    Sprites are drawn at their native sheet pixel size; unit_scale {name: k} first rescales a
+    sheet drawn at another scale (rescale_sheet: k = base ppu / its ppu, e.g. 2/3 for a 144x96
+    knight among 96x64 people) so every unit shares one world scale. Walk timing per unit from the
+    sheet's stride (walk_timing). Returns the written files."""
     if tile % 8:
         raise ValueError("tile must be a multiple of 8 (e.g. 32)")
     root = Path(project_dir)
@@ -1563,7 +1652,7 @@ def write_iso_scene(diorama: Diorama, project_dir, units: dict | None = None, ti
     udir = iso / "units"
     defs = {}
     for name, sheet in (units or {}).items():
-        entry, files = _copy_unit(name, sheet, udir)
+        entry, files = _copy_unit(name, sheet, udir, float((unit_scale or {}).get(name, 1.0)), tile)
         defs[name] = entry
         written += files
     png, js = pawn_sheet(udir / "_pawn", "pawn")

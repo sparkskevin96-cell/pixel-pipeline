@@ -188,10 +188,10 @@ def test_update_swaps_files_after_the_app_closes(tmp_path, monkeypatch):
     time.sleep(1)
     assert updater.read_build(app / updater.BUILD_IN_APP).number == 1          # waits for the app
     app_proc.wait()
-    for _ in range(60):
-        if marker.exists():
+    for _ in range(600):
+        if marker.exists() and marker.read_text():     # written, not just created
             break
-        time.sleep(1)
+        time.sleep(0.1)
     assert marker.read_text() == "--updated"
     assert updater.read_build(app / updater.BUILD_IN_APP).number == 2
     assert (app / "PixelPipeline.exe").read_bytes() == b"MZnew"

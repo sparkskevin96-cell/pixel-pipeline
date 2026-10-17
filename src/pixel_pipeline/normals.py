@@ -123,12 +123,22 @@ def normal_sheet_path(out_png) -> Path:
     return out.with_name(out.stem + "_n.png")
 
 
-def write_normal_sheet(sprites: list[Sprite], out_png, columns: int) -> Path:
-    """<sheet>_n.png packed exactly like <sheet>.png (same columns, same frame rects)."""
+def write_normal_sheet(sprites: list[Sprite], out_png, columns: int, rows: list[int] | None = None) -> Path:
+    """<sheet>_n.png packed exactly like <sheet>.png (same columns, same frame rects). rows: the
+    frames in each sheet row when rows differ (anim3d.write_animated: 12-frame walks, 8-frame
+    idles) - then packed row by row like the sheet."""
     missing = [i for i, s in enumerate(sprites) if s.normal is None]
     if missing:
         raise ValueError("these sprites have no normal map (render with normals=True)")
-    sheet, _ = pack_sheet([s.normal for s in sprites], columns)
+    if rows is not None and len(set(rows)) > 1:
+        from .export import pack_rows
+        maps, at, lines = [s.normal for s in sprites], 0, []
+        for n in rows:
+            lines.append(maps[at:at + n])
+            at += n
+        sheet, _ = pack_rows(lines)
+    else:
+        sheet, _ = pack_sheet([s.normal for s in sprites], columns)
     path = normal_sheet_path(out_png)
     Image.fromarray(sheet, "RGBA").save(path)
     return path

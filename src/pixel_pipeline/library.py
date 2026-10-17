@@ -193,7 +193,39 @@ def thumb_from(im: Image.Image, out: Path, px: int = 96) -> Path:
     return out
 
 
-def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int = 8,
+LOCOMOTION_FRAMES = (8, 12, 16)
+
+
+def frames_for(sheet_png=None, st=None, locomotion: int | None = None) -> dict:
+    """Frames per clip for (re-)rendering a character: clips its sheet already has keep their
+    count (an old 8-frame walk stays 8, so its frames come out as before); new clips get 8, and
+    new walk/run-type clips Style.locomotion_frames (12 by default; 16 for very smooth feet).
+    locomotion: force that count on the locomotion clips (rerender_locomotion)."""
+    from .anim3d import LOCOMOTION
+    from .motion import frame_counts_of
+    st = st or style()
+    n = int(locomotion or getattr(st, "locomotion_frames", 12) or 8)
+    out: dict = {"*": 8, **{c: n for c in LOCOMOTION}}
+    if sheet_png is not None and locomotion is None:
+        out.update(frame_counts_of(Path(sheet_png).with_suffix(".json")))
+    return out
+
+
+def annotate_stride(sheet_png, rigged=None, camera_scale: float | None = None, st=None) -> dict:
+    """Measure the stride of the sheet's walk/run (motion.measure_sheet, from the skeleton) and
+    store it in the sheet json (meta.stride, meta.body_px), so games keep the feet planted."""
+    from .motion import annotate_sheet, measure_sheet
+    st = st or style()
+    try:
+        info = measure_sheet(sheet_png, rigged, camera_scale, st.elevation)
+    except Exception:  # noqa: BLE001 - a sheet without a readable rig: no stride, nothing breaks
+        return {}
+    if info.get("stride"):
+        annotate_sheet(sheet_png, info)
+    return info
+
+
+def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames=None,
                   progress=None, clean=True, drawn: bool = False, prompt: str = "",
                   reuse: bool = True, redraw=(), name: str = "", cancel=None,
                   gpu=None) -> list[Path]:
@@ -201,6 +233,8 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int
     drawn: the GPU draws the character from every direction and the skeleton bends the drawings
     (drawnrig.py; key drawings kept in <folder>/keys, reused unless reuse=False; redraw = these
     directions again with a new seed; cancel() = stop, drawings so far kept for a resume)."""
+    if frames is None:
+        frames = frames_for(out_png if Path(out_png).with_suffix(".json").exists() else None)
     if drawn:
         from .drawnrig import drawn_sheets
         return drawn_sheets(rigged, prompt, out_png=out_png, kind=kind, size=size, frames=frames,
@@ -224,7 +258,9 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames: int
         clean = {"palette": st.palette}                                  # one palette for all
     anim, _ = animated_turnaround([rigged], s, st.directions, frames, elevation=st.elevation,
                                   light=st.light, normals=True, clean=clean)
-    return write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
+    written = write_animated(anim, out_png, aseprite=True, godot=True, normals=True)
+    annotate_stride(out_png, rigged, None, st)
+    return written
 
 
 def add_character(name: str, model, *, kind: str = "person", size: str | None = None,
@@ -750,17 +786,94 @@ def add_character_animations(ch: Character, names, progress=None, *, replace: bo
             render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say, drawn=True,
                           prompt=ch.prompt)
         else:
-            anim, _ = animated_turnaround([tmp], s, st.directions, 8, elevation=st.elevation,
-                                          light=st.light, normals=True, clean=clean,
-                                          frame_with=keep)
+            anim, _ = animated_turnaround([tmp], s, st.directions, frames_for(ch.sheet, st),
+                                          elevation=st.elevation, light=st.light, normals=True,
+                                          clean=clean, frame_with=keep)
             tmp.replace(ch.rigged)
             write_animated(anim, ch.sheet, aseprite=True, godot=True, normals=True)
+            annotate_stride(ch.sheet, ch.rigged, None, st)
     finally:
         if tmp.exists():
             tmp.unlink()
     make_thumb(ch.sheet, ch.thumb)
     ch.save()
     return ch
+
+
+def rerender_locomotion(ch: Character, frames: int = 12, clips=("walk", "run"), *, regait: bool = True,
+                        progress=None, cancel=None) -> Character:
+    """More frames on a character's walk/run (12 or 16) and planted feet - CPU only, no GPU
+    drawing: regait=True first rebuilds the clips with the planted-feet gait (autorig/quadruped,
+    auto-rigged characters only; mocap clips are kept), then the sheet is re-rendered: a drawn
+    character's existing key drawings are bent again (drawnrig), a 3D one re-rendered framed by
+    its other clips (their frames stay as they were). The stride is measured into the sheet json.
+    No GPU ever: drawnrig.no_new_drawings() - a drawn character missing a drawing raises
+    drawnrig.NeedsDrawing (and its rigged.glb / sheet are left as they were)."""
+    from .anim3d import Gltf
+    say = progress or (lambda t: None)
+    if frames not in LOCOMOTION_FRAMES:
+        raise ValueError(f"frames must be one of {', '.join(map(str, LOCOMOTION_FRAMES))}")
+    if not ch.rigged.exists():
+        raise ValueError(f"{ch.name} has no rigged.glb")
+    _not_draft(ch)
+    have = [a.get("name") for a in Gltf(ch.rigged).doc.get("animations", [])]
+    todo = [c for c in clips if c in have]
+    if not todo:
+        raise ValueError(f"{ch.name} has no {' / '.join(clips)} clip")
+    st = style()
+    plan = frames_for(ch.sheet, st)
+    for c in todo:
+        plan[c] = frames
+    old = [n for n in have if n not in todo]
+    tmp = ch.rigged.with_name("rigged.new.glb")
+    shutil.copyfile(ch.rigged, tmp)
+    try:
+        if regait:
+            from .motions import add_animations
+            mocap = {a.get("name") for a in Gltf(tmp).doc.get("animations", [])
+                     if (a.get("extras") or {}).get("mocap")}
+            regen = [c for c in todo if c not in mocap]
+            if regen:
+                say(f"{ch.name}: planted-feet {', '.join(regen)}...")
+                try:
+                    add_animations(tmp, regen, replace=True)
+                except Exception as e:  # noqa: BLE001 - not an auto-rigged file: keep its clips
+                    say(f"Kept the old {', '.join(regen)} ({type(e).__name__}: {e})")
+        say(f"{ch.name}: {frames}-frame {', '.join(todo)} from {st.directions} directions...")
+        if is_drawn(ch):
+            from .drawnrig import drawn_sheets, no_new_drawings
+            orig = ch.rigged.read_bytes()
+            tmp.replace(ch.rigged)
+            try:
+                with no_new_drawings():         # bend the drawings it has: never the GPU
+                    drawn_sheets(ch, frames=plan, progress=say, cancel=cancel)
+            except BaseException:
+                ch.rigged.write_bytes(orig)     # as it was
+                raise
+        else:
+            from .anim3d import animated_turnaround, write_animated
+            from .drawnrig import drawn_settings
+            s = drawn_settings(ch.kind, ch.size, st)
+            p = _default_clean()
+            clean = {"palette": st.palette} if p is True and st.palette != "auto" else p
+            anim, _ = animated_turnaround([tmp], s, st.directions, plan, elevation=st.elevation,
+                                          light=st.light, normals=True, clean=clean,
+                                          frame_with=old or None)
+            tmp.replace(ch.rigged)
+            write_animated(anim, ch.sheet, aseprite=True, godot=True, normals=True)
+            annotate_stride(ch.sheet, ch.rigged, None, st)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    make_thumb(ch.sheet, ch.thumb)
+    ch.save()
+    return ch
+
+
+def _default_clean():
+    import inspect
+    p = inspect.signature(render_sheets).parameters.get("clean")
+    return bool(p.default) if p is not None and p.default is not inspect.Parameter.empty else False
 
 
 def _known_motions(kind: str):
@@ -823,10 +936,12 @@ def _render_with_new_clips(ch: Character, tmp: Path, keep, progress=None) -> Non
         render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say, drawn=True,
                       prompt=ch.prompt)
         return
-    anim, _ = animated_turnaround([tmp], s, st.directions, 8, elevation=st.elevation,
-                                  light=st.light, normals=True, clean=clean, frame_with=keep)
+    anim, _ = animated_turnaround([tmp], s, st.directions, frames_for(ch.sheet, st),
+                                  elevation=st.elevation, light=st.light, normals=True,
+                                  clean=clean, frame_with=keep)
     tmp.replace(ch.rigged)
     write_animated(anim, ch.sheet, aseprite=True, godot=True, normals=True)
+    annotate_stride(ch.sheet, ch.rigged, None, st)
 
 
 def add_mocap(ch: Character, bvh_files_or_library_names, progress=None, *, replace: bool = True,

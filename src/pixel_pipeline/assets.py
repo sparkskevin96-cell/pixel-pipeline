@@ -73,6 +73,7 @@ class Style:
     style_lora: str = ""           # a LoRA trained on this project's look (styletrain.py); "" = off
     style_trigger: str = ""        # its trigger word, added to prompts when the LoRA is on
     style_strength: float = 0.8
+    locomotion_frames: int = 12    # walk/run frames of NEW characters (12 or 16; other clips 8)
 
     def person_frame(self) -> tuple[int, int]:
         h = self.person_height

@@ -166,6 +166,50 @@ func frames_of(key: String) -> SpriteFrames:
 
 (For exported builds add `*.json` to the export preset's non-resource filter.)
 
+## The game runtime (use it: it is what makes the sprites PLAY well)
+
+Every export ships `res://<subdir>/pp_runtime/` (Godot: `pp_motion.gd`, `pp_manifest.gd`,
+`pp_sprite3d.gdshader`, `motion.json`; Unity: `motion.json`, same keys). The HD-2D board
+(`hd2d.py` board.gd), its autoplay and the playtest games all run on it. Manifest fields it reads:
+
+- `animations[clip].stride = {px, units, cycle_ms, source}` for walk/run(/sneak): how far ONE
+  cycle of the clip carries the character (`units` = tiles at `world_ppu`; `px` = sheet pixels;
+  source `rig` = measured from the skeleton's planted feet, `frames` = from the pixels, `default`
+  = a guess from the body height). Play the clip at **speed / stride.units cycles per second**
+  (frame = floor(phase x frames), phase += rate x delta): the planted foot then stays still on
+  the ground. Pick walk below ~walk_stride x 1.9 cycles/s x 0.92, run above (keep the phase when
+  switching); don't move faster than run_stride x 2.9/s (`pp_motion.max_speed`) or the feet skate.
+- `px_scale` (1.0 = the library's 64 px-person scale; Neo16's 144x96 knight = 1.5), `world_ppu`
+  (= ppu x px_scale: sprite px per tile), `body_px` (standing height). Size sprites by
+  world_ppu (3D) or 1/px_scale at a WHOLE screen scale (2D) so every character shares one scale.
+- `anchor{x,y}` = the feet. `motion` = the tunables below; `runtime` = the shipped files.
+
+`pp_motion.gd` (static; `const M := preload("res://<subdir>/pp_runtime/pp_motion.gd")`):
+
+| need | call | algorithm (port this for Unity) |
+|---|---|---|
+| ease in/out | `vel = M.approach(vel, wish, accel, decel, dt)` | move_toward at accel (speeding up/turning) or decel (slowing): 14 / 18 tiles/s^2 |
+| path speed | `M.path_speed(v, want, remaining, accel, decel, dt)` | min(want, sqrt(2 decel remaining)): stops exactly at the end |
+| turning | `yaw = M.turn(yaw, target, 900, dt)` | short-way rotation at <= 900 deg/s; the sprite picks one of 16 facings from yaw every frame, so a turn shows the ones between |
+| feet | `M.locomotion(speed, strides, has_run, body_tiles, current)` -> {clip, rate} | rate = speed / stride; run above 0.92 x walk_top (x0.85 hysteresis) |
+| stop | `M.settle_target(phase)` | on stop keep playing the walk to the next contact pose (phase 0 / 0.5, <= 0.16 s), then idle |
+| steps | `M.hop_y(u, ya, yb, hop)` | smoothstep between the heights + arc clearing the higher edge by 0.14 over +-0.32 tiles of the border |
+| free move over steps | `M.ground_follow(y, vy, ground, 0.07, 22, dt)` | ground = highest cell under a 0.22-tile foot circle; climb in ~0.07 s, drop with gravity |
+| camera | `M.smooth_damp(pos, target, vel, 0.28, dt)` | critically damped spring (no overshoot); clamp the target inside the map |
+| hits | `M.hit_time(clip, length)` | the blow lands at the strike frame (attack 0.5, cast 0.58 of the clip); then hit-stop 75 ms (freeze both), knockback 0.22 tiles, shake trauma 0.06-0.2 (offset = trauma^2 x 0.32, decay 2.6/s), anticipation 0.12 s lean back, follow-through 0.18 s |
+
+`pp_sprite3d.gdshader` (3D billboard sprites, HD-2D): every pixel gets the depth of the FEET
+(node origin) moved `depth_bias` 0.35 toward the camera -> never cut by the ground, walls,
+stairs, props or other sprites behind its feet, still hidden by things in front; `pixel_snap`
+moves the quad in whole screen pixels (no shimmer). Put the node origin at the feet (quad
+`center_offset` = size.y/2 - (frame_h - anchor.y)/ppu). Draw HP bars / damage numbers in 2D
+(`Camera3D.unproject_position`), not as 3D sprites: depth of field blurs those into blobs.
+Unity port: same vertex trick (clip.z = clip-space z of the foot point x clip.w).
+
+Library: new characters get 12-frame walk/run (`Style.locomotion_frames`, 12 or 16; other
+clips 8) and planted-feet IK walk/run clips; `library.rerender_locomotion(ch, 12)` upgrades an
+old character on the CPU (bends its existing drawings: no GPU; `drawnrig.no_new_drawings()`).
+
 ## Gotchas
 
 - One GPU job at a time; don't queue hours of GPU work unattended (Kevin's laptop crashed after a

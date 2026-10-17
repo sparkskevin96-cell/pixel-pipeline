@@ -24,16 +24,20 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
+  # Each OS runs the suite as 2 parallel jobs: tools/run_tests.py splits the test files into
+  # groups of about equal time (tests/file_times.json); every file is in exactly one group.
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, ${{ matrix.part }}/2)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        part: [1, 2]
     env:
       QT_QPA_PLATFORM: offscreen  # headless Qt for the UI test
+      PYTHONFAULTHANDLER: "1"     # tracebacks on a crash (pytest runs in a child process)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,7 +51,7 @@ jobs:
       - name: Install
         run: python -m pip install -e ".[dev,ui,cutout,mcp,3d]"
       - name: Test
-        run: python -X faulthandler -m pytest -v -p no:cacheprovider
+        run: python tools/run_tests.py --split 2 --part ${{ matrix.part }} -- -v
 
   build-windows:
     needs: test

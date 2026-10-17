@@ -568,7 +568,7 @@ class _Poser:
             off = np.array([0, -0.012 * Lg * b, 0])
             return self.pose(body, off, self.planted()), off
         if action == "walk":
-            stride, lift = 0.2 * Lg, 0.16 * Lg
+            stride, lift = 0.34 * Lg, 0.17 * Lg        # 0.2 Lg crawled (motion.rig_stride, 2026-10-16)
             phases = {"back_l": 0.0, "front_l": 0.25, "back_r": 0.5, "front_r": 0.75}
             feet = self.feet(p, phases, 0.65, stride, lift, (55, 25))
             bob = 0.012 * Lg * (1 + math.cos(4 * math.pi * p)) / 2
@@ -579,7 +579,7 @@ class _Poser:
             off = np.array([0, -self._drop(stride) - bob, 0])
             return self.pose(body, off, feet), off
         if action == "run":
-            stride, lift = 0.36 * Lg, 0.26 * Lg
+            stride, lift = 0.5 * Lg, 0.27 * Lg
             phases = {"back_l": 0.0, "back_r": 0.1, "front_l": 0.48, "front_r": 0.58}
             feet = self.feet(p, phases, 0.4, stride, lift, (85, 45))
             flexion = math.sin(2 * math.pi * (p - 0.3))

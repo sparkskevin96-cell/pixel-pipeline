@@ -56,6 +56,29 @@ def pack_sheet(frames: list[np.ndarray], columns: int | None = None, padding: in
     return sheet, rects
 
 
+def pack_rows(rows: list[list[np.ndarray]], padding: int = 0):
+    """Pack frames ROW BY ROW: every row (e.g. one animation facing one way) starts on a new line
+    of the grid; columns = the longest row, shorter rows leave the rest of their line empty.
+    With rows all the same length this is exactly pack_sheet(frames, that length).
+    Returns (sheet RGBA, [(x, y, w, h), ...] in row order)."""
+    frames = [f for r in rows for f in r]
+    if not frames:
+        raise ValueError("No frames to pack")
+    cols = max(len(r) for r in rows)
+    cw = max(f.shape[1] for f in frames)
+    ch = max(f.shape[0] for f in frames)
+    lines = [r for r in rows if r]
+    sheet = np.zeros((len(lines) * ch + (len(lines) - 1) * padding, cols * cw + (cols - 1) * padding, 4),
+                     np.uint8)
+    rects = []
+    for j, r in enumerate(lines):
+        for i, f in enumerate(r):
+            x, y = i * (cw + padding), j * (ch + padding)
+            sheet[y:y + f.shape[0], x:x + f.shape[1]] = f
+            rects.append((x, y, f.shape[1], f.shape[0]))
+    return sheet, rects
+
+
 def sheet_json(rects, image_name: str, durations: list[int], tag: str | None = None,
                names: list[str] | None = None) -> dict:
     """Aseprite 'json-array' format -- also read by Godot/Unity/Phaser atlas importers."""

@@ -640,6 +640,21 @@ def select_clips(rig: Rig, animations: list[str] | None = None) -> list[Clip]:
     return out
 
 
+LOCOMOTION = ("walk", "run")      # clips whose frame count follows Style.locomotion_frames
+
+
+def frames_of(frames, name: str) -> int:
+    """Frames for one clip: `frames` is a count for every clip, or {clip: count, "*": rest}
+    (e.g. {"*": 8, "walk": 12, "run": 12}: more locomotion frames, the rest as before)."""
+    if isinstance(frames, dict):
+        return int(frames.get(name, frames.get("*", 8)))
+    return int(frames)
+
+
+def frame_counts(clips, frames) -> list[int]:
+    return [frames_of(frames, c.name) for c in clips]
+
+
 def clip_times(clip: Clip, frames: int) -> list[float]:
     """Evenly spaced times: a loop skips its last pose (it is the first one again)."""
     if frames < 1:
@@ -667,7 +682,7 @@ def animated_poses(rig: Rig, clips: list[Clip], frames: int = 8, points: int = 1
     centre = np.array([(lo[0] + hi[0]) / 2, 0.0, (lo[2] + hi[2]) / 2])
     poses: list[list[tuple[np.ndarray, np.ndarray]]] = []
     for clip in clips:
-        times = clip_times(clip, frames)
+        times = clip_times(clip, frames_of(frames, clip.name))
         drift = np.zeros(3)
         if in_place and clip.duration > 0:
             moved = rig.centroid(clip, clip.end) - rig.centroid(clip, clip.start)
@@ -709,7 +724,11 @@ class AnimatedSet:
 
     @property
     def frames(self) -> int:
-        return len(self.sprites[0][0])
+        """The most frames any action has (actions may differ: 12-frame walks, 8-frame idles)."""
+        return max(len(a[0]) for a in self.sprites)
+
+    def counts(self) -> list[int]:
+        return [len(a[0]) for a in self.sprites]
 
     def flat(self) -> list[Sprite]:
         return [s for a in self.sprites for d in a for s in d]
@@ -778,12 +797,13 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
     staged = False
     if workers is None:                 # big jobs only: starting workers takes a few seconds
         from .parallel import free_ram_mb, worker_count
-        n_views = len(clips) * frames * len(names)
+        n_poses = sum(frame_counts(clips, frames))
+        n_views = n_poses * len(names)
         big = n_views >= 192 and npts >= 200_000
-        workers = worker_count(len(clips) * frames, per_worker_mb=150 + npts * 2.8e-4) if big else 1
+        workers = worker_count(n_poses, per_worker_mb=150 + npts * 2.8e-4) if big else 1
         # in one process every pose and view is held at once (~4 GB for 6 clips x 16
         # directions); when that doesn't fit in free RAM, go stage by stage here instead
-        here_mb = (len(clips) * frames * npts * 24 + n_views * size * size * 8) / 2 ** 20
+        here_mb = (n_poses * npts * 24 + n_views * size * size * 8) / 2 ** 20
         staged = big and workers <= 1 and here_mb > free_ram_mb() * 0.8
     if workers > 1 or staged:
         sprites = _staged_turnaround(rig, paths, animations, clips, settings, names, frames,
@@ -797,14 +817,18 @@ def animated_turnaround(paths, settings: Settings, directions: int = 8, frames: 
                                    npts=npts, seed=seed, colours_from=colours_from,
                                    normals=normals, clean=clean, keep=keep,
                                    frame_with=frame_with)
-    per = len(names) * frames
-    nested = [[sprites[a * per + d * frames: a * per + (d + 1) * frames] for d in range(len(names))]
-              for a in range(len(clips))]
+    counts = frame_counts(clips, frames)
+    nested, at = [], 0
+    for n in counts:                                 # sheet order: clip, direction, frame
+        nested.append([sprites[at + d * n: at + (d + 1) * n] for d in range(len(names))])
+        at += n * len(names)
     actions = [Action(c.name, c.loop, max(16, int(round(1000 * c.duration
-                                                         / max(1, frames if c.loop else frames - 1)))))
-               for c in clips]
+                                                         / max(1, n if c.loop else n - 1)))))
+               for c, n in zip(clips, counts)]
+    each = (f"{counts[0]} frames each" if len(set(counts)) == 1 else
+            ", ".join(f"{c.name} {n}" for c, n in zip(clips, counts)) + " frames")
     what = (f"{Path(paths[0]).name}: {', '.join(c.name for c in clips)} "
-            f"({frames} frames each) rendered at {elevation:g} degrees")
+            f"({each}) rendered at {elevation:g} degrees")
     return AnimatedSet(actions, names, nested), what
 
 
@@ -824,13 +848,12 @@ def _turnaround_here(rig, clips, settings, names, frames, *, elevation, yaw, lig
     nviews = None
     if normals:
         views, nviews = views                                          # [dir][pose] each
-    order = [(d, a * frames + f) for a in range(len(clips)) for d in range(len(names))
-             for f in range(frames)]
+    order, clip_of = _sheet_order(clips, frames, len(names))
     cropped = [views[d][i] for d, i in order]
     nlist = [nviews[d][i] for d, i in order] if normals else None
     if frame_with:
         from .turnaround import _crop_pad
-        framing = [v for v, (d, i) in zip(cropped, order) if i // frames in keep]
+        framing = [v for v, (d, i) in zip(cropped, order) if clip_of[i] in keep]
         box = _crop_box(framing, settings.margin, settings.alpha_threshold)
         cropped = [_crop_pad(v, *box) for v in cropped]
         nviews = [_crop_pad(v, *box) for v in nlist] if normals else None
@@ -839,8 +862,19 @@ def _turnaround_here(rig, clips, settings, names, frames, *, elevation, yaw, lig
     else:
         cropped = union_crop(cropped, settings.margin, settings.alpha_threshold)
     del views
-    use = [i // frames in keep for _, i in order] if frame_with else [True] * len(order)
+    use = [clip_of[i] in keep for _, i in order] if frame_with else [True] * len(order)
     return _sprites_from_views(cropped, nviews if normals else None, settings, use, clean)
+
+
+def _sheet_order(clips, frames, directions: int):
+    """[(direction, pose index)] in sheet order (clip, direction, frame) + the clip of each pose
+    (poses are numbered clip by clip, frames_of(frames, clip) each)."""
+    counts = frame_counts(clips, frames)
+    off = np.concatenate([[0], np.cumsum(counts)]).astype(int)
+    order = [(d, int(off[a]) + f) for a in range(len(clips)) for d in range(directions)
+             for f in range(counts[a])]
+    clip_of = [a for a, n in enumerate(counts) for _ in range(n)]
+    return order, clip_of
 
 
 PREP_CODE = ("pipeline", "pixelize", "color", "settings", "systems", "normals")
@@ -1027,7 +1061,7 @@ def _staged_turnaround(rig, paths, animations, clips, settings, names, frames, *
         if in_place and clip.duration > 0:
             moved = rig.centroid(clip, clip.end) - rig.centroid(clip, clip.start)
             drift = moved * np.array([1.0, 0.0, 1.0]) / clip.duration
-        jobs += [(a, t, centre, drift) for t in clip_times(clip, frames)]
+        jobs += [(a, t, centre, drift) for t in clip_times(clip, frames_of(frames, clip.name))]
     base = surface.colours.astype(np.float32)
     del surface
     import time
@@ -1061,9 +1095,8 @@ def _staged_turnaround(rig, paths, animations, clips, settings, names, frames, *
         secs["B MB"] = round(sum(len(x[1][4]) + len(x[1][5] or b"") for row in packed
                                  for x in row if x[1] is not None) / 2 ** 20, 1)
         # sheet order: clip, direction, frame
-        order = [(d, a * frames + f) for a in range(len(clips)) for d in range(len(names))
-                 for f in range(frames)]
-        use = [i // frames in keep for _, i in order] if frame_with else [True] * len(order)
+        order, clip_of = _sheet_order(clips, frames, len(names))
+        use = [clip_of[i] in keep for _, i in order] if frame_with else [True] * len(order)
         boxes = [packed[i][d][0] for (d, i), u in zip(order, use) if u]
         boxes = [b for b in boxes if b is not None]
         if boxes:
@@ -1076,7 +1109,7 @@ def _staged_turnaround(rig, paths, animations, clips, settings, names, frames, *
         s = Settings(**{**settings.to_dict(), "crop_to_subject": False})
         items = [packed[i][d][1] for d, i in order]
         del packed
-        step = max(1, frames)
+        step = max(1, max(frame_counts(clips, frames)))
         chunks = [items[i:i + step] for i in range(0, len(items), step)]
         prepared = [x for part in pool.map(_stage_prepare, [(c, box, size, normals, s)
                                                             for c in chunks]) for x in part]
@@ -1151,26 +1184,32 @@ def write_animated(anim: AnimatedSet, out_png, aseprite: bool = False,
     action_direction); optionally .aseprite (same tags) and Godot SpriteFrames (an animation
     per action_direction, e.g. walk_SE) + a script that plays action + facing.
     normals: also <sheet>_n.png, the normal maps laid out exactly like the sheet."""
+    from .export import pack_rows, sheet_json
     out = Path(out_png)
     frames = [s.rgba for s in anim.flat()]
     f = anim.frames
-    tags, names = [], []
-    for a in anim.actions:
-        for d in anim.directions:
+    counts = anim.counts()
+    tags, names, rows, durations = [], [], [], []
+    for a, n, action_rows in zip(anim.actions, counts, anim.sprites):
+        for d, row in zip(anim.directions, action_rows):
             first = len(names)
-            names += [f"{a.name}_{d} {i}" for i in range(f)]
-            tags.append((f"{a.name}_{d}", first, first + f - 1, a))
-    out_json = write_sheet(frames, out, f, anim.actions[0].frame_ms, None, names)
-    meta = json.loads(out_json.read_text(encoding="utf-8"))
-    for i, fr in enumerate(meta["frames"]):
-        fr["duration"] = anim.actions[i // (f * len(anim.directions))].frame_ms
+            names += [f"{a.name}_{d} {i}" for i in range(n)]
+            durations += [a.frame_ms] * n
+            tags.append((f"{a.name}_{d}", first, first + n - 1, a))
+            rows.append([s.rgba for s in row])
+    # one row per action + direction (columns = the longest action; shorter rows end early;
+    # when every action has the same frames this is exactly write_sheet's grid)
+    sheet, rects = pack_rows(rows)
+    Image.fromarray(sheet, "RGBA").save(out)
+    meta = sheet_json(rects, out.name, durations, None, names)
+    out_json = out.with_suffix(".json")
     meta["meta"]["frameTags"] = [{"name": n, "from": lo, "to": hi, "direction": "forward"}
                                  for n, lo, hi, _ in tags]
     out_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     written = [out, out_json]
     if normals:
         from .normals import write_normal_sheet
-        written.append(write_normal_sheet(anim.flat(), out, f))
+        written.append(write_normal_sheet(anim.flat(), out, f, rows=counts_rows(anim)))
         from .glow import write_glow_sheet                # lit sheets: emissive pixels too
         g = write_glow_sheet(out, force=True)
         if g is not None:
@@ -1182,7 +1221,6 @@ def write_animated(anim: AnimatedSet, out_png, aseprite: bool = False,
                        tags=[(n, lo, hi) for n, lo, hi, _ in tags])
         written.append(ase)
     if godot:
-        _, rects = pack_sheet(frames, f)
         anims = {n: {"frames": list(range(lo, hi + 1)), "duration_ms": a.frame_ms, "loop": a.loop}
                  for n, lo, hi, a in tags}
         tres = write_sprite_frames(out.with_suffix(".tres"), out.name, rects, animations=anims)
@@ -1191,6 +1229,11 @@ def write_animated(anim: AnimatedSet, out_png, aseprite: bool = False,
                       encoding="utf-8")
         written += [tres, gd]
     return written
+
+
+def counts_rows(anim: AnimatedSet) -> list[int]:
+    """Frames in every sheet row (action x direction), in sheet order."""
+    return [n for n in anim.counts() for _ in anim.directions]
 
 
 def write_animated_preview(anim: AnimatedSet, out_gif, scale: int = 3, columns: int = 8,
@@ -1204,7 +1247,7 @@ def write_animated_preview(anim: AnimatedSet, out_gif, scale: int = 3, columns: 
     images, durations = [], []
     for a, action in zip(anim.sprites, anim.actions):
         for _ in range(loops):
-            for f in range(anim.frames):
+            for f in range(len(a[0])):
                 canvas = Image.new("RGBA", (cols * w, rows * h), background + (255,))
                 for d in range(n):
                     canvas.alpha_composite(Image.fromarray(a[d][f].rgba, "RGBA"),
