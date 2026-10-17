@@ -84,3 +84,31 @@ Knight 1x vs 2x: X for the 1x knight-v3 was 12.5 min of drawing (27 drawings) + 
 model 3.2 = ~18 min, so the 2x knight with the check costs ~11 min more: ~4 min of it are the
 extra drawings this run needed (38 vs 27: more back views were muddled and retried), ~2 min the
 check bends, ~1.7 min its redraws, ~0.6 min 2x bending.
+
+## Fixes round (2026-10-17): elf remade with the 3D model checks
+
+Measured on the RTX 4070 laptop, project "Pixel 2x test" (128 px people, 45 deg), everything
+automatic (picture check, shape check + one bounded shape retry, per-direction check + bounded
+redraws), inside the shared GPU lock. Minutes.
+
+| stage | elf-2x (before, X) | **elf-2x-b (after, Y)** | elf-side-2x (before) | **elf-side-2x-b (after)** |
+|---|---|---|---|---|
+| model (picture + shape + check) | 3.2 (reused) | **3.8** (1 picture, 2 shapes: the first was 54% flyaways, a new seed came out clean) | 3.2 (reused) | 3.8 (the elf-2x-b model, reused) |
+| rig | 0.05 | 0.07 | 0.01 | 0.04 |
+| front + other directions drawn | 14.7 | 14.5 (36 drawings + back picture) | 2.2 | 1.5 |
+| quality check | 2.1 | 2.0 | 0.35 | 0.2 |
+| quality redraws | 2.8 (4 directions) | 1.4 (2 directions) | 0.6 | 0 |
+| bending | 2.9 | 2.7 | 0.4 | 0.24 |
+| **total (wall)** | **~28** (25.7 + restart) | **24.5** | 6.7 | **5.8** |
+| directions passed | 8/16 (floating bow / ribbon bits) | **15/16** (weak: SW blotch) | 0/2 | **2/2** |
+
+**X -> Y: elf ~28 min -> 24.5 min**, 8/16 -> 15/16 directions; the side elf 6.7 -> 5.8 min, 0/2 -> 2/2.
+The model checks cost ~2 s per shape on the CPU; the bounded shape retry ~1.3 min of GPU only
+when a shape is mostly flyaways (it was, once). Fewer broken directions = fewer redraws, so the
+whole character came out faster.
+
+Not creations, but the same automatic tools on existing characters (CPU re-bend + check, then
+`check_and_fix` with bounded GPU redraws): knight-2x30 relit backs (its old skeleton kept: a new one
+under old drawings changed the front views) 7.7 min check_and_fix -> 14/16 (W passes; weak: N sharp,
+ENE flicker); wolf-2x at its real size
+(drawings re-placed, no GPU) 1.0 min + 6.6 min check_and_fix (2 redraws) -> 15/16.

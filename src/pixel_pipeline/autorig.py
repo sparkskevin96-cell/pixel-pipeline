@@ -335,7 +335,35 @@ def _at_y(grid, path: list, y: float) -> np.ndarray:
 
 # --------------------------------------------------------------------------- skeleton
 
-def find_skeleton(pts: np.ndarray) -> tuple[Skeleton, _Grid, np.ndarray]:
+HEADS_RANGE = (4.5, 7.5)        # measured head counts are kept inside this (helmets, hats, hoods
+                                # and beards fool the neck); the words / house style say more
+
+
+def heads_for(words: str = "", proportions: str = "normal") -> float | None:
+    """Heads tall from the words (a dwarf, a child, a goblin) or the house style's proportions
+    (chibi 2.5, tall 7.5); None = measure it."""
+    low = (words or "").lower()
+    if any(w in low for w in ("dwarf", "gnome", "halfling", "hobbit", "goblin", "child", "kid",
+                              "imp", "kobold")):
+        return 4.0
+    return {"chibi": 2.5, "tall": 7.5}.get(proportions)
+
+
+def proportional_pelvis(grid, xc: float, H: float, heads: float | None = None) -> float | None:
+    """Where the figure's proportions put the crotch (see find_skeleton): heads given, else from
+    its head size (the neck = the narrowest row between 0.70 and 0.93 of the height), kept in
+    HEADS_RANGE."""
+    if heads is None:
+        ys = np.linspace(0.70 * H, 0.93 * H, 24)
+        widths = np.array([grid.run_width(y, xc) for y in ys], float)
+        if not (widths > 0).any():
+            return None
+        neck = float(ys[int(np.argmin(np.where(widths > 0, widths, np.inf)))])
+        heads = float(np.clip(H / max(H - neck, 1e-6), *HEADS_RANGE))
+    return H * (0.58 - 0.65 / float(np.clip(heads, 2.5, 8.0)))
+
+
+def find_skeleton(pts: np.ndarray, heads: float | None = None) -> tuple[Skeleton, _Grid, np.ndarray]:
     """Joint positions of a standing humanoid from its surface points (normalised)."""
     grid = _Grid(pts)
     H = grid.height
@@ -387,6 +415,18 @@ def find_skeleton(pts: np.ndarray) -> tuple[Skeleton, _Grid, np.ndarray]:
                                          + abs(grid.xy(*p)[0] - xc))) if g.pix else []
         legs = {}
         notes.append("legs: not separate (robe?), standard proportions")
+    pelvis_meas = pelvis_y
+    # proportions (2026-10-17, Kevin: robed / short-legged characters walk slowly): a cape, robe,
+    # tunic or beard hanging between the legs fills the front silhouette, so the "crotch" came out
+    # near the floor (mage hips 0.18 H, knight 0.33 H -> strides half a person's). The hips sit at
+    # least where the figure's proportions put them: crotch = H (0.58 - 0.65 / heads), heads =
+    # height / head size (narrowest neck row); 8 heads -> 0.50 H, 7 -> 0.49, 4 -> 0.42, 2.5 -> 0.32.
+    # A robe then gets legs inside it (the thighs below the hips, the feet where they show).
+    est = proportional_pelvis(grid, xc, H, heads)
+    if est is not None and pelvis_y < est - 0.02 * H:
+        notes.append(f"hips raised to {est / H:.2f} H by the proportions (measured "
+                     f"{pelvis_y / H:.2f} H: something hangs between the legs)")
+        pelvis_y = est
     pelvis = np.array([xc, pelvis_y])
 
     # arms: the most sideways ends between the knees and the head
@@ -456,7 +496,7 @@ def find_skeleton(pts: np.ndarray) -> tuple[Skeleton, _Grid, np.ndarray]:
 
         leg = legs.get(s)
         if leg:
-            hip_pt = _at_y(grid, leg, pelvis_y - 0.06 * H)
+            hip_pt = _at_y(grid, leg, pelvis_meas - 0.06 * H)
             hip = np.array([hip_pt[0], pelvis_y - 0.02 * H])
             ankle_y = float(np.clip(grid.xy(*leg[-1])[1], 0.035 * H, 0.06 * H))
             joints[f"thigh_{s}"] = hip
@@ -923,7 +963,7 @@ def rig_preview(grid: _Grid, skel_px: np.ndarray, sk: Skeleton, scale: int = 2) 
 
 
 def auto_rig(model, out_glb=None, *, actions=ACTIONS, weapon_hand: str = "right", up: str = "y",
-             yaw: float = 0.0, points: int = 400_000) -> RigResult:
+             yaw: float = 0.0, points: int = 400_000, heads: float | None = None) -> RigResult:
     """A standing humanoid model -> rigged, animated .glb (default <name>.rigged.glb).
     actions: any of all_actions() (the built-in six and motions.py's cast, shoot, block,
     thrust, jump, wave, kneel, victory); 'attack=shoot' names a clip attack that moves like
@@ -934,7 +974,7 @@ def auto_rig(model, out_glb=None, *, actions=ACTIONS, weapon_hand: str = "right"
     out = Path(out_glb) if out_glb else model.with_name(model.stem + ".rigged.glb")
     parts = _load(model, up, yaw)
     pts = _surface_points(parts, points)
-    sk, grid, skel_px = find_skeleton(pts)
+    sk, grid, skel_px = find_skeleton(pts, heads)
     write_rigged(parts, sk, out, actions, "r" if weapon_hand.startswith("r") else "l")
     return RigResult(out, sk, rig_preview(grid, skel_px, sk),
                      [n for n, _ in parse_actions(actions, all_actions())])

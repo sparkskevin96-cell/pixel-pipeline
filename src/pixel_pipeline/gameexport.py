@@ -349,8 +349,12 @@ def _motion_info(asset, sheet: Path, entry: dict, ppu: float) -> dict:
     out: dict = {}
     fh = (entry.get("frame") or {}).get("h")
     if fh:
+        try:
+            smeta = json.loads(sheet.with_suffix(".json").read_text(encoding="utf-8")).get("meta")
+        except (OSError, ValueError):
+            smeta = None
         k = px_scale(int(fh), getattr(asset, "kind", "person") if getattr(asset, "kind", "") in
-                     ("person", "animal") else "person", getattr(asset, "size", None))
+                     ("person", "animal") else "person", getattr(asset, "size", None), smeta)
         out["px_scale"] = round(k, 4)
         out["world_ppu"] = round(ppu * k, 3)
     stride, body = sheet_stride(sheet.with_suffix(".json")) if sheet.exists() else ({}, None)

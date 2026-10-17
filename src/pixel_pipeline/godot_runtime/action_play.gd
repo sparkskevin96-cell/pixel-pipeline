@@ -394,7 +394,7 @@ func _attack_now() -> void:
 			if randf() < 0.55:
 				drop = _drop()
 	var s := {"unit": hero["id"], "effect": "slash", "scale": 1.0, "windup": 0.1, "time": 0.22,
-		"hits": hits, "damage": int(data.get("sword", 3)), "knock": 0.9, "spark": "spark", "hit_light": 0.6,
+		"hits": hits, "damage": int(data.get("sword", 3)), "knock": float(data.get("foe_knock", 1.2)), "spark": "spark", "hit_light": 0.6,
 		"drops": drops}
 	if hits.size() > 0:
 		s["shake"] = 0.035
@@ -470,7 +470,8 @@ func _think(delta: float) -> void:
 		f["cd"] = maxf(0.0, f["cd"] - delta)
 		if int(t["hp"]) < int(f["hp"]):
 			f["hp"] = int(t["hp"])
-			f["stun"] = maxf(f["stun"], 0.45)
+			f["stun"] = maxf(f["stun"], float(data.get("foe_stun", 0.6)))
+			f["wind"] = 0.0                            # a hit interrupts its bite
 		if f["stun"] > 0.0:
 			f["stun"] -= delta
 			foe_vel[id] = Vector3.ZERO
@@ -484,7 +485,7 @@ func _think(delta: float) -> void:
 		if f["state"] == "chase":
 			if f["ranged"]:
 				if dist < 6.0 and f["cd"] <= 0.0:
-					f["cd"] = 2.2
+					f["cd"] = float(data.get("shot_cd", 2.8))
 					_enemy_shot(t)
 				elif dist > 3.0:
 					_walk_toward(t, d.normalized(), 1.8, "walk", delta)
@@ -496,12 +497,24 @@ func _think(delta: float) -> void:
 			else:
 				board.face_to(t, _snap8(atan2(d.z, d.x)))
 				_stop_foe(t)
-				if f["cd"] <= 0.0 and invuln <= 0.0:
-					f["cd"] = 1.1
-					invuln = 1.0
-					_hurt({"unit": hero["id"], "by": id, "damage": int(data.get("bite", 2)), "knock": 0.6, "time": 0.2})
+				# balance (2026-10-17: the self-test hero ended at 8/24 HP): a bite is TELEGRAPHED
+				# (wind-up the player can see and step out of or interrupt with a hit), then a
+				# cooldown; the hero is knocked clear and blinks a while after a bite
+				if f.get("wind", 0.0) <= 0.0 and f["cd"] <= 0.0 and invuln <= 0.0:
+					f["wind"] = float(data.get("windup", 0.4))
+					if "attack" in t["sheet"]["anims"]:
+						board._play(t, "attack", true)
 				elif t["anim"] in ["walk", "run"]:
 					_stop_foe(t)
+		if f.get("wind", 0.0) > 0.0:
+			f["wind"] -= delta
+			if f["wind"] <= 0.0:
+				f["wind"] = 0.0
+				f["cd"] = float(data.get("bite_cd", 1.6))
+				if dist < float(data.get("bite_reach", 0.95)) and invuln <= 0.0 and f["stun"] <= 0.0:
+					invuln = float(data.get("hurt_invuln", 1.3))
+					_hurt({"unit": hero["id"], "by": id, "damage": int(data.get("bite", 1)),
+						   "knock": float(data.get("hero_knock", 0.9)), "time": 0.2})
 		else:
 			f["wt"] -= delta
 			if f["wt"] <= 0.0:
@@ -712,6 +725,11 @@ func selftest() -> Dictionary:
 	out["walked_south"] = snappedf(_pos(hero).z - p1.z, 0.01)
 	await _hold(Vector2(-1, -1), 0.6)              # diagonal
 	out["facing_after_diagonal"] = board._sprite_dir(hero["yaw"])
+	var f8 := []                                   # the 8 game facings: 8 different drawings
+	for i in 8:
+		f8.append(board._sprite_dir(i * PI / 4.0, float(hero["sheet"].get("elevation", -1.0))))
+	out["facings8"] = f8
+	out["facings8_distinct"] = f8.duplicate().reduce(func(acc, x): return acc if x in acc else acc + [x], []).size()
 	var bushes := props_at.values().count("bush") + props_at.values().count("pot")
 	_attack_now()
 	await _sleep(0.5)

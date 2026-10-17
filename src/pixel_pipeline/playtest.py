@@ -82,6 +82,8 @@ class Sources:
         p2 = _sample("Pixel 2x test")
         chars = {"knight": p2 / "characters/knight-2x", "archer": p2 / "characters/elf-2x",
                  "wolf": p2 / "characters/wolf-2x"}
+        if (p2 / "characters/elf-2x-b/sheet.png").exists():     # remade with the model checks
+            chars["archer"] = p2 / "characters/elf-2x-b"
         k30 = _sample("Pixel 2x test 30") / "characters/knight-2x30"   # the hero drawn at 30 deg
         if (k30 / "sheet.png").exists() and not (k30 / "keys" / "keys.json").read_text(
                 encoding="utf-8").count('"partial": true'):
@@ -98,6 +100,8 @@ class Sources:
         if base.tiles_project is not None and studio is not None:
             tiles = tiles_at(base.tiles_project, 64, Path(studio))
         side = _sample("Pixel 2x test side") / "characters/elf-side-2x"
+        if (side.parent / "elf-side-2x-b" / "sheet.png").exists():
+            side = side.parent / "elf-side-2x-b"
         return cls(chars, tiles, base.ui_kit, base.cards, base.items, base.props, tile=64, one_grid=True,
                    side_hero=side if (side / "sheet.png").exists() else None)
 
@@ -372,13 +376,18 @@ def locomotion_copies(src: Sources, studio: Path, frames: int = 12, progress=Non
         proj = staging_project(studio, f"loco-{base.name}", base=base)
         dst = Path(proj.folder) / "characters" / folder.name
         mark = dst / LOCO_MARK
-        if not (mark.exists() and mark.read_text(encoding="utf-8") == str(frames)):
+        tag = f"{frames}+rig{library.RIG_VERSION}"
+        if not (mark.exists() and mark.read_text(encoding="utf-8") == tag):
             shutil.rmtree(dst, ignore_errors=True)
             stage_character(folder, Path(proj.folder), keys=True)
             t = time.time()
             with assets.using_project(proj):
                 ch = library.from_folder(dst)
                 try:
+                    # the newest skeleton (strides, RIG_VERSION) for 3D-rendered people; a drawn
+                    # one keeps its own (a new skeleton under old drawings changed their look)
+                    if ch.kind != "animal" and not library.is_drawn(ch):
+                        library.rerig(ch, progress=say)
                     library.rerender_locomotion(ch, frames, progress=say)
                     note = f"{frames} frames"
                 except Exception as e:  # noqa: BLE001 - keep the copy as it was, stride measured
@@ -386,7 +395,7 @@ def locomotion_copies(src: Sources, studio: Path, frames: int = 12, progress=Non
                     library.annotate_stride(ch.sheet, ch.rigged, None)
             say(f"{folder.name}: walk/run {note} in {time.time() - t:.0f} s")
             shutil.rmtree(dst / "keys" / "old", ignore_errors=True)
-            mark.write_text(str(frames), encoding="utf-8")
+            mark.write_text(tag, encoding="utf-8")
         out[role] = dst
     return Sources(out, src.tiles_project, src.ui_kit, src.cards, src.items, src.props, src.tile,
                    src.one_grid, src.side_hero)
@@ -409,7 +418,9 @@ def tiles_at(project_folder: Path, tile: int, studio: Path) -> Path:
     from . import assets, tilegen
     dst = Path(studio) / "projects" / f"tiles-{tile}"
     mark = dst / ".tiles_at"
-    if mark.exists():
+    from .tilepaint import DETAIL_PX
+    tag = f"{tile}+detail{DETAIL_PX}"          # redone when the drawn details change (2026-10-17)
+    if mark.exists() and mark.read_text(encoding="utf-8") == tag:
         return dst
     shutil.rmtree(dst, ignore_errors=True)
     proj = staging_project(Path(studio), f"tiles-{tile}", base=Path(project_folder), tile=int(tile),
@@ -425,7 +436,7 @@ def tiles_at(project_folder: Path, tile: int, studio: Path) -> Path:
         except Exception as e:  # noqa: BLE001 - a set that can't be redone stays out of the look
             shutil.rmtree(a.folder, ignore_errors=True)
             print(f"tiles_at: {a.folder.name} skipped ({type(e).__name__}: {e})")
-    mark.write_text(str(tile), encoding="utf-8")
+    mark.write_text(tag, encoding="utf-8")
     return dst
 
 
@@ -435,7 +446,7 @@ def px_scale_of(sheet_png, name: str) -> float:
     meta = json.loads(Path(sheet_png).with_suffix(".json").read_text(encoding="utf-8"))
     fr = meta["frames"]
     fh = (fr[0] if isinstance(fr, list) else next(iter(fr.values())))["frame"]["h"]
-    return px_scale(fh, "animal" if name in ("wolf", "dog") else "person")
+    return px_scale(fh, "animal" if name in ("wolf", "dog") else "person", meta=meta.get("meta"))
 
 
 # --------------------------------------------------------------------------- HD-2D board games
@@ -649,8 +660,11 @@ def build_action(out, src: Sources | None = None, godot: str | None = None, shot
               "fade_in": 0.0, "camera": {"yaw": 0, "pitch": 58, "dist": 15.5, "rate": 5.0, "dof": 0.015,
                                          "follow": "knight"},
               "look": "res://real3d.tscn",
-              "shot": shot, "ranged": ["bandit"], "sword": 3, "shot_damage": 2, "bite": 2,
-              "aggro": 4.5, "foe_speed": 2.4, "speed": 3.1, "steps": []}
+              "shot": shot, "ranged": ["bandit"], "sword": 3, "shot_damage": 2,
+              # balance (2026-10-17): telegraphed bites, longer cooldowns, the hero knocked clear
+              "bite": 1, "windup": 0.4, "bite_cd": 1.6, "bite_reach": 0.95, "hurt_invuln": 1.3,
+              "hero_knock": 0.9, "foe_knock": 1.2, "foe_stun": 0.6, "shot_cd": 2.8,
+              "aggro": 4.5, "foe_speed": 2.2, "speed": 3.1, "steps": []}
     if src.one_grid:                    # pixel-perfect: one pixel grid, camera = the drawn angle
         script["look"] = "res://pixel3d.tscn"
         script["camera"] = {"yaw": 0, "rate": 5.0, "follow": "knight"}

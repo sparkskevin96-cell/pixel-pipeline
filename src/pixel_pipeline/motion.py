@@ -266,6 +266,8 @@ def annotate_sheet(sheet_png, info: dict) -> Path:
         m["elevation"] = float(info["elevation"])
     if info.get("normals_smooth"):
         m["normals_smooth"] = True
+    if info.get("px_scale"):                       # the library scale it was made at
+        m["px_scale"] = float(info["px_scale"])
     js.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return js
 
@@ -304,10 +306,15 @@ def frame_counts_of(sheet_json) -> dict[str, int]:
 
 # --------------------------------------------------------------------------- world scale
 
-def px_scale(frame_h: int, kind: str = "person", size: str | None = None) -> float:
+def px_scale(frame_h: int, kind: str = "person", size: str | None = None,
+             meta: dict | None = None) -> float:
     """How many times bigger than the library's 64 px-person scale a sheet was drawn (Neo16's
-    144x96 knight = 1.5, a QA 96x64 elf = 1.0): frame height / the library frame for its kind
-    and size. Divide by it (or multiply ppu by it) to put every sheet on one world scale."""
+    144x96 knight = 1.5, a QA 96x64 elf = 1.0): the sheet json's meta.px_scale when it has one
+    (written since 2026-10-17: animals' frames are sized by the animal's real size, so their
+    height no longer tells the scale), else frame height / the library frame for its kind and
+    size. Divide by it (or multiply ppu by it) to put every sheet on one world scale."""
+    if meta and meta.get("px_scale"):
+        return float(meta["px_scale"])
     from .library import DEFAULT_SIZE, SIZES
     sizes = SIZES.get(kind, SIZES["person"])
     w, h = sizes.get(size or DEFAULT_SIZE.get(kind, "normal"), sizes[DEFAULT_SIZE.get(kind, "normal")])

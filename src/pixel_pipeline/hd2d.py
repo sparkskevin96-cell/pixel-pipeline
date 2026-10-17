@@ -1444,22 +1444,60 @@ func _dir_yaw(name: String) -> float:
 	var i := DIRS.find(name)
 	return deg_to_rad(i * 22.5) if i >= 0 else PI / 2.0
 
-func _sprite_dir(world_yaw: float, elev := -1.0) -> String:
-	# the world direction, seen from this camera, as one of the 16 sprite directions. The sheets
-	# were drawn at `sheet_elev`; the ground is seen at `view_pitch`: the drawing whose ON-SCREEN
-	# direction matches is picked (tan k = tan a * sin(view) / sin(drawn)), so a steeper camera
-	# than the drawings doesn't make walkers drift off their facing.
+func _dir_cont(world_yaw: float, e: float) -> float:
+	# the world direction, seen from this camera, as a continuous index into the 16 sprite
+	# directions. The sheets were drawn at `e`; the ground is seen at `view_pitch`: the drawing
+	# whose ON-SCREEN direction matches (tan k = tan a * sin(view) / sin(drawn)), so a steeper
+	# camera than the drawings doesn't make walkers drift off their facing.
 	var d := Vector3(cos(world_yaw), 0, sin(world_yaw))
 	var right := cam.global_transform.basis.x
 	var fwd := -cam.global_transform.basis.z
 	fwd.y = 0
 	fwd = fwd.normalized()
 	var a := atan2(-d.dot(fwd), d.dot(right))      # screen angle, y down (toward camera = S)
-	var e := elev if elev > 1.0 else sheet_elev      # this sheet's drawn angle (else the board's)
 	if e > 1.0 and absf(view_pitch - e) > 2.0:
 		a = atan2(sin(a) * sin(deg_to_rad(view_pitch)) / sin(deg_to_rad(e)), cos(a))
-	var idx := int(round(fposmod(a, TAU) / (TAU / 16.0))) % 16
-	return DIRS[idx]
+	return fposmod(a, TAU) / (TAU / 16.0)
+
+var _dir_tables := {}
+
+func _eight_table(e: float) -> Array:
+	# the 8 world facings of an 8-way (or 4-way) game -> 8 DIFFERENT drawings, each the nearest
+	# free one to its on-screen angle (most certain first). Plain rounding showed some drawings
+	# twice and never used others once the camera is steeper than the drawings.
+	var b := cam.global_transform.basis.x
+	var key := "%.1f|%.1f|%.2f|%.2f" % [e, view_pitch, b.x, b.z]
+	if _dir_tables.has(key):
+		return _dir_tables[key]
+	var t := []
+	for i in 8:
+		t.append(_dir_cont(i * PI / 4.0, e))
+	var order := range(8)
+	order.sort_custom(func(x, y): return absf(t[x] - round(t[x])) < absf(t[y] - round(t[y])))
+	var taken := {}
+	var out := []
+	out.resize(8)
+	for i in order:
+		var best := -1
+		var best_d := 99.0
+		for j in 16:
+			if taken.has(j):
+				continue
+			var dd := absf(fposmod(t[i] - j + 8.0, 16.0) - 8.0)
+			if dd < best_d:
+				best_d = dd
+				best = j
+		taken[best] = true
+		out[i] = best
+	_dir_tables[key] = out
+	return out
+
+func _sprite_dir(world_yaw: float, elev := -1.0) -> String:
+	var e := elev if elev > 1.0 else sheet_elev      # this sheet's drawn angle (else the board's)
+	var w8 := world_yaw / (PI / 4.0)
+	if absf(w8 - round(w8)) < 0.02:                  # one of the 8 game facings: no duplicates
+		return DIRS[_eight_table(e)[posmod(int(round(w8)), 8)]]
+	return DIRS[int(round(_dir_cont(world_yaw, e))) % 16]
 
 const LOCO := ["walk", "run", "sneak"]
 

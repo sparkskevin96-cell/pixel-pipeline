@@ -20,7 +20,13 @@ direction (S for people, E for animals: the drawing the user approved):
     whole-part colour misses / grey share of back views
 
 A direction fails when a metric is past its LIMIT (relative to the reference where that makes
-sense). `to_redraw` gives the failing ones worst first; library's automatic chain redraws them
+sense). Recalibrated 2026-10-17 on 11 drawn characters (the 2x tests, QA 2026-10-15, Neo16 test):
+blotch counts only near-BLACK (dark AND colourless: a deep purple robe is a material), foreign
+weighs lightness half (a lighter shade of the same cloth is no new colour), noise metrics are
+judged against the views of the same half, look metrics (dark, colour, sharpness) against the
+views turned the same way (people: within 90 deg of S, else turned away: E, W and the backs,
+which drawnrig.relight_view lifts alike); HARD blotch 0.22 = a back drawn as one black mass fails
+even when every back is like that. `to_redraw` gives the failing ones worst first; library's automatic chain redraws them
 once with a new seed (a direction is never redrawn twice for the same reason) and keeps the
 better of old and new (`better`). Pure numpy/OpenCV, ~0.2 s per character.
 """
@@ -43,7 +49,12 @@ LIMITS = {"specks": (4.0, 1.45), "blotch": (0.10, 1.6), "bits": (0.012, None), "
           "grey": (0.14, None)}
 # past these a direction fails even when the character's other directions are as bad (a whole
 # side drawn as one dark mass, noise everywhere)
-HARD = {"specks": 9.0, "blotch": 0.38, "bits": 0.03, "flicker": 0.22}
+# noise metrics are judged against the views of the same half (front: S half + E/W, back: N half:
+# fronts carry more detail, so more 1-px specks); the look metrics (dark, colour, sharpness)
+# against the views turned the same way (people: front within 90 deg of S, else turned away)
+NOISE = ("specks", "flicker", "bits", "iou", "off_model")
+BLOTCH_CHROMA = 12.0          # Lab chroma under this (and L < 18) = near-black for blotch
+HARD = {"specks": 9.0, "blotch": 0.22, "bits": 0.03, "flicker": 0.22}
 SHARP_HARD = 0.3
 IOU_MIN = 0.82                  # fails under this AND 0.06 under the character's median
 IOU_FLOOR = 0.70                # fails under this whatever the others do
@@ -98,14 +109,18 @@ def specks(rgba: np.ndarray) -> float:
 
 
 def blotch(rgba: np.ndarray, ref_dark: float) -> float:
-    """Share of the body in big near-black clusters beyond what the reference has (L < 18)."""
+    """Share of the body in big near-black clusters beyond what the reference has (L < 18,
+    chroma < BLOTCH_CHROMA)."""
     import cv2
     from .color import rgb_to_lab
     on = rgba[..., 3] > 0
     if not on.any():
         return 0.0
-    L = rgb_to_lab(rgba[..., :3])[..., 0]
-    dark = (L < 18) & on
+    lab = rgb_to_lab(rgba[..., :3])
+    L = lab[..., 0]
+    # near-BLACK: dark AND colourless. A deep purple robe or a dark red cloak is a material, not
+    # mud (recalibrated on 11 characters, 2026-10-17: the mage's shaded robe failed 6 views)
+    dark = (L < 18) & (np.hypot(lab[..., 1], lab[..., 2]) < BLOTCH_CHROMA) & on
     inner = cv2.erode(on.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
     dark &= inner                                   # the outline is allowed to be dark
     k, cc, stats, _ = cv2.connectedComponentsWithStats(dark.astype(np.uint8), connectivity=8)
@@ -166,7 +181,7 @@ def colour(rgba: np.ndarray, ref: np.ndarray) -> float:
 
 
 def foreign(rgba: np.ndarray, ref: np.ndarray, far: float = 22.0) -> float:
-    """Share of body pixels whose colour is far (Lab distance) from every colour of the
+    """Share of body pixels whose colour is far (Lab distance, L half weight) from every colour of the
     reference frame: things the approved design doesn't have (a brown sack on a knight)."""
     from .color import rgb_to_lab
     a, b = rgba[..., 3] > 0, ref[..., 3] > 0
@@ -176,7 +191,10 @@ def foreign(rgba: np.ndarray, ref: np.ndarray, far: float = 22.0) -> float:
     rc = np.unique(ref[b][:, :3].reshape(-1, 3), axis=0)
     la = rgb_to_lab(cols[None].astype(np.uint8))[0]
     lb = rgb_to_lab(rc[None].astype(np.uint8))[0]
-    d = np.sqrt(((la[:, None, :] - lb[None, :, :]) ** 2).sum(-1)).min(1)
+    # lightness counts half: a lighter / darker shade of the same material is not a new thing
+    # (relit back views lift the cloak's shadows; drawnrig.relight_view)
+    w = np.array([0.5, 1.0, 1.0], np.float32)
+    d = np.sqrt((((la[:, None, :] - lb[None, :, :]) * w) ** 2).sum(-1)).min(1)
     return float((d[inv.ravel()] > far).mean())
 
 
@@ -223,8 +241,14 @@ def measure(sheet_png, keys_report: dict | None = None, kind: str = "person") ->
     return {"reference": ref, "ref": {k: float(v) for k, v in ref_m.items()}, "directions": out}
 
 
-def side_of(d: str) -> str:
-    """front (S half, E, W) or back (the N half) of a direction name."""
+def side_of(d: str, ref: str = "E") -> str:
+    """front or back group of a direction name. People (reference S): back = turned 90 deg or
+    more from the front (E, W and the N half: they show the cloak side and are relit alike,
+    drawnrig.relight_view); otherwise (animals, reference E): back = the N half."""
+    if ref == "S" and d in DIRS16:
+        k = DIRS16.index(d)
+        turn = abs(((k - DIRS16.index("S")) * 22.5 + 180.0) % 360.0 - 180.0)
+        return "back" if turn >= 90.0 else "front"
     return "back" if "N" in d else "front"
 
 
@@ -233,10 +257,13 @@ def judge(rep: dict) -> dict:
     ref = rep["reference"]
     dirs = rep["directions"]
     meds = {}
+
+    def group(d, k):
+        return side_of(d) if k in NOISE else side_of(d, ref)
     for grp in ("front", "back"):          # back views are judged against back views (a cloak
         med = {}                           # seen from behind is darker and flatter than a face)
         for k in list(LIMITS) + ["iou", "sharp"]:
-            vals = [m[k] for d, m in dirs.items() if k in m and side_of(d) == grp
+            vals = [m[k] for d, m in dirs.items() if k in m and group(d, k) == grp
                     and not (d == ref and k in ("colour", "foreign"))]
             if not vals:
                 vals = [m[k] for d, m in dirs.items() if k in m]
@@ -246,7 +273,7 @@ def judge(rep: dict) -> dict:
     rep["median"] = {g: {k: round(v, 4) for k, v in m.items()} for g, m in meds.items()}
     fails = []
     for d, m in dirs.items():
-        med = meds[side_of(d)]
+        med = {k: meds[group(d, k)].get(k, 0.0) for k in set(meds["front"]) | set(meds["back"])}
         why, bad = [], 0.0
         for k, (lim, fac) in LIMITS.items():
             if k not in m:

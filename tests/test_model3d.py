@@ -87,8 +87,9 @@ def test_prompt_to_model_end_to_end(comfy, tmp_path):
     steps = []
     res = prompt_to_model("a knight", tmp_path / "knight.glb", client=client, seed=5,
                           progress=lambda step, text: steps.append(step))
-    assert steps == ["picture", "cutout", "shape", "views", "views", "colour"]
+    assert steps == ["picture", "cutout", "shape", "check", "check", "views", "views", "colour"]
     assert res.model.exists() and res.picture.exists() and res.raw.exists() and res.seed == 5
+    assert res.check["shape"]["floaters"] == 0 and len(res.check["tries"]) == 1   # a clean shape: once
     picture_wf, shape_wf, back_wf = fake.prompts             # from words: front + back
     assert not any(n["class_type"] == "LoraLoader" for n in picture_wf.values())   # no pixel LoRA
     k = next(n["inputs"] for n in back_wf.values() if n["class_type"] == "KSampler")

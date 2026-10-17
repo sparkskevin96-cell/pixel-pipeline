@@ -17,6 +17,7 @@ PIXEL_LIBRARY to keep the library somewhere else.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -161,12 +162,78 @@ def _free_folder(name: str, base: Path) -> Path:
     return folder
 
 
-def frame_size(kind: str, size: str, st=None) -> tuple[int, int]:
-    """Frame for a kind and size in the project's scale (SIZES are for a 64 px person)."""
+def frame_size(kind: str, size: str, st=None, rigged=None, words: str = "") -> tuple[int, int]:
+    """Frame for a kind and size in the project's scale (SIZES are for a 64 px person). An
+    animal with its rigged model: the frame its REAL size needs (animal_frame)."""
+    if kind == "animal" and rigged is not None and Path(rigged).exists():
+        w, h, _ = animal_frame(rigged, words, size, st)
+        return w, h
     sizes = SIZES.get(kind, SIZES["person"])
     w, h = sizes.get(size, sizes[DEFAULT_SIZE.get(kind, "normal")])
     st = st or style()
     return st.scale(w), st.scale(h)
+
+
+# --------------------------------------------------------------------------- real sizes
+# 2026-10-17 (Kevin: wolves look small next to people under one pixel grid). Animals were fitted
+# into a fixed frame, so a long wolf came out ~0.3 of a knight's height. Now an animal is drawn
+# at its real height against a person: standing height (head up) as a share of a 1.75 m person,
+# x SIZE_FACTOR for small / large; the frame grows to hold every pose at that scale.
+ANIMAL_HEIGHT = (            # (words, height / a person's), first match wins
+    (("rat", "mouse"), 0.07), (("rabbit", "bunny", "hare"), 0.15), (("cat", "kitten"), 0.17),
+    (("chicken", "hen", "rooster", "duck"), 0.22), (("fox",), 0.28), (("puppy",), 0.25),
+    (("dog", "hound", "terrier", "retriever", "shepherd"), 0.40), (("wolf", "warg"), 0.50),
+    (("goat",), 0.48), (("sheep", "ram"), 0.50), (("pig", "boar", "hog"), 0.50),
+    (("tiger", "panther", "leopard", "jaguar"), 0.60), (("lion",), 0.68),
+    (("bear",), 0.75), (("deer", "stag", "elk", "moose"), 0.95), (("cow", "bull", "ox", "bison"), 0.85),
+    (("horse", "pony", "mule", "donkey", "unicorn"), 1.05), (("camel",), 1.15),
+    (("dragon", "wyvern"), 1.40),
+)
+ANIMAL_DEFAULT = 0.45
+SIZE_FACTOR = {"small": 0.75, "medium": 1.0, "large": 1.3}
+PERSON_WORLD_FILL = 0.76    # a library person's standing height / its frame height (measured)
+FRAME_MARGIN = 2
+_FRAME_CACHE: dict = {}
+
+
+def animal_height(words: str, size: str | None = None) -> float:
+    """Standing height of the animal the words name, as a share of a person's."""
+    toks = re.findall(r"[a-z]+", (words or "").lower())
+    ratio = ANIMAL_DEFAULT
+    for keys, h in ANIMAL_HEIGHT:
+        if any(t == k or t == k + "s" or t == k + "es" for t in toks for k in keys):
+            ratio = h
+            break
+    return ratio * SIZE_FACTOR.get(size or "medium", 1.0)
+
+
+def animal_frame(rigged, words: str = "", size: str | None = None, st=None) -> tuple[int, int, float]:
+    """(frame width, frame height, px per model unit) that draws the animal at its real height
+    next to the project's people (animal_height x PERSON_WORLD_FILL x person_height) with room for
+    every pose in every direction. Small creatures keep at least ~12 px of height."""
+    from .drawnrig import Body, clip_poses, load_rig, pose_extent, rest_pose, select_clips
+    from .turnaround import direction_names
+    st = st or style()
+    rigged = Path(rigged)
+    key = (str(rigged), rigged.stat().st_mtime, words, size, st.person_height, st.elevation,
+           st.directions)
+    if key in _FRAME_CACHE:
+        return _FRAME_CACHE[key]
+    rig = load_rig([rigged])
+    body = Body(rig, 30_000)
+    rest = rest_pose(body)
+    pts, _ = body.pose(rest.worlds)
+    height = float(np.ptp(pts[:, 1])) or 1.0
+    want = max(12.0, animal_height(words, size) * PERSON_WORLD_FILL * st.person_height)
+    scale = want / height
+    clips = select_clips(rig, None)
+    poses = clip_poses(body, clips, 8)
+    names = direction_names(st.directions)
+    lo, hi = pose_extent(body, [p for row in poses for p in row] + [rest], names, st.elevation)
+    ext = (hi - lo) * scale * 1.04 + 2 * FRAME_MARGIN
+    w, h = (int(4 * math.ceil(v / 4)) for v in ext)
+    _FRAME_CACHE[key] = (w, h, float(scale))
+    return _FRAME_CACHE[key]
 
 
 def make_thumb(sheet_png: Path, out: Path, px: int = 96) -> Path:
@@ -221,6 +288,7 @@ def annotate_stride(sheet_png, rigged=None, camera_scale: float | None = None, s
     except Exception:  # noqa: BLE001 - a sheet without a readable rig: no stride, nothing breaks
         return {}
     info["elevation"] = float(st.elevation)       # games pick facings with the drawn angle
+    info["px_scale"] = round(st.person_height / 64.0, 4)   # the library scale it was made at
     from .drawnrig import SMOOTH_NORMALS
     if SMOOTH_NORMALS and Path(sheet_png).with_name(Path(sheet_png).stem + "_n.png").exists():
         from .normals import smooth_sheet
@@ -248,7 +316,7 @@ def render_sheets(rigged: Path, out_png: Path, kind: str, size: str, frames=None
     from .anim3d import animated_turnaround, write_animated
     from .settings import settings_for
     st = style()
-    w, h = frame_size(kind, size, st)
+    w, h = frame_size(kind, size, st, rigged, f"{name} {prompt}")
     colours = st.colours if kind == "person" else max(8, round(st.colours * 2 / 3))
     s = settings_for(kind if kind == "animal" else "person", width=w, height=h, colors=colours)
     if st.outline == "none":
@@ -497,9 +565,9 @@ def fix_estimate(ch: "Character") -> dict:
     meta = _keys_meta(ch) or {}
     cam = meta.get("camera") or {}
     st = style()
-    w, h = frame_size(ch.kind, ch.size, st)
-    new_camera = bool(cam) and (cam.get("width"), cam.get("height"), cam.get("elevation"),
-                                cam.get("directions")) != (w, h, st.elevation, st.directions)
+    w, h = frame_size(ch.kind, ch.size, st, ch.rigged, f"{ch.name} {ch.prompt or ''}")
+    # another frame size alone is no new camera: the drawings are re-placed (drawnrig.drawn_at)
+    new_camera = bool(cam) and (cam.get("elevation"), cam.get("directions")) !=         (st.elevation, st.directions)
     if new_camera:
         m = GPU["drawn_dir"] * st.directions * 1.6
         text = (f"{ch.name} was drawn at another size or camera than this project uses now: every "
@@ -546,7 +614,7 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
         metrics.merge(ch.folder, timing)
     say("Adding a skeleton and animations…")
     with metrics.stage(ch.folder, "rig"):
-        auto_rig_cached(ch.model, ch.rigged, kind)
+        auto_rig_cached(ch.model, ch.rigged, kind, f"{ch.name} {ch.prompt or ''}")
         add_project_clips(ch.rigged, kind, progress=say)      # house style: the type's clip set
         if springs:
             _add_springs(ch, say)
@@ -581,7 +649,7 @@ def add_character(name: str, model, *, kind: str = "person", size: str | None = 
 RIG_CODE = ("autorig", "quadruped", "anim3d", "motions", "mocap", "turnaround")
 
 
-def auto_rig_cached(model, out, kind: str = "person") -> Path:
+def auto_rig_cached(model, out, kind: str = "person", words: str = "") -> Path:
     """autorig.auto_rig (people) / quadruped.auto_rig_quadruped (animals) of a model, the
     rigged.glb remembered by the model file's content (cache.py): the same model again (a
     rebuild, a restyle, the same model under another name) gets the same file without
@@ -594,7 +662,9 @@ def auto_rig_cached(model, out, kind: str = "person") -> Path:
             tv = trimesh.__version__
         except ImportError:
             tv = None
-        key = cache.digest(Path(model), kind, tv, cache.code_digest(*RIG_CODE))
+        from .autorig import heads_for
+        key = cache.digest(Path(model), kind, tv, cache.code_digest(*RIG_CODE),
+                           heads_for(words, style().proportions) if kind != "animal" else None)
         hit = cache.load("rig", key)
         if hit is not None:
             Path(out).write_bytes(hit["glb"].tobytes())
@@ -603,11 +673,27 @@ def auto_rig_cached(model, out, kind: str = "person") -> Path:
         from .quadruped import auto_rig_quadruped
         auto_rig_quadruped(model, out)
     else:
-        from .autorig import auto_rig
-        auto_rig(model, out)
+        from .autorig import auto_rig, heads_for
+        heads = heads_for(words, style().proportions)
+        auto_rig(model, out, **({"heads": heads} if heads is not None else {}))
     if key is not None:
         cache.save("rig", key, glb=np.frombuffer(Path(out).read_bytes(), np.uint8))
     return Path(out)
+
+
+RIG_VERSION = 2       # 2 = hips by the proportions (robes / capes no longer shorten the legs)
+
+
+def rerig(ch: Character, progress=None) -> Path:
+    """A new skeleton for the same model (autorig's newer leg / pelvis detection: believable
+    strides for robed and caped characters) + the project's clips. The sheets are NOT re-rendered.
+    A DRAWN character's drawings should be drawn again after it (redraw(ch, None)): bending old
+    drawings onto a new skeleton moved held things and part colours (knight-2x30, 2026-10-17)."""
+    say = progress or (lambda t: None)
+    say(f"{ch.name}: a new skeleton...")
+    auto_rig_cached(ch.model, ch.rigged, ch.kind, f"{ch.name} {ch.prompt or ''}")
+    add_project_clips(ch.rigged, ch.kind, progress=say)
+    return ch.rigged
 
 
 def _keep_keys_for(ch: Character, model) -> None:
@@ -758,10 +844,12 @@ def _draw_preview(ch: Character, say, cancel=None, gpu=None, springs=None) -> di
     prompt = ch.prompt or f"a {ch.name.lower()}"
     from . import metrics
     t0 = time.time()
-    info = drawn_preview(ch.rigged, prompt, drawn_settings(ch.kind, ch.size, st),
+    words = f"{ch.name} {prompt}"
+    scale = animal_frame(ch.rigged, words, ch.size, st)[2] if ch.kind == "animal" else None
+    info = drawn_preview(ch.rigged, prompt, drawn_settings(ch.kind, ch.size, st, ch.rigged, words),
                          directions=st.directions, elevation=st.elevation, style=st,
                          folder=keys, kind=ch.kind, seeds=seeds, cancel=cancel, gpu=gpu,
-                         progress=say)
+                         progress=say, scale=scale)
     ref = info["direction"]
     metrics.merge(ch.folder, {"front": time.time() - t0})
     attempts = list(prev.get("attempts") or [])
@@ -912,7 +1000,7 @@ def _new_model(ch: Character, say) -> None:
         if pic and Path(pic).suffix.lower() == ".png" and Path(pic).exists():
             shutil.copyfile(pic, ch.picture)
     say("Adding a skeleton and animations…")
-    auto_rig_cached(ch.model, ch.rigged, ch.kind)
+    auto_rig_cached(ch.model, ch.rigged, ch.kind, f"{ch.name} {ch.prompt or ''}")
     add_project_clips(ch.rigged, ch.kind, progress=say)
 
 
@@ -987,7 +1075,7 @@ def rebuild(ch: Character, model, progress=None) -> Character:
     if Path(model).resolve() != ch.model.resolve():
         shutil.copyfile(model, ch.model)
     say(f"{ch.name}: adding a skeleton and animations…")
-    auto_rig_cached(ch.model, ch.rigged, ch.kind)
+    auto_rig_cached(ch.model, ch.rigged, ch.kind, f"{ch.name} {ch.prompt or ''}")
     add_project_clips(ch.rigged, ch.kind, progress=say)   # house style: the type's clip set
     render_sheets(ch.rigged, ch.sheet, ch.kind, ch.size, progress=say, drawn=is_drawn(ch),
                   prompt=ch.prompt, reuse=False)          # a new model needs new drawings
@@ -1029,7 +1117,7 @@ def add_character_animations(ch: Character, names, progress=None, *, replace: bo
     keep = [n for n in old if n not in redone] or None
     try:
         st = style()
-        w, h = frame_size(ch.kind, ch.size, st)
+        w, h = frame_size(ch.kind, ch.size, st, ch.rigged, f"{ch.name} {ch.prompt or ''}")
         colours = st.colours if ch.kind == "person" else max(8, round(st.colours * 2 / 3))
         s = settings_for(ch.kind if ch.kind == "animal" else "person", width=w, height=h,
                          colors=colours)
@@ -1180,7 +1268,7 @@ def _render_with_new_clips(ch: Character, tmp: Path, keep, progress=None) -> Non
     p = inspect.signature(render_sheets).parameters.get("clean")
     clean = bool(p.default) if p is not None and p.default is not inspect.Parameter.empty else False
     st = style()
-    w, h = frame_size(ch.kind, ch.size, st)
+    w, h = frame_size(ch.kind, ch.size, st, ch.rigged, f"{ch.name} {ch.prompt or ''}")
     colours = st.colours if ch.kind == "person" else max(8, round(st.colours * 2 / 3))
     s = settings_for(ch.kind if ch.kind == "animal" else "person", width=w, height=h, colors=colours)
     if st.outline == "none":

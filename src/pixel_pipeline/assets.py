@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import json
+import math
 import os
 import re
 import shutil
@@ -246,8 +247,14 @@ def with_style(positive: str, negative: str, style: Style | None, kind: str = "s
 # 1080p (4K = exactly 2x), so the pixel-perfect looks are 1920x1080 / scale.
 RENDER_BY_TYPE = {"hd2d": "hires", "topdown-rpg": "pixel", "side-scroller": "pixel",
                   "isometric": "pixel", "cards-ui": "hires", "custom": "hires"}
-TILES_ACROSS = {"hd2d": 15, "topdown-rpg": 20, "side-scroller": 20, "isometric": 20,
+# about how many tiles the screen shows across, per project type (2026-10-17, Kevin: the 2x knight
+# looked small in the action view at ~15 x 8 tiles; top-down action wants ~11 x 6 - 12 x 7, so the
+# hero reads big). The scale is the WHOLE number (dividing 1920 and 1080: no mixels, integer
+# stretch) that comes closest: 64 px tiles x3 = 640x360 = 10 x 5.6 tiles, 32 px x5 = 384x216 = 12 x
+# 6.75, 16 px x8 = 240x135 = 15 x 8.4 (x10 is past the 8x cap).
+TILES_ACROSS = {"hd2d": 15, "topdown-rpg": 12, "side-scroller": 20, "isometric": 20,
                 "cards-ui": 15, "custom": 15}
+WHOLE_SCALES = (1, 2, 3, 4, 5, 6, 8)      # divide both 1920 and 1080
 RENDERS = ("auto", "pixel", "hires")
 
 
@@ -256,16 +263,17 @@ def pixel_grid(style: "Style | None" = None, *, tile: int | None = None) -> dict
     ppu (sprite texels per tile = tile: ONE grid), scale (screen px per texel at 1080p, whole),
     base [w, h] (the pixel-perfect render size), render (pixel | hires), pitch (the camera = the
     angle sprites are drawn at), person_tiles (how tall a person stands in tiles)}.
-    scale auto = the whole number that shows about TILES_ACROSS[type] tiles across 1920 px
-    (32 px tiles in HD-2D -> 4 = 480x270; 64 px tiles -> 2 = 960x540; 16 px top-down -> 6 =
-    320x180). render auto: pixel-perfect for top-down, side-scroller and isometric; hires for
+    scale auto = the whole number (WHOLE_SCALES) that shows closest to TILES_ACROSS[type] tiles
+    across 1920 px (HD-2D 32 px tiles -> 4 = 480x270, 64 px -> 2 = 960x540; top-down action
+    64 px -> 3 = 640x360 (10 x 5.6 tiles), 32 px -> 5 = 384x216; side-scroller 16 px -> 6). render auto: pixel-perfect for top-down, side-scroller and isometric; hires for
     HD-2D tactics (perspective + depth of field, sprites still at whole texels)."""
     st = style if style is not None else project_style()
     t = int(tile or st.tile or 32)
     kind = st.project_type if st.project_type in RENDER_BY_TYPE else "custom"
     scale = int(st.pixel_scale or 0)
     if scale <= 0:
-        scale = max(1, min(8, round(1920 / (t * TILES_ACROSS[kind]))))
+        want = TILES_ACROSS[kind]
+        scale = min(WHOLE_SCALES, key=lambda k: (abs(math.log(1920 / (t * k) / want)), k))
     render = st.render if st.render in ("pixel", "hires") else RENDER_BY_TYPE[kind]
     pitch = float(st.elevation) if st.elevation and st.elevation > 1 else 45.0
     return {"tile": t, "ppu": float(t), "scale": scale, "base": [1920 // scale, 1080 // scale],

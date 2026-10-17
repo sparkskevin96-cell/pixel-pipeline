@@ -925,6 +925,63 @@ wants terse answers and fixes over polish.
     means no per-unit enlarging), 64 px tile rebuilds keep 32-px-sized details (grass tufts look tiny),
     the 2x action view shows ~15 x 8 tiles (smaller sprites on screen than Kevin's old zoomed camera:
     Style.pixel_scale=3 = 640x360 if he wants them bigger).
+- **Fixes round (2026-10-17, Kevin: "work on fixes", all automatic app behaviour)**:
+  - Back views (`drawnrig.relight_view`, RELIGHT*, PIXEL_RELIGHT=0 off): every view turned >45 deg from the
+    reference is relit on its OWN colours after match_drawing: lightness lifted toward the reference's median
+    (shadows pulled up, highlights spread), the model's form shading (camera-space normals, light from the
+    viewer's upper left, blurred) + a rim on the lit edge, chroma kept but capped at the reference's p98;
+    strength by turn (0 at 45 deg, 0.8 sides, 1 back half) x how much darker than the reference the view is
+    (a side drawn as light as S is left alone). Tried and dropped: recolouring onto the reference's per-part
+    ramps (part maps are wrong on backs: steel-mottled cape). knight-2x30 (re-bent, old skeleton kept): W
+    passes, 14/16 (weak N sharp, ENE flicker of its redrawn drawing), fronts unchanged, backs read lit; the
+    cape is a little mottled/busier.
+  - dirquality recalibrated on 11 drawn characters (2x tests, QA, Neo16; scratchpad calib.py): blotch only
+    near-BLACK (L<18 AND chroma<12: the mage's purple robe was failing 6 views), HARD blotch 0.38 -> 0.22 (a
+    back drawn as one black mass fails even when all backs are), foreign with L half weight, noise metrics vs
+    the same half (N half / rest), look metrics vs views turned the same way (`side_of(d, ref)`: people's E/W
+    join the backs).
+  - 3D model checks (`modelcheck.py`, PIXEL_MODEL_CHECK=0 off): `check_picture` (cut-out alpha: thin curved
+    flyaways reaching > 0.18 H -> picture_for_model draws again, inside its PICTURE_TRIES) and `fix_shape` on
+    every Hunyuan shape before painting/rigging (voxels 128: floaters = pieces apart from / much smaller than
+    the body dropped; THIN parts (survive no opening of 0.018 H) reaching > 0.15 H from the thick body that are
+    neither straight (PCA spread < 0.22: spears, swords stay) nor hanging (< 30% of them > 0.10 H horizontally
+    from the body at or above their height: capes, robes, hems stay) are trimmed at 0.06 H from the body; a
+    flyaway > 8% of the shape (a blown-out cloak) loses only its far flare). model3d `_checked_shape`: score >
+    0.5 (mostly flyaways) -> one more shape with a new seed (SHAPE_TRIES 2), the better kept; <out>.check.json,
+    ModelResult.check. Picture prompts: COMPACT_WORDS + FLYAWAY_NEGATIVE (ribbons, sashes, floating hair,
+    windswept cape, floating objects...) unless the words ask (`flyaway_negative`, `flyaways_asked`).
+    Elf remade (GPU): first shape 54% flyaways -> second clean; 8/16 -> 15/16, side elf 0/2 -> 2/2
+    (characters elf-2x-b, elf-side-2x-b; playtests use them). Elf 28 -> 24.5 min (docs/metrics.md).
+  - Real animal sizes (library `ANIMAL_HEIGHT` / `animal_height(words, size)` / `animal_frame(rigged, words,
+    size, st)`): standing height as a share of a person (wolf 0.5, bear 0.75, horse 1.05, cat 0.17 ...; x0.75 /
+    1.3 for small / large) x PERSON_WORLD_FILL 0.76 x person_height = the model's height in px; the frame is
+    whatever holds every pose at that scale (drawnrig.framing(scale=), frame_size(kind, size, st, rigged,
+    words)). Existing drawings are RE-PLACED at a new frame/scale, no GPU (`remap_drawing`; keys.json
+    camera.drawn_at = the camera files on disk were drawn at; also the back picture). Sheet meta.px_scale
+    (library scale) is preferred by motion.px_scale (animal frame height no longer tells it). wolf-2x: body 35
+    -> 49 px, 144x68 -> 88x100 frame, 15/16.
+  - Camera (assets.pixel_grid): TILES_ACROSS topdown-rpg 12, scale = the WHOLE_SCALES (1,2,3,4,5,6,8) value
+    closest in log: action 64 px tiles x3 = 640x360 (10 x 5.6 tiles, was 15 x 8.4), 32 px x5, 16 px x8; HD-2D
+    / side / iso unchanged.
+  - 8-way facings (board.gd `_eight_table`): the 8 game yaws get 8 DIFFERENT drawings, each the nearest free one
+    to its on-screen angle (most certain first); other yaws round as before. Action selftest reports
+    facings8 (8 distinct).
+  - 64 px tiles (tilepaint `detail_scale`, `scale2x`, `fine_grain`): grass/dirt/sand/snow (+ word stamps) are
+    drawn at DETAIL_PX 32 and brought up by Scale2x (wrapping, no new colours) + a 1-px ramp grain on flat
+    parts, so tufts/pebbles/drifts are tile-sized; stone/planks/bricks/painted stones already scale.
+  - Strides (autorig `proportional_pelvis`, `heads_for`, find_skeleton(heads=), auto_rig(heads=), library
+    auto_rig_cached(words=), `rerig`, RIG_VERSION 2): a cape/robe/tunic between the legs put the "crotch" at
+    0.18-0.33 H; the hips now sit at least at H (0.58 - 0.65 / heads), heads measured in 4.5-7.5 or from the
+    words (dwarf/gnome/goblin/child -> 4) / proportions (chibi 2.5, tall 7.5). Walk stride / height: knight
+    0.39 -> 0.63, mage 0.19 -> 0.64, dwarf 0.19 -> 0.53, elf 0.23 -> 0.63 (rig); knight-2x30 sheet walk 0.37 ->
+    0.63 (rig); elf-2x-b (rigged new) sheet walk 0.22 -> 0.31 body heights. A DRAWN character must not be
+    re-rigged under its old drawings (tried on knight-2x30: S/SE changed, the sword moved, part colours
+    shifted; reverted): new characters get it, old ones on a full redraw. playtest.locomotion_copies re-rig
+    only 3D-rendered copies (mark "<frames>+rig2").
+  - Action balance (action_play.gd + playtest action.json): bites telegraphed (windup 0.4 s, a hit interrupts),
+    bite 1, cooldown 1.6 s, hero invulnerable 1.3 s + knocked clear 0.9, foes knocked 1.2 / stunned 0.6, archer
+    shots every 2.8 s; selftest hero 8/24 -> 23/24 HP.
+  - Shot: Pictures/PixelPipeline/fixes_round_ab.png. Tests: tests/test_fixes_round_ab.py.
 - The container that built this couldn't reach dl.google.com, so APKs build only in
   GitHub Actions.
 

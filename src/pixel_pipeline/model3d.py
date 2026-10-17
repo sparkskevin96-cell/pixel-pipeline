@@ -25,7 +25,10 @@ comes back with its own colours is kept as it is.
 from __future__ import annotations
 
 import io
+import json
 import logging
+import os
+import re
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +86,7 @@ class ModelResult:
     raw: Path | None       # the uncoloured shape ComfyUI returned
     seed: int | None
     views: dict = field(default_factory=dict)   # back / left / right -> picture made for it
+    check: dict = field(default_factory=dict)   # modelcheck report of the shape (floaters, ribbons)
 
 
 VIEWS = ("front", "front+back", "all")
@@ -116,12 +120,39 @@ def _house(positive: str, negative: str, subject: str, style) -> tuple[str, str]
     return with_style(positive, negative, style or project_style(), kind)
 
 
+# 2026-10-17 (the elf: Hunyuan turned flowing ribbons, a windswept cape and a bow held out into
+# huge arcs and floating pieces): people and animals are pictured compact, nothing flying off
+# the body, unless the words ask for it (a word of the term's key in the prompt drops the term).
+COMPACT_WORDS = {"person": "compact silhouette, clothes close to the body, held things close to the body",
+                 "animal": "compact silhouette"}
+FLYAWAY_NEGATIVE = (("ribbon", "flowing ribbons"), ("sash", "flying sashes"), ("streamer", "streamers"),
+                    ("hair", "floating hair, windswept hair"), ("cape", "windswept cape, flying cape"),
+                    ("fabric", "flowing fabric, flying cloth"), ("float", "floating objects, floating pieces"),
+                    ("wing", "trailing scarf"), ("bow", "bow floating behind the back"))
+
+
+def flyaway_negative(prompt: str) -> str:
+    low = (prompt or "").lower()
+    asked = set(re.findall(r"[a-z]+", low))
+    terms = [t for key, t in FLYAWAY_NEGATIVE
+             if not any(w.startswith(key) for w in asked) or key == "bow" and "bow" in asked]
+    if any(w in asked for w in ("flowing", "windswept", "billowing", "flying")):
+        terms = [t for t in terms if not any(k in t for k in ("flowing", "windswept", "flying"))]
+    return ", ".join(terms)
+
+
 def model_prompt(prompt: str, subject: str = "person", style=None) -> tuple[str, str]:
     prompt = (prompt or "").strip().rstrip(".")
     if not prompt:
         raise ValueError("Empty prompt: describe what to make.")
-    return _house(MODEL_PROMPTS.get(subject, MODEL_PROMPTS["object"]).format(prompt=prompt),
-                  MODEL_NEGATIVE, subject, style)
+    positive = MODEL_PROMPTS.get(subject, MODEL_PROMPTS["object"]).format(prompt=prompt)
+    negative = MODEL_NEGATIVE
+    if subject in COMPACT_WORDS:
+        positive = f"{positive}, {COMPACT_WORDS[subject]}"
+        extra = flyaway_negative(prompt)
+        if extra:
+            negative = f"{negative}, {extra}"
+    return _house(positive, negative, subject, style)
 
 
 PICTURE_TRIES = 3
@@ -920,7 +951,12 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
             say("cutout", "Cutting out the subject…")
             cuts[id(image)] = cut = cut_out(image, cutout_model)
             n = subject_pieces(cut[..., 3])
-            return f"{n} separate things after the cut-out" if n > 1 else None
+            if n > 1:
+                return f"{n} separate things after the cut-out"
+            if subject in COMPACT_WORDS and not flyaways_asked(prompt):
+                from .modelcheck import check_picture
+                return check_picture(cut)["bad"]   # ribbons / bows flying out: a new picture
+            return None
 
         img, used_seed = picture_for_model(prompt, subject, client=client, seed=seed, style=style,
                                            check=pieces_check,
@@ -953,10 +989,15 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
         raw_path.write_bytes(glb)
     else:
         glb = shape if isinstance(shape, bytes) else Path(shape).read_bytes()
+    check_info: dict = {}
+    if MODEL_CHECK and not has_colours(glb):
+        glb, check_info = _checked_shape(glb, rgba, prompt, subject, client, seed, shape_options,
+                                         made_here=shape is None, say=say, out=out)
 
     sides = {"left": cut_out(left, cutout_model) if left is not None else None,
              "right": cut_out(right, cutout_model) if right is not None else None}
     made: dict[str, Path] = {}
+    match = None
     if has_colours(glb):
         say("colour", "The model came with its own colours; keeping them.")
         out.write_bytes(glb)
@@ -992,7 +1033,52 @@ def prompt_to_model(prompt: str | None, out_glb, *, subject: str = "person",
         if colours is not None:
             mesh = snap_to_colours(mesh, colours)
         mesh.export(out)
-    return ModelResult(out, pic_path, raw_path, used_seed, made)
+    if check_info:
+        check_info["picture_match"] = None if match is None else round(float(match), 3)
+        out.with_suffix(".check.json").write_text(json.dumps(check_info, indent=1, default=float),
+                                                  encoding="utf-8")
+    return ModelResult(out, pic_path, raw_path, used_seed, made, check_info)
+
+
+# --------------------------------------------------------------------------- shape check
+# modelcheck.py after every Hunyuan shape: floaters dropped, flyaway ribbons / arcs trimmed; a
+# shape that is still mostly flyaways is made again from the same picture with a new seed (at
+# most SHAPE_TRIES shapes; the better is kept). PIXEL_MODEL_CHECK=0 = off.
+MODEL_CHECK = os.environ.get("PIXEL_MODEL_CHECK", "1") != "0"
+SHAPE_TRIES = 2
+SHAPE_BAD = 0.5               # modelcheck.score past this: try another shape
+
+
+def flyaways_asked(prompt: str | None) -> bool:
+    low = (prompt or "").lower()
+    return any(w in low for w in ("ribbon", "sash", "streamer", "flowing", "windswept", "floating"))
+
+
+def _checked_shape(glb: bytes, rgba, prompt, subject, client, seed, shape_options, *, made_here,
+                   say, out) -> tuple[bytes, dict]:
+    from . import modelcheck
+    tries = []
+    cur, s = glb, seed
+    for t in range(SHAPE_TRIES if made_here else 1):
+        say("check", "Checking the 3D shape (floating pieces, ribbons flying off)…")
+        fixed, rep = modelcheck.fix_shape(cur)
+        if subject not in COMPACT_WORDS or flyaways_asked(prompt):
+            fixed, rep = modelcheck.fix_shape(cur, ribbons=False)
+        sc = modelcheck.score(rep)
+        rep["score"] = round(sc, 3)
+        rep["seed"] = s
+        tries.append((sc, fixed, rep))
+        say("check", f"Shape check: {rep['floaters']} floating piece(s) dropped, "
+                     f"{rep['trimmed']:.0%} of the surface trimmed (ribbons / arcs)")
+        if sc <= SHAPE_BAD or t + 1 >= SHAPE_TRIES or not made_here:
+            break
+        s = (int(seed) if seed is not None else random.randrange(2**32)) + 101 * (t + 1)
+        say("shape", "The shape is mostly flyaways: building it again with a new seed…")
+        cur = shape_from_picture(framed_on_white(rgba), client=client, seed=s, options=shape_options)
+        out.with_suffix(f".shape{t + 2}.glb").write_bytes(cur)
+    sc, best, rep = min(tries, key=lambda x: x[0])
+    info = {"shape": rep, "tries": [r for _, _, r in tries]}
+    return best, info
 
 
 def export_for_rigging(model, out_obj) -> Path:

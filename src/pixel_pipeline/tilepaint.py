@@ -656,6 +656,73 @@ def swatch_colour(picture, terrain: str = "water") -> np.ndarray:
     return blue.mean(0) if len(blue) >= 50 else np.array([40.0, 120.0, 200.0])
 
 
+# 2026-10-17 (Kevin: tiles rebuilt at 64 px kept 32-px-sized details, tiny grass tufts): the soft
+# painters' details are designed at DETAIL_PX tiles. A bigger tile is drawn at DETAIL_PX (same
+# layout, same detail sizes relative to the tile) and brought up by a pixel-art upscaler (Scale2x:
+# no blur, no new colours, diagonals stay smooth), then a fine 1-px grain is laid over its flat
+# parts, so the ground has full-resolution texture with details the right size for the tile.
+DETAIL_PX = 32
+FINE_GRAIN = 0.06            # share of flat pixels that take a neighbouring ramp step
+
+
+def detail_scale(size: int) -> int:
+    """How many times bigger than DETAIL_PX a tile is (1 under 48 px; 64 px -> 2)."""
+    return max(1, int(round(size / DETAIL_PX))) if size >= 48 else 1
+
+
+def scale2x(a: np.ndarray) -> np.ndarray:
+    """Scale2x / EPX on any (H, W) or (H, W, C) array (equality of whole pixels): wrapping, so a
+    seamless tile stays seamless."""
+    a = np.asarray(a)
+    key = a if a.ndim == 2 else np.ascontiguousarray(a).view(
+        np.dtype((np.void, a.dtype.itemsize * a.shape[2]))).reshape(a.shape[:2])
+    B, D = np.roll(key, 1, 0), np.roll(key, 1, 1)      # above, left
+    H_, F = np.roll(key, -1, 0), np.roll(key, -1, 1)   # below, right
+    Ba, Da = np.roll(a, 1, 0), np.roll(a, 1, 1)
+    Ha, Fa = np.roll(a, -1, 0), np.roll(a, -1, 1)
+    ok = (B != H_) & (D != F)
+    pick = lambda m, src: np.where((m & ok)[..., None] if a.ndim == 3 else (m & ok), src, a)
+    e0 = pick(D == B, Da)
+    e1 = pick(B == F, Fa)
+    e2 = pick(D == H_, Da)
+    e3 = pick(H_ == F, Fa)
+    out = np.empty((a.shape[0] * 2, a.shape[1] * 2) + a.shape[2:], a.dtype)
+    out[0::2, 0::2], out[0::2, 1::2], out[1::2, 0::2], out[1::2, 1::2] = e0, e1, e2, e3
+    return out
+
+
+def upscale_detail(tex: np.ndarray, k: int) -> np.ndarray:
+    out = tex
+    while k >= 2 and k % 2 == 0:
+        out = scale2x(out)
+        k //= 2
+    if k > 1:
+        out = np.repeat(np.repeat(out, k, 0), k, 1)
+    return out
+
+
+def fine_grain(tex: np.ndarray, ramp: np.ndarray, seed: int, share: float = FINE_GRAIN) -> np.ndarray:
+    """Single ramp steps sprinkled over the FLAT parts of an upscaled tile (a pixel and its 4
+    neighbours the same ramp colour), lighter on the upper-left side of nothing in particular:
+    the 1-px texture a tile drawn at full size has."""
+    t = tex.shape[0]
+    rgb = tex[..., :3]
+    ramp = np.asarray(ramp, np.uint8)
+    hit = (rgb[:, :, None, :] == ramp[None, None]).all(-1)
+    idx = np.where(hit.any(-1), hit.argmax(-1), -1)
+    flat = idx >= 0
+    for ax, sh in ((0, 1), (0, -1), (1, 1), (1, -1)):
+        flat &= np.roll(idx, sh, ax) == idx
+    rng = _rng("grain", t, seed)
+    r = rng.random((t, t))
+    up = flat & (r < share / 2) & (idx < len(ramp) - 1)
+    down = flat & (r > 1 - share / 2) & (idx > 0)
+    out = tex.copy()
+    out[up, :3] = ramp[idx[up] + 1]
+    out[down, :3] = ramp[idx[down] - 1]
+    return out
+
+
 def drawn_tile(terrain: str, size: int, seed: int = 0, picture=None,
                palette: np.ndarray | None = None, ramp: np.ndarray | None = None,
                words: str = "") -> np.ndarray:
@@ -678,10 +745,16 @@ def drawn_tile(terrain: str, size: int, seed: int = 0, picture=None,
         if ramp is None:
             ramp = drawn_ramp(terrain, picture)
         ramp = np.asarray(ramp)
-        idx = fn(size, seed, d) if not d.plain() else fn(size, seed)
+        k = detail_scale(size) if terrain in ("grass", "dirt", "sand", "snow") else 1
+        if size % k:
+            k = 1
+        small = size // k
+        idx = fn(small, seed, d) if not d.plain() else fn(small, seed)
         tex = _colour(ramp, idx)
         if not d.plain():
             tex = stamp_details(tex, np.clip(idx, 0, len(ramp) - 1), terrain, d, seed, ramp)
+        if k > 1:                       # details the right size for a big tile (DETAIL_PX)
+            tex = fine_grain(upscale_detail(tex, k), ramp, seed)
     if palette is not None and len(palette):
         from .cards import snap_image
         tex = snap_image(tex, palette)
