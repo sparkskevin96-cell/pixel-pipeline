@@ -162,3 +162,20 @@ def test_start_blob_shape_colour_and_plumbing(monkeypatch):
     monkeypatch.setenv(sc.CHECK_ENV, "0")                            # off = plain txt2img
     sc.generate_single("apple", count=1, seed=1, init="object")
     assert "init_image" not in calls[0][2]
+
+
+def test_shape_for_takes_the_thing_named_first():
+    from pixel_pipeline.subjectcheck import shape_for
+    assert shape_for("an old wooden boat with a lantern on the bow") == "flat"
+    assert shape_for("a longbow") == "object"          # whole words only
+    assert shape_for("an elven bow") == "weapon"
+    assert shape_for("a potion bottle on a table") == "bottle"
+
+
+def test_space_backgrounds_have_no_landscape():
+    from pixel_pipeline.backgrounds import background_prompt, sky_only
+    assert sky_only("deep outer space with falling stars") and not sky_only("pine forest")
+    pos, neg = background_prompt("deep outer space, nebula", "night")
+    assert "landscape" not in pos.split("deep outer space")[1].split(",")[1] and "mountains" in neg
+    pos, _ = background_prompt("pine forest", "night")
+    assert "landscape" in pos

@@ -536,8 +536,25 @@ def background_prompt(words: str, tod: str, style=None) -> tuple[str, str]:
           "sunset": "at sunset, orange and purple sky", "night": "at night, moonlit, dark blue sky"}[tod]
     pos = f"{words}, wide side-scroller parallax background landscape, {tw}, layered distant scenery"
     neg = "characters, people, text, ui, border, frame, close-up"
+    if sky_only(words):         # space / open sky: no landscape words, no ground drawn
+        # "parallax background" alone drew top-down game rooms (Pixel Art XL's bias)
+        pos = (f"{words}, vast open sky panorama, glowing nebula clouds, layers of stars at different "
+               "depths, wide cinematic backdrop, side view")
+        neg = (f"{neg}, ground, landscape, mountains, trees, hills, path, grass, horizon, room, interior, "
+               "floor, top-down, map, buildings, furniture, game screen, planet, moon, sun, globe, water, sea, ocean, reflection, shore")
     from .assets import with_style
     return with_style(pos, neg, style if style is not None else None, "tile")
+
+
+SKY_ONLY = ("outer space", "deep space", "in space", "space", "nebula", "starfield", "galaxy", "cosmos",
+            "only sky", "open sky", "sky only", "clouds only")
+
+
+def sky_only(words: str) -> bool:
+    """Words for a background with no ground at all (space, open sky)."""
+    import re
+    w = (words or "").lower()
+    return any(re.search(rf"\b{re.escape(k)}\b", w) for k in SKY_ONLY)
 
 
 def background_from_prompt(words: str, tod: str = "sunset", *, width: int = 480, height: int = 270,

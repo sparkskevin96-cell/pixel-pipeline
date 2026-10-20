@@ -341,7 +341,8 @@ _SHAPE_WORDS = (   # first match wins (the words of the request)
                   "fort", "shed", "stable", "tent")),
     ("tall", ("tower", "tree", "oak", "pine", "willow", "birch", "palm", "lamp", "lantern",
               "statue", "totem", "pillar", "column", "obelisk", "signpost", "banner", "door")),
-    ("flat", ("cart", "wagon", "bench", "table", "bed", "boat", "fence", "log", "sofa", "rug")),
+    ("flat", ("cart", "wagon", "bench", "table", "bed", "boat", "rowboat", "ship", "canoe",
+              "raft", "fence", "log", "sofa", "rug")),
 )
 
 
@@ -350,10 +351,13 @@ def shape_for(text: str, kind: str = "object") -> str:
     if kind in ("person", "animal"):
         return kind
     t = (text or "").lower()
-    for shape, words in _SHAPE_WORDS:
-        if any(re.search(rf"\b{w}s?\b", t) for w in words):
-            return shape
-    return "object"
+    best = None                    # the thing named FIRST is the subject ("a boat with a lantern
+    for shape, words in _SHAPE_WORDS:          # on the bow" is a boat, not a bow)
+        for w in words:
+            m = re.search(rf"\b{w}s?\b", t)
+            if m and (best is None or m.start() < best[0]):
+                best = (m.start(), shape)
+    return best[1] if best else "object"
 
 
 # a grey start blob greyed the pictures (2026-10-15: a red apple came out white-green, a wooden
